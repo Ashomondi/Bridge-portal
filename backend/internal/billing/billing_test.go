@@ -375,3 +375,233 @@ func TestStudentChargeHookOnAdmit(t *testing.T) {
 		t.Errorf("expected charge 42000, got %f", charges[0].Amount)
 	}
 }
+
+func TestSTKPushValidationAnd24hChatLock(t *testing.T) {
+	svc, store, _, _ := setupTestBillingService()
+	ctx := context.Background()
+	schoolID := "school-1"
+	studentID := "student-stk-1"
+	guardianUserID := "guardian-user-1"
+	guardianPhone := "+254712345678"
+
+	store.Students[schoolID+":"+studentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentID, Admission: "IKX/STK/001", Name: "Zawadi Akinyi", GradeID: "g-7", YearID: "2026",
+	}
+	store.Guardians[schoolID+":"+studentID] = []string{guardianUserID}
+
+	guardianCtx := WithIdentity(ctx, Identity{
+		UserID:   guardianUserID,
+		SchoolID: schoolID,
+		Role:     RoleParent,
+	})
+
+	// 1. Non-positive amount rejected
+	_, err := svc.InitiateSTKPush(guardianCtx, STKPushRequest{
+		SchoolID:    schoolID,
+		StudentID:   studentID,
+		Amount:      0,
+		PhoneNumber: guardianPhone,
+	})
+	if err == nil {
+		t.Fatalf("expected error for zero amount, got nil")
+	}
+
+	// 2. Chat source without explicit parent confirmation rejected (AC-23)
+	_, err = svc.InitiateSTKPush(guardianCtx, STKPushRequest{
+		SchoolID:        schoolID,
+		StudentID:       studentID,
+		Amount:          5000,
+		PhoneNumber:     guardianPhone,
+		Source:          "chat",
+		ParentConfirmed: false,
+	})
+	if err == nil || !strings.Contains(err.Error(), CodeParentConfirmationReq) {
+		t.Fatalf("expected error code %s, got %v", CodeParentConfirmationReq, err)
+	}
+
+	// 3. 24-Hour Phone Change Freeze (C27, AC-26)
+	// Set chat payment paused until 12 hours from now
+	pauseUntil := time.Now().Add(12 * time.Hour)
+	_ = store.SetUserChatPaymentPausedUntil(ctx, guardianUserID, pauseUntil)
+
+	// Chat payment must be blocked with 403 CHAT_PAYMENT_PAUSED_PHONE_CHANGE
+	_, err = svc.InitiateSTKPush(guardianCtx, STKPushRequest{
+		SchoolID:        schoolID,
+		StudentID:       studentID,
+		Amount:          5000,
+		PhoneNumber:     guardianPhone,
+		Source:          "chat",
+		ParentConfirmed: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), CodeChatPaymentPaused) {
+		t.Fatalf("expected 403 %s, got %v", CodeChatPaymentPaused, err)
+	}
+
+	// 4. Portal payment during chat lock is ALLOWED (portal not affected by chat freeze)
+	resp, err := svc.InitiateSTKPush(guardianCtx, STKPushRequest{
+		SchoolID:    schoolID,
+		StudentID:   studentID,
+		Amount:      5000,
+		PhoneNumber: guardianPhone,
+		Source:      "portal",
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("portal payment failed during chat lock: %v", err)
+	}
+	if resp.CheckoutRequestID == "" {
+		t.Errorf("expected non-empty checkout request ID")
+	}
+}
+
+func TestC2BAutoMatchingAndOverpaymentCredit(t *testing.T) {
+	svc, store, notifier, _ := setupTestBillingService()
+	ctx := context.Background()
+	schoolID := "school-1"
+	studentID := "student-c2b-1"
+	guardianID := "guardian-c2b-user"
+	shortcode := "600100"
+	admissionNum := "IKX/2026/088"
+
+	_ = store.SaveSchoolMpesaConfig(ctx, &SchoolMpesaConfig{
+		SchoolID:  schoolID,
+		Shortcode: shortcode,
+	})
+
+	store.Students[schoolID+":"+studentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentID, Admission: admissionNum, Name: "Baraka Mwangi", GradeID: "g-7", YearID: "2026",
+	}
+	store.StudentsByAdmin[schoolID+":"+strings.ToUpper(admissionNum)] = studentID
+	store.Guardians[schoolID+":"+studentID] = []string{guardianID}
+
+	// Initial ledger: Billed 20,000, Paid 0, CurrentBalance = 20,000
+	_ = store.SaveFeeLedger(ctx, &FeeLedger{
+		SchoolID:       schoolID,
+		StudentID:      studentID,
+		AcademicYearID: "2026",
+		TermID:         "term-1",
+		BilledAmount:   20000,
+		CurrentBalance: 20000,
+		CreditBalance:  0,
+	})
+
+	// Direct Paybill C2B payment with OVERPAYMENT of 25,000 (AC-24, AC-25)
+	payload := C2BConfirmationPayload{
+		TransactionType:   "Pay Bill",
+		TransID:           "QKH9876543",
+		TransTime:         "20261107220000",
+		TransAmount:       "25000.00",
+		BusinessShortCode: shortcode,
+		BillRefNumber:     "  ikx/2026/088  ", // Case-insensitive and trimmed match
+		MSISDN:            "254722000111",
+		FirstName:         "Mwangi",
+	}
+
+	payment, err := svc.HandleC2BConfirmation(ctx, payload)
+	if err != nil {
+		t.Fatalf("HandleC2BConfirmation failed: %v", err)
+	}
+	if payment.MatchedStatus != "matched" {
+		t.Errorf("expected matched status, got %s", payment.MatchedStatus)
+	}
+	if payment.StudentID == nil || *payment.StudentID != studentID {
+		t.Errorf("expected student ID %s, got %v", studentID, payment.StudentID)
+	}
+
+	// Verify FeeLedger overpayment: CurrentBalance = 0, CreditBalance = 5,000 (AC-24)
+	ledger, _ := store.GetLatestFeeLedger(ctx, schoolID, studentID)
+	if ledger.CurrentBalance != 0 {
+		t.Errorf("expected current balance 0 after full payment, got %f", ledger.CurrentBalance)
+	}
+	if ledger.CreditBalance != 5000 {
+		t.Errorf("expected credit balance 5000 from overpayment, got %f", ledger.CreditBalance)
+	}
+	if ledger.PaidAmount != 25000 {
+		t.Errorf("expected paid amount 25000, got %f", ledger.PaidAmount)
+	}
+
+	// Verify payment receipt notification sent to guardian
+	if len(notifier.notifications) == 0 || notifier.notifications[0].RecipientUserID != guardianID {
+		t.Errorf("expected payment receipt notification sent to guardian %s", guardianID)
+	}
+}
+
+func TestC2BUnmatchedQueueAndManualMatch(t *testing.T) {
+	svc, store, _, auditLogger := setupTestBillingService()
+	ctx := context.Background()
+	schoolID := "school-1"
+	shortcode := "600100"
+
+	_ = store.SaveSchoolMpesaConfig(ctx, &SchoolMpesaConfig{
+		SchoolID:  schoolID,
+		Shortcode: shortcode,
+	})
+
+	// C2B payment with unknown admission number (C50, AC-25)
+	payload := C2BConfirmationPayload{
+		TransactionType:   "Pay Bill",
+		TransID:           "XYZ1234567",
+		TransTime:         "20261107223000",
+		TransAmount:       "12000.00",
+		BusinessShortCode: shortcode,
+		BillRefNumber:     "UNKNOWN/NO/999",
+		MSISDN:            "254711999888",
+		FirstName:         "Unknown Payer",
+	}
+
+	payment, err := svc.HandleC2BConfirmation(ctx, payload)
+	if err != nil {
+		t.Fatalf("HandleC2BConfirmation failed: %v", err)
+	}
+	if payment.MatchedStatus != "unmatched" {
+		t.Errorf("expected unmatched status, got %s", payment.MatchedStatus)
+	}
+
+	// Verify payment queued in unmatched_payments
+	unmatchedList, err := svc.ListUnmatchedPayments(ctx, schoolID)
+	if err != nil || len(unmatchedList) != 1 {
+		t.Fatalf("expected 1 unmatched payment, got %v", unmatchedList)
+	}
+	if unmatchedList[0].RawAccountRef != "UNKNOWN/NO/999" {
+		t.Errorf("expected raw account ref UNKNOWN/NO/999, got %s", unmatchedList[0].RawAccountRef)
+	}
+
+	// Now simulate Ikonex team / bursar manually resolving the payment (AC-25)
+	targetStudentID := "student-resolved-1"
+	store.Students[schoolID+":"+targetStudentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: targetStudentID, Admission: "IKX/RESOLVED/001", Name: "Resolved Student", GradeID: "g-7", YearID: "2026",
+	}
+	_ = store.SaveFeeLedger(ctx, &FeeLedger{
+		SchoolID:       schoolID,
+		StudentID:      targetStudentID,
+		AcademicYearID: "2026",
+		TermID:         "term-1",
+		BilledAmount:   12000,
+		CurrentBalance: 12000,
+	})
+
+	matchedPayment, err := svc.MatchUnmatchedPayment(ctx, schoolID, payment.ID, targetStudentID, "Parent confirmed typo in admission number via receipt", "bursar-user-1")
+	if err != nil {
+		t.Fatalf("MatchUnmatchedPayment failed: %v", err)
+	}
+	if matchedPayment.MatchedStatus != "matched" {
+		t.Errorf("expected matched status, got %s", matchedPayment.MatchedStatus)
+	}
+
+	// Verify target student's ledger credited
+	targetLedger, _ := store.GetLatestFeeLedger(ctx, schoolID, targetStudentID)
+	if targetLedger.CurrentBalance != 0 || targetLedger.PaidAmount != 12000 {
+		t.Errorf("expected balance 0, paid 12000; got bal=%f, paid=%f", targetLedger.CurrentBalance, targetLedger.PaidAmount)
+	}
+
+	// Verify audit log recorded
+	foundAudit := false
+	for _, a := range auditLogger.actions {
+		if a == "payment.manual_matched" {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Errorf("expected audit action payment.manual_matched")
+	}
+}
