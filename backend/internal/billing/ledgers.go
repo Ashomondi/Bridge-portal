@@ -1,0 +1,159 @@
+package billing
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// GetStudentFeeBalance returns the student's balance sheet, enforcing guardian ownership (C10, AC-24).
+func (s *Service) GetStudentFeeBalance(ctx context.Context, schoolID, studentID, callerUserID, callerRole string) (*StudentBalance, error) {
+	if schoolID == "" || studentID == "" {
+		return nil, errValidation("school_id and student_id are required")
+	}
+
+	// Permission check (C10): Linked guardian OR authorized school/ikonex staff
+	if callerRole == RoleParent {
+		isGuardian, err := s.store.IsGuardianOf(ctx, schoolID, studentID, callerUserID)
+		if err != nil || !isGuardian {
+			return nil, errForbidden("parent is not a registered guardian of this student")
+		}
+	} else if callerRole != RoleIkonexAdmin && callerRole != RoleBursar && callerRole != RolePrincipal && callerRole != RoleDeputy {
+		return nil, errForbidden("caller is not authorized to view student fee balance")
+	}
+
+	_, adminNum, fullName, err := s.store.GetStudent(ctx, schoolID, studentID)
+	if err != nil {
+		return nil, errNotFound("student not found in this school")
+	}
+
+	ledger, err := s.store.GetLatestFeeLedger(ctx, schoolID, studentID)
+	if err != nil {
+		// If no charges or ledger exists yet, return zero balances
+		return &StudentBalance{
+			StudentID:       studentID,
+			AdmissionNumber: adminNum,
+			FullName:        fullName,
+			OpeningBalance:  0,
+			BilledAmount:    0,
+			PaidAmount:      0,
+			CurrentBalance:  0,
+			CreditBalance:   0,
+			DueDate:         time.Now(),
+			Items:           []FeeStructureItem{},
+			Notes:           []FeeChangeNote{},
+		}, nil
+	}
+
+	// Fetch fee structure items for current term
+	var items []FeeStructureItem
+	charges, _ := s.store.ListFeeChargesForStudent(ctx, schoolID, studentID)
+	if len(charges) > 0 {
+		latestCharge := charges[len(charges)-1]
+		items, _ = s.store.ListFeeStructureItems(ctx, latestCharge.FeeStructureID)
+	}
+
+	// Fetch fee change notes for school/term
+	notes, _ := s.store.ListFeeChangeNotes(ctx, schoolID, ledger.TermID)
+
+	return &StudentBalance{
+		StudentID:       studentID,
+		AdmissionNumber: adminNum,
+		FullName:        fullName,
+		OpeningBalance:  ledger.OpeningBalance,
+		BilledAmount:    ledger.BilledAmount,
+		PaidAmount:      ledger.PaidAmount,
+		CurrentBalance:  ledger.CurrentBalance,
+		CreditBalance:   ledger.CreditBalance,
+		DueDate:         ledger.DueDate,
+		Items:           items,
+		Notes:           notes,
+	}, nil
+}
+
+// GetStudentLedger returns double-entry ledger entries for student (C10, AC-24).
+func (s *Service) GetStudentLedger(ctx context.Context, schoolID, studentID, callerUserID, callerRole string) ([]LedgerEntry, error) {
+	if schoolID == "" || studentID == "" {
+		return nil, errValidation("school_id and student_id are required")
+	}
+
+	if callerRole == RoleParent {
+		isGuardian, err := s.store.IsGuardianOf(ctx, schoolID, studentID, callerUserID)
+		if err != nil || !isGuardian {
+			return nil, errForbidden("parent is not a registered guardian of this student")
+		}
+	} else if callerRole != RoleIkonexAdmin && callerRole != RoleBursar && callerRole != RolePrincipal && callerRole != RoleDeputy {
+		return nil, errForbidden("caller is not authorized to view student ledger")
+	}
+
+	_, _, _, err := s.store.GetStudent(ctx, schoolID, studentID)
+	if err != nil {
+		return nil, errNotFound("student not found in this school")
+	}
+
+	return s.store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+}
+
+// HTTP Handlers
+
+func (s *Service) handleStudentFeeBalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, &APIError{Status: http.StatusMethodNotAllowed, Code: "METHOD_NOT_ALLOWED", Message: "method not allowed"})
+		return
+	}
+
+	id, ok := IdentityFromContext(r.Context())
+	if !ok {
+		respondError(w, &APIError{Status: http.StatusUnauthorized, Code: CodeUnauthenticated, Message: "authentication required"})
+		return
+	}
+
+	studentID := extractPathID(r.URL.Path, "/api/v1/students/", "/fee-balance")
+	if studentID == "" {
+		respondError(w, errValidation("student ID required in path"))
+		return
+	}
+
+	balance, err := s.GetStudentFeeBalance(r.Context(), id.SchoolID, studentID, id.UserID, id.Role)
+	if err != nil {
+		respondError(w, err)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, balance)
+}
+
+func (s *Service) handleStudentLedger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, &APIError{Status: http.StatusMethodNotAllowed, Code: "METHOD_NOT_ALLOWED", Message: "method not allowed"})
+		return
+	}
+
+	id, ok := IdentityFromContext(r.Context())
+	if !ok {
+		respondError(w, &APIError{Status: http.StatusUnauthorized, Code: CodeUnauthenticated, Message: "authentication required"})
+		return
+	}
+
+	studentID := extractPathID(r.URL.Path, "/api/v1/students/", "/ledger")
+	if studentID == "" {
+		respondError(w, errValidation("student ID required in path"))
+		return
+	}
+
+	entries, err := s.GetStudentLedger(r.Context(), id.SchoolID, studentID, id.UserID, id.Role)
+	if err != nil {
+		respondError(w, err)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, entries)
+}
+
+func extractPathID(path, prefix, suffix string) string {
+	clean := strings.TrimPrefix(path, prefix)
+	clean = strings.TrimSuffix(clean, suffix)
+	clean = strings.Trim(clean, "/")
+	return clean
+}
