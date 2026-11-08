@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -39,11 +41,51 @@ func (m *mockAuditLogger) LogAction(ctx context.Context, schoolID, userID, actio
 	return nil
 }
 
+type mockDarajaClient struct {
+	initiateFunc func(ctx context.Context, cfg *SchoolMpesaConfig, params STKInitiateParams) (*DarajaSTKResponse, error)
+	queryFunc    func(ctx context.Context, cfg *SchoolMpesaConfig, checkoutRequestID string) (*DarajaQueryResponse, error)
+}
+
+func (m *mockDarajaClient) InitiateSTKPush(ctx context.Context, cfg *SchoolMpesaConfig, params STKInitiateParams) (*DarajaSTKResponse, error) {
+	if m.initiateFunc != nil {
+		return m.initiateFunc(ctx, cfg, params)
+	}
+	return &DarajaSTKResponse{
+		MerchantRequestID:   "mock-merchant-req-1",
+		CheckoutRequestID:   "ws_CO_MOCK_12345",
+		ResponseCode:        "0",
+		ResponseDescription: "Success. Request accepted for processing",
+		CustomerMessage:     "Success",
+	}, nil
+}
+
+func (m *mockDarajaClient) QuerySTKStatus(ctx context.Context, cfg *SchoolMpesaConfig, checkoutRequestID string) (*DarajaQueryResponse, error) {
+	if m.queryFunc != nil {
+		return m.queryFunc(ctx, cfg, checkoutRequestID)
+	}
+	return &DarajaQueryResponse{
+		ResponseCode: "0",
+		ResultCode:   "0",
+		ResultDesc:   "The service request is processed successfully.",
+	}, nil
+}
+
+type mockAsynqEnqueuer struct {
+	polls []string
+}
+
+func (m *mockAsynqEnqueuer) EnqueueSTKPoll(ctx context.Context, schoolID, checkoutRequestID string, delay time.Duration) error {
+	m.polls = append(m.polls, schoolID+":"+checkoutRequestID)
+	return nil
+}
+
 func setupTestBillingService() (*Service, *MemoryStore, *mockNotifier, *mockAuditLogger) {
 	store := NewMemoryStore()
 	notifier := &mockNotifier{}
 	auditLogger := &mockAuditLogger{}
-	svc := NewService(store, notifier, auditLogger, nil)
+	enqueuer := &mockAsynqEnqueuer{}
+	svc := NewService(store, notifier, auditLogger, enqueuer)
+	svc.SetDarajaClient(&mockDarajaClient{})
 	return svc, store, notifier, auditLogger
 }
 
@@ -260,6 +302,7 @@ func TestTermStartDateShiftHook(t *testing.T) {
 	newDate := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
 
 	_ = store.CreateFeePeriod(ctx, &FeePeriod{
+		ID:             "period-1",
 		SchoolID:       schoolID,
 		AcademicYearID: "2026",
 		TermID:         termID,
@@ -271,6 +314,10 @@ func TestTermStartDateShiftHook(t *testing.T) {
 		FeePeriodID: "period-1",
 		DueDate:     oldDate,
 	})
+	store.Students[schoolID+":student-1"] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: "student-1", Admission: "ADM001", Name: "Student One", GradeID: "g-7", YearID: "2026",
+	}
+	store.Guardians[schoolID+":student-1"] = []string{"guardian-user-1"}
 
 	err := svc.OnTermStartDateChanged(ctx, schoolID, termID, newDate, "dean-user-1", "Ministry election delay")
 	if err != nil {
@@ -383,6 +430,11 @@ func TestSTKPushValidationAnd24hChatLock(t *testing.T) {
 	studentID := "student-stk-1"
 	guardianUserID := "guardian-user-1"
 	guardianPhone := "+254712345678"
+
+	_ = store.SaveSchoolMpesaConfig(ctx, &SchoolMpesaConfig{
+		SchoolID:  schoolID,
+		Shortcode: "600100",
+	})
 
 	store.Students[schoolID+":"+studentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
 		ID: studentID, Admission: "IKX/STK/001", Name: "Zawadi Akinyi", GradeID: "g-7", YearID: "2026",
@@ -798,5 +850,232 @@ func TestC2BFailsClosedOnUnknownOrCrossTenantShortcode(t *testing.T) {
 	}
 	if p.MatchedStatus != "unmatched" || p.StudentID != nil {
 		t.Errorf("cross-tenant leak: School 2 shortcode matched School 1 student: %+v", p)
+	}
+}
+
+func TestSTKCallbackIdempotencyAndFailureHandling(t *testing.T) {
+	svc, store, notifier, _ := setupTestBillingService()
+	ctx := context.Background()
+	schoolID := "school-1"
+	studentID := "student-stk-cb"
+	guardianUserID := "guardian-stk-user"
+	checkoutID := "ws_CO_TEST_IDEMPOTENCY_001"
+
+	store.Students[schoolID+":"+studentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentID, Admission: "IKX/CB/001", Name: "Callback Student", GradeID: "g-7", YearID: "2026",
+	}
+	store.Guardians[schoolID+":"+studentID] = []string{guardianUserID}
+
+	// Create pending payment
+	_ = store.CreatePayment(ctx, &Payment{
+		SchoolID:       schoolID,
+		StudentID:      &studentID,
+		TransactionRef: checkoutID,
+		Provider:       "mpesa_stk",
+		Amount:         5000,
+		MatchedStatus:  "pending",
+	})
+
+	// 1. Unknown CheckoutRequestID returns error
+	unknownPayload := STKCallbackPayload{}
+	unknownPayload.Body.StkCallback.CheckoutRequestID = "UNKNOWN_CHECKOUT_ID"
+	unknownPayload.Body.StkCallback.ResultCode = 0
+	err := svc.HandleSTKCallback(ctx, unknownPayload)
+	if err == nil {
+		t.Fatalf("expected error for unknown checkout request id, got nil")
+	}
+
+	// 2. Successful callback updates payment to matched, credits ledger, dispatches notification
+	successPayload := STKCallbackPayload{}
+	successPayload.Body.StkCallback.CheckoutRequestID = checkoutID
+	successPayload.Body.StkCallback.ResultCode = 0
+	successPayload.Body.StkCallback.ResultDesc = "The service request is processed successfully."
+	successPayload.Body.StkCallback.CallbackMetadata = &struct {
+		Item []struct {
+			Name  string      `json:"Name"`
+			Value interface{} `json:"Value"`
+		} `json:"Item"`
+	}{
+		Item: []struct {
+			Name  string      `json:"Name"`
+			Value interface{} `json:"Value"`
+		}{
+			{Name: "Amount", Value: float64(5000)},
+			{Name: "MpesaReceiptNumber", Value: "QEH1234567"},
+			{Name: "PhoneNumber", Value: float64(254712345678)},
+		},
+	}
+
+	err = svc.HandleSTKCallback(ctx, successPayload)
+	if err != nil {
+		t.Fatalf("HandleSTKCallback failed: %v", err)
+	}
+	p, _ := store.GetPaymentByCheckoutID(ctx, checkoutID)
+	if p == nil || p.MatchedStatus != "matched" {
+		t.Errorf("expected matched payment, got %v", p)
+	}
+	if len(notifier.notifications) != 1 {
+		t.Errorf("expected 1 notification dispatched, got %d", len(notifier.notifications))
+	}
+	entries, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(entries) != 1 || entries[0].Amount != 5000 {
+		t.Errorf("expected 1 ledger entry of 5000, got %v", entries)
+	}
+
+	// 3. Duplicate callback with the SAME checkout ID must be idempotent (no duplicate ledger entries, no duplicate notifications)
+	err = svc.HandleSTKCallback(ctx, successPayload)
+	if err != nil {
+		t.Fatalf("duplicate HandleSTKCallback failed: %v", err)
+	}
+	pDup, _ := store.GetPaymentByCheckoutID(ctx, checkoutID)
+	if pDup == nil || pDup.MatchedStatus != "matched" {
+		t.Errorf("expected matched payment, got %v", pDup)
+	}
+	if len(notifier.notifications) != 1 {
+		t.Errorf("duplicate callback created duplicate notification: %d", len(notifier.notifications))
+	}
+	entriesAfter, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(entriesAfter) != 1 {
+		t.Errorf("duplicate callback created duplicate ledger entry: %d entries", len(entriesAfter))
+	}
+
+	// 4. Cancelled/Failed callback (ResultCode != 0) marks payment as failed without crediting ledger
+	checkoutFailedID := "ws_CO_TEST_CANCELLED_002"
+	_ = store.CreatePayment(ctx, &Payment{
+		SchoolID:       schoolID,
+		StudentID:      &studentID,
+		TransactionRef: checkoutFailedID,
+		Provider:       "mpesa_stk",
+		Amount:         3000,
+		MatchedStatus:  "pending",
+	})
+
+	failedPayload := STKCallbackPayload{}
+	failedPayload.Body.StkCallback.CheckoutRequestID = checkoutFailedID
+	failedPayload.Body.StkCallback.ResultCode = 1032
+	failedPayload.Body.StkCallback.ResultDesc = "Request cancelled by user."
+
+	err = svc.HandleSTKCallback(ctx, failedPayload)
+	if err != nil {
+		t.Fatalf("HandleSTKCallback failed: %v", err)
+	}
+	pFailed, _ := store.GetPaymentByCheckoutID(ctx, checkoutFailedID)
+	if pFailed == nil || pFailed.MatchedStatus != "failed" {
+		t.Errorf("expected failed status, got %v", pFailed)
+	}
+	entriesAfterFailed, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(entriesAfterFailed) != 1 {
+		t.Errorf("failed callback incorrectly created ledger entry")
+	}
+}
+
+func TestManualMatchDuplicateResolutionPrevented(t *testing.T) {
+	svc, store, _, _ := setupTestBillingService()
+	ctx := context.Background()
+	schoolID := "school-1"
+	studentID := "student-resolve-1"
+	adminUser := "bursar-1"
+	paymentID := "pay-unmatched-1"
+
+	store.Students[schoolID+":"+studentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentID, Admission: "IKX/RES/001", Name: "Resolve Student", GradeID: "g-7", YearID: "2026",
+	}
+
+	_ = store.CreatePayment(ctx, &Payment{
+		ID:             paymentID,
+		SchoolID:       schoolID,
+		TransactionRef: "TX_MANUAL_MATCH_1",
+		Provider:       "mpesa_c2b",
+		Amount:         6000,
+		MatchedStatus:  "unmatched",
+	})
+	_ = store.CreateUnmatchedPayment(ctx, &UnmatchedPayment{
+		ID:             "unm-1",
+		SchoolID:       schoolID,
+		PaymentID:      paymentID,
+		TransactionRef: "TX_MANUAL_MATCH_1",
+		Amount:         6000,
+		Status:         "unmatched",
+	})
+
+	// First manual resolution must succeed (C25, AC-25)
+	p1, err := svc.MatchUnmatchedPayment(ctx, schoolID, "unm-1", studentID, "Parent provided bank slip", adminUser)
+	if err != nil {
+		t.Fatalf("MatchUnmatchedPayment failed: %v", err)
+	}
+	if p1.MatchedStatus != "matched" {
+		t.Errorf("expected matched payment, got %s", p1.MatchedStatus)
+	}
+	entries, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(entries) != 1 || entries[0].Amount != 6000 {
+		t.Errorf("expected 1 ledger entry credited, got %v", entries)
+	}
+
+	// Repeated manual match resolution MUST fail with 409 Conflict: PAYMENT_ALREADY_RESOLVED (AC-25)
+	_, err = svc.MatchUnmatchedPayment(ctx, schoolID, "unm-1", studentID, "Duplicate resolution attempt", adminUser)
+	if err == nil {
+		t.Fatalf("expected 409 conflict on duplicate resolution, got nil")
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.Status != http.StatusConflict || apiErr.Code != "PAYMENT_ALREADY_RESOLVED" {
+			t.Errorf("expected 409 Conflict PAYMENT_ALREADY_RESOLVED, got %d %s", apiErr.Status, apiErr.Code)
+		}
+	} else {
+		t.Errorf("expected APIError, got %v", err)
+	}
+
+	// Verify no double ledger credit
+	entries2, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(entries2) != 1 {
+		t.Errorf("SECURITY FAULT: duplicate resolution credited ledger a second time: %d entries", len(entries2))
+	}
+}
+
+func TestTermStartDateShiftNotifiesOnlyGuardiansNotAdmin(t *testing.T) {
+	svc, store, notifier, _ := setupTestBillingService()
+	ctx := context.Background()
+	schoolID := "school-1"
+	termID := "term-shift-test"
+	deanUserID := "dean-user-999"
+	guardian1ID := "guardian-user-11"
+	guardian2ID := "guardian-user-22"
+
+	newDate := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	_ = store.CreateFeePeriod(ctx, &FeePeriod{
+		ID:             "period-shift-1",
+		SchoolID:       schoolID,
+		AcademicYearID: "2026",
+		TermID:         termID,
+		DueDate:        time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC),
+	})
+	_ = store.CreateFeeCharge(ctx, &FeeCharge{
+		SchoolID:    schoolID,
+		StudentID:   "student-shift-1",
+		FeePeriodID: "period-shift-1",
+		DueDate:     time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC),
+	})
+
+	store.Students[schoolID+":student-shift-1"] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: "student-shift-1", Admission: "IKX/SHIFT/001", Name: "Shift Student", GradeID: "g-7", YearID: "2026",
+	}
+	store.Guardians[schoolID+":student-shift-1"] = []string{guardian1ID, guardian2ID}
+
+	err := svc.OnTermStartDateChanged(ctx, schoolID, termID, newDate, deanUserID, "Election adjustment")
+	if err != nil {
+		t.Fatalf("OnTermStartDateChanged failed: %v", err)
+	}
+
+	if len(notifier.notifications) != 2 {
+		t.Fatalf("expected 2 notifications dispatched (to 2 guardians), got %d", len(notifier.notifications))
+	}
+	for _, n := range notifier.notifications {
+		if n.RecipientUserID == deanUserID {
+			t.Errorf("BUG: acting dean %s was sent a student term-date shift notification", deanUserID)
+		}
+		if n.RecipientUserID != guardian1ID && n.RecipientUserID != guardian2ID {
+			t.Errorf("unexpected notification recipient: %s", n.RecipientUserID)
+		}
 	}
 }

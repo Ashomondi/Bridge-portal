@@ -26,13 +26,22 @@ type ContextSigner struct {
 	SecretKey []byte
 }
 
-func NewContextSigner(secretKey string) *ContextSigner {
-	if secretKey == "" {
-		secretKey = "default-ikonex-internal-hmac-secret-change-in-prod"
+func NewContextSigner(secretKey string) (*ContextSigner, error) {
+	if len(strings.TrimSpace(secretKey)) < 16 {
+		return nil, errors.New("context_signer: secretKey must be at least 16 characters and non-empty")
 	}
 	return &ContextSigner{
 		SecretKey: []byte(secretKey),
+	}, nil
+}
+
+// MustNewContextSigner constructs a ContextSigner or panics if secret is invalid
+func MustNewContextSigner(secretKey string) *ContextSigner {
+	cs, err := NewContextSigner(secretKey)
+	if err != nil {
+		panic(err)
 	}
+	return cs
 }
 
 // Sign serializes and generates an HMAC signature: base64(payload).signatureHex

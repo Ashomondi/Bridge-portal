@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+
+	"github.com/hibiken/asynq"
 )
 
 func TestQueueManagerTaskProcessing(t *testing.T) {
@@ -85,5 +87,87 @@ func TestQueueManagerIdempotentStopAndRestartCycles(t *testing.T) {
 			}()
 		}
 		stopWG.Wait()
+	}
+}
+
+type mockSMSDispatcher struct {
+	sentTo  string
+	sentMsg string
+}
+
+func (m *mockSMSDispatcher) SendTransactionalSMS(ctx context.Context, to, msg string) error {
+	m.sentTo = to
+	m.sentMsg = msg
+	return nil
+}
+
+type mockBillingQuerier struct {
+	queriedSchool   string
+	queriedCheckout string
+}
+
+func (m *mockBillingQuerier) QuerySTKPushStatus(ctx context.Context, schoolID, checkoutRequestID string) error {
+	m.queriedSchool = schoolID
+	m.queriedCheckout = checkoutRequestID
+	return nil
+}
+
+type mockOnboardingPurger struct {
+	purgedRetention int
+}
+
+func (m *mockOnboardingPurger) PurgeExpiredUnverifiedSubmissions(ctx context.Context, retentionDays int) (int, error) {
+	m.purgedRetention = retentionDays
+	return 42, nil
+}
+
+func TestAsynqHandlerExecution(t *testing.T) {
+	mux := NewAsynqServer(asynq.RedisClientOpt{}, 1)
+	_ = mux // ensure NewAsynqServer compiles
+	serveMux := asynq.NewServeMux()
+	sms := &mockSMSDispatcher{}
+	billing := &mockBillingQuerier{}
+	purger := &mockOnboardingPurger{}
+
+	RegisterAsynqHandlers(serveMux, sms, billing, purger)
+
+	ctx := context.Background()
+
+	// 1. Process SMS task
+	smsPayload, _ := json.Marshal(SMSTaskPayload{
+		ToPhoneNumber: "+254712345678",
+		Message:       "Your OTP is 123456",
+	})
+	smsTask := asynq.NewTask(TypeSMSTransactional, smsPayload)
+	if err := serveMux.ProcessTask(ctx, smsTask); err != nil {
+		t.Fatalf("ProcessTask for SMS failed: %v", err)
+	}
+	if sms.sentTo != "+254712345678" || sms.sentMsg != "Your OTP is 123456" {
+		t.Errorf("unexpected SMS dispatch: %+v", sms)
+	}
+
+	// 2. Process STK Poll task
+	stkPayload, _ := json.Marshal(STKPollTaskPayload{
+		SchoolID:          "school-1",
+		CheckoutRequestID: "ws_CO_TEST_POLL",
+	})
+	stkTask := asynq.NewTask(TypeMPesaSTKPoll, stkPayload)
+	if err := serveMux.ProcessTask(ctx, stkTask); err != nil {
+		t.Fatalf("ProcessTask for STK Poll failed: %v", err)
+	}
+	if billing.queriedSchool != "school-1" || billing.queriedCheckout != "ws_CO_TEST_POLL" {
+		t.Errorf("unexpected STK poll: %+v", billing)
+	}
+
+	// 3. Process Purge Unverified task
+	purgePayload, _ := json.Marshal(PurgeUnverifiedTaskPayload{
+		RetentionDays: 7,
+	})
+	purgeTask := asynq.NewTask(TypeOnboardingPurgeUnverified, purgePayload)
+	if err := serveMux.ProcessTask(ctx, purgeTask); err != nil {
+		t.Fatalf("ProcessTask for Purge failed: %v", err)
+	}
+	if purger.purgedRetention != 7 {
+		t.Errorf("unexpected retention days: %d", purger.purgedRetention)
 	}
 }

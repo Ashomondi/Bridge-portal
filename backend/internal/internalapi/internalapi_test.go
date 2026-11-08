@@ -33,10 +33,10 @@ func (m *mockBillingBridge) InitiateSTKPush(ctx context.Context, req billing.STK
 }
 
 func setupTestInternalAPI() (*Handler, *MemoryStore, *ContextSigner, *mockBillingBridge) {
-	signer := NewContextSigner("test-secret-key-12345")
+	signer := MustNewContextSigner("test-secret-key-12345")
 	store := NewMemoryStore()
 	billingBridge := &mockBillingBridge{}
-	handler := NewHandler("secret-service-token", signer, store, billingBridge, "http://localhost:8001")
+	handler := MustNewHandler("secret-service-token", signer, store, billingBridge, "http://localhost:8001")
 	return handler, store, signer, billingBridge
 }
 
@@ -246,5 +246,117 @@ func TestAIAuditActionLogging(t *testing.T) {
 	saved := store.AuditLogs[0]
 	if saved.Feature != "parent_assistant" || saved.Channel != "whatsapp" || saved.SessionID != "session-abc-123" {
 		t.Errorf("unexpected audit log values: %+v", saved)
+	}
+}
+
+func TestSecretValidationNoFallback(t *testing.T) {
+	// 1. NewContextSigner fails closed on empty or short secret (must be >= 16 bytes)
+	_, err := NewContextSigner("")
+	if err == nil {
+		t.Errorf("expected error for empty signer secret, got nil")
+	}
+	_, err = NewContextSigner("short-key")
+	if err == nil {
+		t.Errorf("expected error for short signer secret (<16 bytes), got nil")
+	}
+
+	signer, err := NewContextSigner("valid-secret-key-16-bytes!")
+	if err != nil {
+		t.Fatalf("unexpected error for valid signer key: %v", err)
+	}
+
+	store := NewMemoryStore()
+	billingBridge := &mockBillingBridge{}
+
+	// 2. NewHandler fails closed on empty or short service token (must be >= 16 bytes)
+	_, err = NewHandler("", signer, store, billingBridge, "http://localhost:8001")
+	if err == nil {
+		t.Errorf("expected error for empty service token, got nil")
+	}
+	_, err = NewHandler("short-token", signer, store, billingBridge, "http://localhost:8001")
+	if err == nil {
+		t.Errorf("expected error for short service token (<16 bytes), got nil")
+	}
+}
+
+func TestChatMessageProxyAuthenticationAndForwarding(t *testing.T) {
+	// Setup mock AI server
+	var receivedUserContext string
+	var receivedBody map[string]interface{}
+	mockAIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedUserContext = r.Header.Get("X-User-Context")
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"reply": "Hello from mock AI assistant!"}`))
+	}))
+	defer mockAIServer.Close()
+
+	signer := MustNewContextSigner("test-secret-key-12345")
+	store := NewMemoryStore()
+	billingBridge := &mockBillingBridge{}
+	handler := MustNewHandler("secret-service-token-12345", signer, store, billingBridge, mockAIServer.URL)
+
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	schoolID := "school-1"
+	parentID := "parent-proxy-1"
+	childID := "child-proxy-101"
+	otherChildID := "other-child-999"
+
+	store.Guardians[schoolID+":"+childID+":"+parentID] = true
+
+	// 1. Unauthenticated request (no user in context) -> 401 Unauthorized
+	reqUnauth := httptest.NewRequest(http.MethodPost, "/api/v1/chat/message", bytes.NewReader([]byte(`{"child_id": "child-101", "message": "Hi"}`)))
+	rrUnauth := httptest.NewRecorder()
+	mux.ServeHTTP(rrUnauth, reqUnauth)
+	if rrUnauth.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for unauthenticated chat, got %d", rrUnauth.Code)
+	}
+
+	// 2. Non-guardian trying to query child -> 403 Forbidden
+	reqForbidden := httptest.NewRequest(http.MethodPost, "/api/v1/chat/message", bytes.NewReader([]byte(`{"child_id": "`+otherChildID+`", "message": "Hi"}`)))
+	reqForbidden = reqForbidden.WithContext(billing.WithIdentity(context.Background(), billing.Identity{
+		UserID:   parentID,
+		SchoolID: schoolID,
+		Role:     "parent",
+	}))
+	rrForbidden := httptest.NewRecorder()
+	mux.ServeHTTP(rrForbidden, reqForbidden)
+	if rrForbidden.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for querying non-guardian child, got %d", rrForbidden.Code)
+	}
+
+	// 3. Valid parent and linked child -> proxies to AI service with signed X-User-Context
+	chatPayload, _ := json.Marshal(map[string]string{
+		"child_id": childID,
+		"message":  "What is the fee balance?",
+	})
+	reqValid := httptest.NewRequest(http.MethodPost, "/api/v1/chat/message", bytes.NewReader(chatPayload))
+	reqValid = reqValid.WithContext(billing.WithIdentity(context.Background(), billing.Identity{
+		UserID:   parentID,
+		SchoolID: schoolID,
+		Role:     "parent",
+	}))
+	rrValid := httptest.NewRecorder()
+	mux.ServeHTTP(rrValid, reqValid)
+
+	if rrValid.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid chat proxy, got %d: %s", rrValid.Code, rrValid.Body.String())
+	}
+	if receivedUserContext == "" {
+		t.Fatalf("expected X-User-Context header received at AI service")
+	}
+	// Verify signature of the forwarded X-User-Context
+	verifiedCtx, err := signer.Verify(receivedUserContext)
+	if err != nil {
+		t.Fatalf("AI service received invalid signature on X-User-Context: %v", err)
+	}
+	if verifiedCtx.UserID != parentID || verifiedCtx.SchoolID != schoolID {
+		t.Errorf("mismatch in signed user context: %+v", verifiedCtx)
+	}
+	if receivedBody["query"] != "What is the fee balance?" {
+		t.Errorf("expected message forwarded to AI service as query, got %v", receivedBody)
 	}
 }

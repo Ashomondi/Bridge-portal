@@ -38,13 +38,19 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 	}
 	schoolID := cfg.SchoolID
 
+	// 2. Idempotency: repeated C2B callbacks must not create duplicate payments or credits
+	existing, err := s.store.GetPaymentByTransactionRef(ctx, payload.TransID)
+	if err == nil && existing != nil {
+		return existing, nil
+	}
+
 	rawBillRef := strings.TrimSpace(payload.BillRefNumber)
 	payerPhone := payload.MSISDN
 	payerName := payload.FirstName
 
 	rawJSON, _ := json.Marshal(payload)
 
-	// 2. Look up student in that school where UPPER(TRIM(admission_number)) = UPPER(TRIM(BillRefNumber)) (AC-25)
+	// 3. Look up student in that school where UPPER(TRIM(admission_number)) = UPPER(TRIM(BillRefNumber)) (AC-25)
 	studentID, _, err := s.store.GetStudentByAdmissionNumber(ctx, schoolID, rawBillRef)
 
 	// CASE A: Valid Student Match Found (AC-25)
@@ -66,7 +72,9 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 		}
 
 		// Apply credit to student's ledger (AC-24)
-		_ = s.creditStudentPayment(ctx, schoolID, studentID, "", payload.TransID, "mpesa_c2b", amount, payerPhone, payerName)
+		if err := s.creditStudentPayment(ctx, schoolID, studentID, payment.ID, payload.TransID, "mpesa_c2b", amount, payerPhone, payerName); err != nil {
+			return nil, errInternal(err)
+		}
 
 		if s.auditLogger != nil {
 			_ = s.auditLogger.LogAction(ctx, schoolID, "", "payment.c2b.auto_matched", "payment", payment.ID, map[string]interface{}{

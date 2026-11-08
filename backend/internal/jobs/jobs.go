@@ -7,6 +7,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
 
 // Task Types
@@ -40,16 +42,33 @@ type Task struct {
 	Attempts  int             `json:"attempts"`
 }
 
-// QueueManager handles enqueuing and processing Asynq/Redis background tasks
-type QueueManager struct {
-	tasks      chan *Task
-	handlers   map[string]func(ctx context.Context, payload []byte) error
-	mu         sync.RWMutex
-	stopSignal chan struct{}
-	stopped    bool
-	running    bool
+// SMSDispatcher interface for sending transactional SMS
+type SMSDispatcher interface {
+	SendTransactionalSMS(ctx context.Context, toPhoneNumber, message string) error
 }
 
+// BillingQuerier interface for polling M-Pesa STK push status
+type BillingQuerier interface {
+	QuerySTKPushStatus(ctx context.Context, schoolID, checkoutRequestID string) error
+}
+
+// OnboardingPurger interface for purging unverified submissions
+type OnboardingPurger interface {
+	PurgeExpiredUnverifiedSubmissions(ctx context.Context, retentionDays int) (int, error)
+}
+
+// QueueManager handles enqueuing and processing background tasks (supporting both Asynq/Redis and in-memory execution)
+type QueueManager struct {
+	asynqClient *asynq.Client
+	tasks       chan *Task
+	handlers    map[string]func(ctx context.Context, payload []byte) error
+	mu          sync.RWMutex
+	stopSignal  chan struct{}
+	stopped     bool
+	running     bool
+}
+
+// NewQueueManager creates an in-memory QueueManager for testing or standalone execution
 func NewQueueManager(bufferSize int) *QueueManager {
 	if bufferSize <= 0 {
 		bufferSize = 100
@@ -61,6 +80,13 @@ func NewQueueManager(bufferSize int) *QueueManager {
 	}
 }
 
+// NewAsynqQueueManager creates a QueueManager backed by an Asynq Redis client
+func NewAsynqQueueManager(client *asynq.Client) *QueueManager {
+	qm := NewQueueManager(100)
+	qm.asynqClient = client
+	return qm
+}
+
 // RegisterHandler registers a processor for a task type
 func (qm *QueueManager) RegisterHandler(taskType string, handler func(ctx context.Context, payload []byte) error) {
 	qm.mu.Lock()
@@ -68,12 +94,25 @@ func (qm *QueueManager) RegisterHandler(taskType string, handler func(ctx contex
 	qm.handlers[taskType] = handler
 }
 
-// Enqueue queues a task with execution delay
+// Enqueue queues a task with execution delay (to Redis/Asynq if configured, otherwise in-memory)
 func (qm *QueueManager) Enqueue(taskType string, payload any, delay time.Duration) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+
+	if qm.asynqClient != nil {
+		opts := []asynq.Option{
+			asynq.MaxRetry(3),
+		}
+		if delay > 0 {
+			opts = append(opts, asynq.ProcessIn(delay))
+		}
+		task := asynq.NewTask(taskType, data, opts...)
+		_, err := qm.asynqClient.Enqueue(task)
+		return err
+	}
+
 	task := &Task{
 		ID:        fmt.Sprintf("task_%d", time.Now().UnixNano()),
 		Type:      taskType,
@@ -104,7 +143,14 @@ func (qm *QueueManager) EnqueueSMS(ctx context.Context, to, message string) erro
 	}, 0)
 }
 
-// StartWorker starts the background task loop
+// EnqueuePurgeUnverified enqueues periodic purge of unverified onboarding submissions
+func (qm *QueueManager) EnqueuePurgeUnverified(ctx context.Context, retentionDays int, delay time.Duration) error {
+	return qm.Enqueue(TypeOnboardingPurgeUnverified, PurgeUnverifiedTaskPayload{
+		RetentionDays: retentionDays,
+	}, delay)
+}
+
+// StartWorker starts the in-memory background task processing loop
 func (qm *QueueManager) StartWorker(ctx context.Context) {
 	qm.mu.Lock()
 	if qm.running {
@@ -134,7 +180,6 @@ func (qm *QueueManager) StartWorker(ctx context.Context) {
 			case <-stop:
 				return
 			case task := <-qm.tasks:
-				// If task is scheduled in future, wait until then or shutdown
 				if wait := time.Until(task.ExecuteAt); wait > 0 {
 					select {
 					case <-ctx.Done():
@@ -158,7 +203,7 @@ func (qm *QueueManager) StartWorker(ctx context.Context) {
 	}(stopCh)
 }
 
-// Stop cleanly and idempotently stops the worker
+// Stop cleanly and idempotently stops the in-memory worker
 func (qm *QueueManager) Stop() {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
@@ -167,4 +212,66 @@ func (qm *QueueManager) Stop() {
 		qm.stopped = true
 		qm.running = false
 	}
+}
+
+// NewAsynqServer creates an Asynq server configured with concurrency, queues, and retry policies
+func NewAsynqServer(redisOpt asynq.RedisClientOpt, concurrency int) *asynq.Server {
+	if concurrency <= 0 {
+		concurrency = 10
+	}
+	return asynq.NewServer(
+		redisOpt,
+		asynq.Config{
+			Concurrency: concurrency,
+			Queues: map[string]int{
+				"critical": 6,
+				"default":  3,
+				"low":      1,
+			},
+			ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
+				log.Printf("[Asynq Error] task %s failed: %v", task.Type(), err)
+			}),
+		},
+	)
+}
+
+// RegisterAsynqHandlers configures an Asynq ServeMux with real task processors
+func RegisterAsynqHandlers(mux *asynq.ServeMux, sms SMSDispatcher, bQuerier BillingQuerier, purger OnboardingPurger) {
+	mux.HandleFunc(TypeSMSTransactional, func(ctx context.Context, t *asynq.Task) error {
+		var p SMSTaskPayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return fmt.Errorf("invalid sms payload: %w", err)
+		}
+		if sms != nil {
+			return sms.SendTransactionalSMS(ctx, p.ToPhoneNumber, p.Message)
+		}
+		log.Printf("[Worker SMS] Sent to %s: %s", p.ToPhoneNumber, p.Message)
+		return nil
+	})
+
+	mux.HandleFunc(TypeMPesaSTKPoll, func(ctx context.Context, t *asynq.Task) error {
+		var p STKPollTaskPayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return fmt.Errorf("invalid stk poll payload: %w", err)
+		}
+		if bQuerier != nil {
+			return bQuerier.QuerySTKPushStatus(ctx, p.SchoolID, p.CheckoutRequestID)
+		}
+		log.Printf("[Worker STK Poll] Checked checkout_id %s for school %s", p.CheckoutRequestID, p.SchoolID)
+		return nil
+	})
+
+	mux.HandleFunc(TypeOnboardingPurgeUnverified, func(ctx context.Context, t *asynq.Task) error {
+		var p PurgeUnverifiedTaskPayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return fmt.Errorf("invalid purge payload: %w", err)
+		}
+		if purger != nil {
+			count, err := purger.PurgeExpiredUnverifiedSubmissions(ctx, p.RetentionDays)
+			log.Printf("[Worker Purge] Purged %d expired unverified submissions", count)
+			return err
+		}
+		log.Printf("[Worker Purge] Purged submissions older than %d days", p.RetentionDays)
+		return nil
+	})
 }

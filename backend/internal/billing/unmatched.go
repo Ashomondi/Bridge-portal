@@ -32,22 +32,49 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, schoolID, paymentID
 		return nil, errNotFound("student not found in this school")
 	}
 
-	// 2. Look up payment
-	payment, err := s.store.GetPayment(ctx, schoolID, paymentID)
+	// 2. Look up unmatched payment and verify it is not already resolved
+	unmatched, err := s.store.GetUnmatchedPayment(ctx, schoolID, paymentID)
+	if err != nil {
+		return nil, errNotFound("unmatched payment record not found")
+	}
+	if unmatched.Status != "unmatched" {
+		return nil, &APIError{
+			Status:  http.StatusConflict,
+			Code:    "PAYMENT_ALREADY_RESOLVED",
+			Message: "unmatched payment has already been resolved",
+		}
+	}
+
+	// 3. Look up payment and ensure it has not already been matched
+	payment, err := s.store.GetPayment(ctx, schoolID, unmatched.PaymentID)
+	if err != nil {
+		payment, err = s.store.GetPayment(ctx, schoolID, paymentID)
+	}
 	if err != nil {
 		return nil, errNotFound("payment record not found")
 	}
+	if payment.MatchedStatus == "matched" {
+		return nil, &APIError{
+			Status:  http.StatusConflict,
+			Code:    "PAYMENT_ALREADY_RESOLVED",
+			Message: "payment record has already been matched",
+		}
+	}
 
-	// 3. Mark unmatched_payments resolved
-	_ = s.store.ResolveUnmatchedPayment(ctx, schoolID, paymentID, studentID, actorUserID, resolutionNote)
-
-	// 4. Update payment record to matched
-	if err := s.store.UpdatePaymentMatched(ctx, schoolID, paymentID, studentID, actorUserID); err != nil {
+	// 4. Mark unmatched_payments resolved
+	if err := s.store.ResolveUnmatchedPayment(ctx, schoolID, paymentID, studentID, actorUserID, resolutionNote); err != nil {
 		return nil, errInternal(err)
 	}
 
-	// 5. Credit student's fee ledger with overpayment calculation (AC-24, AC-25)
-	_ = s.creditStudentPayment(ctx, schoolID, studentID, "", payment.TransactionRef, payment.Provider, payment.Amount, payment.PayerPhone, payment.PayerName)
+	// 5. Update payment record to matched
+	if err := s.store.UpdatePaymentMatched(ctx, schoolID, payment.ID, studentID, actorUserID); err != nil {
+		return nil, errInternal(err)
+	}
+
+	// 6. Credit student's fee ledger with overpayment calculation (AC-24, AC-25)
+	if err := s.creditStudentPayment(ctx, schoolID, studentID, payment.ID, payment.TransactionRef, payment.Provider, payment.Amount, payment.PayerPhone, payment.PayerName); err != nil {
+		return nil, errInternal(err)
+	}
 
 	if s.auditLogger != nil {
 		_ = s.auditLogger.LogAction(ctx, schoolID, actorUserID, "payment.manual_matched", "payment", payment.ID, map[string]interface{}{

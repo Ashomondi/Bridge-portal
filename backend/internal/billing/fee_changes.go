@@ -55,10 +55,12 @@ func (s *Service) ApplyMidYearFeeChange(ctx context.Context, req FeeChangeReques
 				ledger.CurrentBalance = totalBilled - ledger.PaidAmount
 				ledger.CreditBalance = 0.00
 			}
-			_ = s.store.SaveFeeLedger(ctx, ledger)
+			if err := s.store.SaveFeeLedger(ctx, ledger); err != nil {
+				return nil, errInternal(err)
+			}
 		}
 
-		_ = s.store.CreateLedgerEntry(ctx, &LedgerEntry{
+		if err := s.store.CreateLedgerEntry(ctx, &LedgerEntry{
 			SchoolID:    req.SchoolID,
 			StudentID:   studentID,
 			TermID:      req.TermID,
@@ -66,18 +68,22 @@ func (s *Service) ApplyMidYearFeeChange(ctx context.Context, req FeeChangeReques
 			Amount:      req.AmountDelta,
 			Reference:   "mid-year-fee-adjustment",
 			Description: req.Note,
-		})
+		}); err != nil {
+			return nil, errInternal(err)
+		}
 
 		// 3. Notify ONLY guardians of the affected students (AC-21)
 		if s.notifier != nil {
-			guardians, _ := s.store.ListGuardiansForStudent(ctx, req.SchoolID, studentID)
-			for _, guardianUserID := range guardians {
-				_ = s.notifier.CreateInAppNotification(ctx, req.SchoolID, guardianUserID, "fee_change", "Fee Structure Adjustment", fmt.Sprintf("A fee adjustment of KES %.2f has been applied. Reason: %s", req.AmountDelta, req.Note), map[string]interface{}{
-					"student_id":   studentID,
-					"term_id":      req.TermID,
-					"amount_delta": req.AmountDelta,
-					"note":         req.Note,
-				})
+			guardians, err := s.store.ListGuardiansForStudent(ctx, req.SchoolID, studentID)
+			if err == nil {
+				for _, guardianUserID := range guardians {
+					_ = s.notifier.CreateInAppNotification(ctx, req.SchoolID, guardianUserID, "fee_change", "Fee Structure Adjustment", fmt.Sprintf("A fee adjustment of KES %.2f has been applied. Reason: %s", req.AmountDelta, req.Note), map[string]interface{}{
+						"student_id":   studentID,
+						"term_id":      req.TermID,
+						"amount_delta": req.AmountDelta,
+						"note":         req.Note,
+					})
+				}
 			}
 		}
 	}
@@ -131,7 +137,9 @@ func (s *Service) OnTermStartDateChanged(ctx context.Context, schoolID, termID s
 	}
 
 	// 2. Update fee_periods due_date
-	_ = s.store.UpdateFeePeriodDueDate(ctx, schoolID, termID, newStartDate)
+	if err := s.store.UpdateFeePeriodDueDate(ctx, schoolID, termID, newStartDate); err != nil {
+		return errInternal(err)
+	}
 
 	// 3. Update fee_charges due_date
 	count, err := s.store.UpdateFeeChargesDueDate(ctx, schoolID, termID, newStartDate)
@@ -155,15 +163,29 @@ func (s *Service) OnTermStartDateChanged(ctx context.Context, schoolID, termID s
 		CreatedBy:             actorUserID,
 		AffectedStudentsCount: count,
 	}
-	_ = s.store.CreateFeeChangeNote(ctx, noteRecord)
+	if err := s.store.CreateFeeChangeNote(ctx, noteRecord); err != nil {
+		return errInternal(err)
+	}
 
-	// 5. Notify affected parents (AC-22)
+	// 5. Notify affected parents (AC-22) - notify ONLY linked guardians of students with charges in this term, NOT actorUserID!
 	if s.notifier != nil {
-		// Send notification
-		_ = s.notifier.CreateInAppNotification(ctx, schoolID, actorUserID, "term_date_shift", "Term Fee Due Date Updated", fmt.Sprintf("Term %s fee due date has been shifted to %s. Note: %s", termID, newStartDate.Format("2006-01-02"), explanation), map[string]interface{}{
-			"term_id":      termID,
-			"new_due_date": newStartDate.Format("2006-01-02"),
-		})
+		affectedStudents, err := s.store.GetStudentsWithChargesForTerm(ctx, schoolID, termID)
+		if err == nil {
+			notified := make(map[string]bool)
+			for _, stID := range affectedStudents {
+				guardians, _ := s.store.ListGuardiansForStudent(ctx, schoolID, stID)
+				for _, gID := range guardians {
+					if !notified[gID] {
+						notified[gID] = true
+						_ = s.notifier.CreateInAppNotification(ctx, schoolID, gID, "term_date_shift", "Term Fee Due Date Updated", fmt.Sprintf("Term %s fee due date has been shifted to %s. Note: %s", termID, newStartDate.Format("2006-01-02"), explanation), map[string]interface{}{
+							"term_id":      termID,
+							"new_due_date": newStartDate.Format("2006-01-02"),
+							"note":         explanation,
+						})
+					}
+				}
+			}
+		}
 	}
 
 	if s.auditLogger != nil {

@@ -248,20 +248,34 @@ type SchoolMpesaConfig struct {
 
 // Service manages all billing, M-Pesa, ledgers, and fee changes.
 type Service struct {
-	store       Store
-	notifier    InAppNotifier
-	auditLogger AuditLogger
-	enqueuer    AsynqEnqueuer
+	store        Store
+	notifier     InAppNotifier
+	auditLogger  AuditLogger
+	enqueuer     AsynqEnqueuer
+	darajaClient DarajaClient
+	callbackURL  string
 }
 
 // NewService constructs a Billing Service.
 func NewService(store Store, notifier InAppNotifier, auditLogger AuditLogger, enqueuer AsynqEnqueuer) *Service {
 	return &Service{
-		store:       store,
-		notifier:    notifier,
-		auditLogger: auditLogger,
-		enqueuer:    enqueuer,
+		store:        store,
+		notifier:     notifier,
+		auditLogger:  auditLogger,
+		enqueuer:     enqueuer,
+		darajaClient: NewHTTPDarajaClient(nil),
+		callbackURL:  "https://api.ikonex.academy/api/v1/billing/mpesa/callback",
 	}
+}
+
+// SetDarajaClient sets a custom or mock DarajaClient
+func (s *Service) SetDarajaClient(client DarajaClient) {
+	s.darajaClient = client
+}
+
+// SetCallbackURL sets the Daraja callback URL
+func (s *Service) SetCallbackURL(url string) {
+	s.callbackURL = url
 }
 
 // GetStore returns the underlying Store.

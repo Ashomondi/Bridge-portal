@@ -181,15 +181,17 @@ CREATE INDEX idx_sender_rate_blocks_lookup ON sender_rate_blocks(sender_wa_numbe
 CREATE TABLE chat_otp_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
     sender_wa_number VARCHAR(30) NOT NULL,
     admission_number VARCHAR(100) NOT NULL,
     guardian_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    otp_code VARCHAR(20) NOT NULL,
+    otp_code VARCHAR(255) NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     attempts INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX idx_chat_otp_requests_session ON chat_otp_requests(session_id);
 CREATE INDEX idx_chat_otp_requests_recent ON chat_otp_requests(school_id, sender_wa_number, created_at);
 CREATE INDEX idx_chat_otp_requests_student ON chat_otp_requests(school_id, admission_number, created_at);
 

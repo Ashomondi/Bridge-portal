@@ -49,7 +49,11 @@ type Store interface {
 
 	CreatePayment(ctx context.Context, payment *Payment) error
 	GetPayment(ctx context.Context, schoolID, paymentID string) (*Payment, error)
+	GetPaymentByCheckoutID(ctx context.Context, checkoutID string) (*Payment, error)
+	GetPaymentByTransactionRef(ctx context.Context, transactionRef string) (*Payment, error)
+	UpdatePaymentStatus(ctx context.Context, schoolID, paymentID, status string) error
 	UpdatePaymentMatched(ctx context.Context, schoolID, paymentID, studentID, matchedBy string) error
+	GetStudentsWithChargesForTerm(ctx context.Context, schoolID, termID string) ([]string, error)
 
 	CreateUnmatchedPayment(ctx context.Context, unmatched *UnmatchedPayment) error
 	ListUnmatchedPayments(ctx context.Context, schoolID string) ([]UnmatchedPayment, error)
@@ -533,6 +537,70 @@ func (m *MemoryStore) CreatePayment(ctx context.Context, payment *Payment) error
 		payment.PaymentDate = time.Now()
 	}
 	m.Payments[payment.ID] = payment
+	return nil
+}
+
+func (m *MemoryStore) GetStudentsWithChargesForTerm(ctx context.Context, schoolID, termID string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var studentIDs []string
+	seen := make(map[string]bool)
+	for _, c := range m.FeeCharges {
+		if m.chargeMatchesTerm(c, schoolID, termID) {
+			if !seen[c.StudentID] {
+				seen[c.StudentID] = true
+				studentIDs = append(studentIDs, c.StudentID)
+			}
+		}
+	}
+	return studentIDs, nil
+}
+
+func (m *MemoryStore) GetPaymentByCheckoutID(ctx context.Context, checkoutID string) (*Payment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.Payments {
+		if p.TransactionRef == checkoutID {
+			copy := *p
+			return &copy, nil
+		}
+		if strings.Contains(p.RawPayload, checkoutID) {
+			copy := *p
+			return &copy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *MemoryStore) GetPaymentByTransactionRef(ctx context.Context, transactionRef string) (*Payment, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.Payments {
+		if p.TransactionRef == transactionRef {
+			copy := *p
+			return &copy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *MemoryStore) UpdatePaymentStatus(ctx context.Context, schoolID, paymentID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.Payments[paymentID]
+	if !ok {
+		for _, candidate := range m.Payments {
+			if candidate.TransactionRef == paymentID {
+				p = candidate
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok || (schoolID != "" && p.SchoolID != schoolID) {
+		return ErrNotFound
+	}
+	p.MatchedStatus = status
 	return nil
 }
 

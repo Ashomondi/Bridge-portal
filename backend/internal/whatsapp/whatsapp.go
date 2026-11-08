@@ -2,7 +2,10 @@ package whatsapp
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,20 +114,29 @@ type Store interface {
 
 // Service coordinates WhatsApp conversational state machine and OTP verification
 type Service struct {
-	store    Store
-	sms      SMSDispatcher
-	aiBridge AIServiceBridge
-	waClient WhatsAppClient
+	store       Store
+	sms         SMSDispatcher
+	aiBridge    AIServiceBridge
+	waClient    WhatsAppClient
+	verifyToken string
+	appSecret   string
 }
 
 // NewService constructs WhatsApp Service
 func NewService(store Store, sms SMSDispatcher, aiBridge AIServiceBridge, waClient WhatsAppClient) *Service {
 	return &Service{
-		store:    store,
-		sms:      sms,
-		aiBridge: aiBridge,
-		waClient: waClient,
+		store:       store,
+		sms:         sms,
+		aiBridge:    aiBridge,
+		waClient:    waClient,
+		verifyToken: "ikonex-whatsapp-verify-token-change-in-prod",
 	}
+}
+
+// SetWebhookAuth sets the Meta webhook verification token and application secret
+func (s *Service) SetWebhookAuth(verifyToken, appSecret string) {
+	s.verifyToken = verifyToken
+	s.appSecret = appSecret
 }
 
 // ProcessIncomingMessage is the entry point for WhatsApp webhook and web chat messages
@@ -295,10 +307,10 @@ func (s *Service) dispatchOTP(ctx context.Context, session *ChatSession, maskedP
 		return "You have exceeded the maximum allowed verification attempts. Your WhatsApp number is blocked from requesting OTPs for 24 hours. The student's registered guardian can still log in normally via the web portal.", nil
 	}
 
-	// 3. Generate 6-digit OTP
+	// 3. Generate 6-digit OTP and store one-way hash (AC-10)
 	otpCode := generate6DigitOTP()
 	expiresAt := time.Now().Add(10 * time.Minute)
-	_ = s.store.SaveOTP(ctx, session.ID, otpCode, expiresAt)
+	_ = s.store.SaveOTP(ctx, session.ID, hashOTP(otpCode), expiresAt)
 
 	// 4. Send SMS OTP strictly to registered phone number in users.phone_number (C12, C13, AC-08, AC-09)
 	smsMessage := fmt.Sprintf("Your Ikonex Academy WhatsApp verification code is %s. Valid for 10 minutes. Do not share this code.", otpCode)
@@ -309,9 +321,20 @@ func (s *Service) dispatchOTP(ctx context.Context, session *ChatSession, maskedP
 	return fmt.Sprintf("A 6-digit verification code has been sent via SMS to your registered number %s. Please reply with the code to verify your identity:", maskedPhone), nil
 }
 
+func hashOTP(code string) string {
+	h := sha256.Sum256([]byte(strings.TrimSpace(code)))
+	return hex.EncodeToString(h[:])
+}
+
 func generate6DigitOTP() string {
 	n, _ := rand.Int(rand.Reader, big.NewInt(900000))
 	return fmt.Sprintf("%06d", n.Int64()+100000)
+}
+
+type OTPEntry struct {
+	CodeHash string
+	Expires  time.Time
+	Attempts int
 }
 
 // MemoryStore implementation for WhatsApp
@@ -331,10 +354,7 @@ type MemoryStore struct {
 		AdmissionNumber string
 		CreatedAt       time.Time
 	}
-	OTPCodes map[string]struct {
-		Code    string
-		Expires time.Time
-	} // key: sessionID
+	OTPCodes map[string]*OTPEntry // key: sessionID
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -347,10 +367,7 @@ func NewMemoryStore() *MemoryStore {
 		Guardians:      make(map[string][]GuardianCandidate),
 		GuardianUsers:  make(map[string]struct{ Phone, Name string }),
 		BlockedSenders: make(map[string]time.Time),
-		OTPCodes: make(map[string]struct {
-			Code    string
-			Expires time.Time
-		}),
+		OTPCodes:       make(map[string]*OTPEntry),
 	}
 }
 
@@ -502,7 +519,7 @@ func (m *MemoryStore) HasRecentOTPForSender(ctx context.Context, senderWANumber 
 	return false, nil
 }
 
-func (m *MemoryStore) SaveOTP(ctx context.Context, sessionID, code string, expiresAt time.Time) error {
+func (m *MemoryStore) SaveOTP(ctx context.Context, sessionID, codeHash string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.Sessions[sessionID]
@@ -519,10 +536,11 @@ func (m *MemoryStore) SaveOTP(ctx context.Context, sessionID, code string, expir
 			CreatedAt:       time.Now(),
 		})
 	}
-	m.OTPCodes[sessionID] = struct {
-		Code    string
-		Expires time.Time
-	}{Code: code, Expires: expiresAt}
+	m.OTPCodes[sessionID] = &OTPEntry{
+		CodeHash: codeHash,
+		Expires:  expiresAt,
+		Attempts: 0,
+	}
 	return nil
 }
 
@@ -533,11 +551,32 @@ func (m *MemoryStore) VerifyOTP(ctx context.Context, sessionID, code string) (bo
 	if !ok || time.Now().After(item.Expires) {
 		return false, errors.New("expired or invalid OTP")
 	}
-	if item.Code != code {
+	item.Attempts++
+	if item.Attempts > 3 {
+		delete(m.OTPCodes, sessionID)
+		return false, errors.New("maximum verification attempts exceeded; OTP invalidated")
+	}
+	hashed := hashOTP(code)
+	if hashed != item.CodeHash && code != item.CodeHash {
 		return false, nil
 	}
+	// Consume OTP so it cannot be replayed
 	delete(m.OTPCodes, sessionID)
 	return true, nil
+}
+
+func verifyHubSignature(body []byte, secret, header string) bool {
+	if secret == "" {
+		return true
+	}
+	if !strings.HasPrefix(header, "sha256=") {
+		return false
+	}
+	givenHex := strings.TrimPrefix(header, "sha256=")
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expectedHex := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(givenHex), []byte(expectedHex))
 }
 
 // HTTP Webhook Handlers
@@ -553,7 +592,7 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		mode := r.URL.Query().Get("hub.mode")
 		token := r.URL.Query().Get("hub.verify_token")
 		challenge := r.URL.Query().Get("hub.challenge")
-		if mode == "subscribe" && token != "" {
+		if mode == "subscribe" && s.verifyToken != "" && token == s.verifyToken {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(challenge))
 			return
@@ -571,6 +610,16 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
+	}
+
+	// Verify Meta signature if appSecret is configured
+	if s.appSecret != "" {
+		sig := r.Header.Get("X-Hub-Signature-256")
+		if !verifyHubSignature(body, s.appSecret, sig) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid webhook signature"}`))
+			return
+		}
 	}
 
 	var payload struct {

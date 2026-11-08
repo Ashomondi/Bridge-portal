@@ -103,6 +103,13 @@ func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STK
 	if err == nil && mpesaConfig != nil && mpesaConfig.Shortcode != "" {
 		shortcode = mpesaConfig.Shortcode
 	}
+	if mpesaConfig == nil {
+		mpesaConfig = &SchoolMpesaConfig{
+			SchoolID:    req.SchoolID,
+			Shortcode:   shortcode,
+			Environment: "sandbox",
+		}
+	}
 
 	// Format Safaricom phone: 2547XXXXXXXX
 	phone := strings.TrimPrefix(req.PhoneNumber, "+")
@@ -110,9 +117,35 @@ func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STK
 		phone = "254" + phone[1:]
 	}
 
-	checkoutID := fmt.Sprintf("ws_CO_%d_%s", time.Now().UnixNano(), req.StudentID)
+	if s.darajaClient == nil {
+		s.darajaClient = NewHTTPDarajaClient(nil)
+	}
 
-	// Pre-record pending payment with AccountReference = admission number
+	// Real Daraja STK Initiation: send request to Daraja, do not generate fake ID
+	params := STKInitiateParams{
+		Shortcode:        shortcode,
+		Amount:           req.Amount,
+		PhoneNumber:      phone,
+		AccountReference: adminNum,
+		TransactionDesc:  fmt.Sprintf("Fee payment for %s (%s)", studentName, adminNum),
+		CallBackURL:      s.callbackURL,
+	}
+
+	darajaResp, err := s.darajaClient.InitiateSTKPush(ctx, mpesaConfig, params)
+	if err != nil {
+		return nil, errInternal(fmt.Errorf("failed to initiate Daraja STK push: %w", err))
+	}
+	if darajaResp.ResponseCode != "0" {
+		return nil, &APIError{
+			Status:  http.StatusBadRequest,
+			Code:    "DARAJA_ERROR",
+			Message: darajaResp.ResponseDescription,
+		}
+	}
+
+	checkoutID := darajaResp.CheckoutRequestID
+
+	// Pre-record pending payment with actual CheckoutRequestID from Daraja
 	pendingPayment := &Payment{
 		SchoolID:       req.SchoolID,
 		StudentID:      &req.StudentID,
@@ -122,9 +155,11 @@ func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STK
 		PayerPhone:     phone,
 		MatchedStatus:  "pending",
 		PaymentDate:    time.Now(),
-		RawPayload:     fmt.Sprintf(`{"admission_number": "%s", "shortcode": "%s"}`, adminNum, shortcode),
+		RawPayload:     fmt.Sprintf(`{"admission_number": "%s", "shortcode": "%s", "merchant_request_id": "%s", "checkout_request_id": "%s"}`, adminNum, shortcode, darajaResp.MerchantRequestID, checkoutID),
 	}
-	_ = s.store.CreatePayment(ctx, pendingPayment)
+	if err := s.store.CreatePayment(ctx, pendingPayment); err != nil {
+		return nil, errInternal(err)
+	}
 
 	// 7. Enqueue fallback Asynq job to poll Daraja after 45s (C23, AC-23)
 	if s.enqueuer != nil {
@@ -141,10 +176,15 @@ func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STK
 		})
 	}
 
+	customerMsg := darajaResp.CustomerMessage
+	if customerMsg == "" {
+		customerMsg = fmt.Sprintf("Success. Please enter your M-Pesa PIN on %s to pay KES %.2f for %s (%s).", phone, req.Amount, studentName, adminNum)
+	}
+
 	return &STKPushResponse{
 		CheckoutRequestID: checkoutID,
 		ResponseCode:      "0",
-		CustomerMessage:   fmt.Sprintf("Success. Please enter your M-Pesa PIN on %s to pay KES %.2f for %s (%s).", phone, req.Amount, studentName, adminNum),
+		CustomerMessage:   customerMsg,
 	}, nil
 }
 
@@ -155,8 +195,20 @@ func (s *Service) HandleSTKCallback(ctx context.Context, payload STKCallbackPayl
 		return errValidation("missing CheckoutRequestID in STK callback")
 	}
 
-	// If transaction failed or was cancelled by user
+	// 1. Authenticate callback by matching to a known pending transaction and school
+	pendingPayment, err := s.store.GetPaymentByCheckoutID(ctx, cb.CheckoutRequestID)
+	if err != nil || pendingPayment == nil {
+		return errNotFound("no pending payment found for checkout request ID")
+	}
+
+	// 2. Idempotency: repeated callback must not create another payment, ledger entry, notification, or credit
+	if pendingPayment.MatchedStatus == "matched" {
+		return nil
+	}
+
+	// 3. If transaction was cancelled or failed on Daraja
 	if cb.ResultCode != 0 {
+		_ = s.store.UpdatePaymentStatus(ctx, pendingPayment.SchoolID, pendingPayment.ID, "failed")
 		return nil
 	}
 
@@ -184,21 +236,38 @@ func (s *Service) HandleSTKCallback(ctx context.Context, payload STKCallbackPayl
 		}
 	}
 
-	if mpesaReceipt == "" {
-		mpesaReceipt = cb.CheckoutRequestID
+	if strings.TrimSpace(mpesaReceipt) == "" {
+		return errValidation("missing or invalid MpesaReceiptNumber in callback metadata")
+	}
+	if amount <= 0 {
+		amount = pendingPayment.Amount
+	}
+	if phone == "" {
+		phone = pendingPayment.PayerPhone
 	}
 
-	// Find the pending payment by checkout ID or create new matched payment
-	// Credit the student's ledger with overpayment calculation (AC-24)
-	return s.creditStudentPayment(ctx, "", "", cb.CheckoutRequestID, mpesaReceipt, "mpesa_stk", amount, phone, "")
+	// Additional idempotency check on MpesaReceiptNumber
+	if existing, err := s.store.GetPaymentByTransactionRef(ctx, mpesaReceipt); err == nil && existing != nil && existing.MatchedStatus == "matched" {
+		return nil
+	}
+
+	studentID := ""
+	if pendingPayment.StudentID != nil {
+		studentID = *pendingPayment.StudentID
+	}
+
+	// 4. Update the pending payment atomically and credit student's ledger
+	return s.creditStudentPayment(ctx, pendingPayment.SchoolID, studentID, pendingPayment.ID, mpesaReceipt, "mpesa_stk", amount, phone, "")
 }
 
 // creditStudentPayment handles ledger crediting, double entry, overpayment credit_balance, and guardian notification (AC-24, AC-25).
 func (s *Service) creditStudentPayment(ctx context.Context, schoolID, studentID, origRef, transactionRef, provider string, amount float64, payerPhone, payerName string) error {
 	// If studentID or schoolID is empty, try to resolve from original payment reference
-	if (studentID == "" || schoolID == "") && origRef != "" {
+	var pendingPayment *Payment
+	if origRef != "" {
 		p, err := s.store.GetPayment(ctx, schoolID, origRef)
 		if err == nil && p != nil {
+			pendingPayment = p
 			if schoolID == "" {
 				schoolID = p.SchoolID
 			}
@@ -215,22 +284,41 @@ func (s *Service) creditStudentPayment(ctx context.Context, schoolID, studentID,
 	}
 
 	if studentID == "" || schoolID == "" {
+		return errValidation("school_id and student_id are required to credit payment")
+	}
+
+	// Idempotency check: has this transactionRef already been matched?
+	if existing, err := s.store.GetPaymentByTransactionRef(ctx, transactionRef); err == nil && existing != nil && existing.MatchedStatus == "matched" && existing.ID != origRef {
 		return nil
 	}
 
 	// 1. Record / Update payment record
-	payment := &Payment{
-		SchoolID:       schoolID,
-		StudentID:      &studentID,
-		TransactionRef: transactionRef,
-		Provider:       provider,
-		Amount:         amount,
-		PayerPhone:     payerPhone,
-		PayerName:      payerName,
-		MatchedStatus:  "matched",
-		PaymentDate:    time.Now(),
+	if pendingPayment != nil {
+		pendingPayment.TransactionRef = transactionRef
+		pendingPayment.Amount = amount
+		pendingPayment.PayerPhone = payerPhone
+		pendingPayment.PayerName = payerName
+		pendingPayment.MatchedStatus = "matched"
+		pendingPayment.PaymentDate = time.Now()
+		if err := s.store.UpdatePaymentMatched(ctx, schoolID, pendingPayment.ID, studentID, provider); err != nil {
+			_ = s.store.CreatePayment(ctx, pendingPayment)
+		}
+	} else {
+		payment := &Payment{
+			SchoolID:       schoolID,
+			StudentID:      &studentID,
+			TransactionRef: transactionRef,
+			Provider:       provider,
+			Amount:         amount,
+			PayerPhone:     payerPhone,
+			PayerName:      payerName,
+			MatchedStatus:  "matched",
+			PaymentDate:    time.Now(),
+		}
+		if err := s.store.CreatePayment(ctx, payment); err != nil {
+			return errInternal(err)
+		}
 	}
-	_ = s.store.CreatePayment(ctx, payment)
 
 	// 2. Record ledger_entries double-entry (entry_type = 'payment')
 	ledgerEntry := &LedgerEntry{
@@ -241,7 +329,9 @@ func (s *Service) creditStudentPayment(ctx context.Context, schoolID, studentID,
 		Reference:   transactionRef,
 		Description: fmt.Sprintf("Fee payment via %s (Ref: %s)", provider, transactionRef),
 	}
-	_ = s.store.CreateLedgerEntry(ctx, ledgerEntry)
+	if err := s.store.CreateLedgerEntry(ctx, ledgerEntry); err != nil {
+		return errInternal(err)
+	}
 
 	// 3. Update FeeLedger with Overpayment Credit Rule (C24, AC-24):
 	// If paid_amount > opening_balance + billed_amount:
@@ -257,7 +347,9 @@ func (s *Service) creditStudentPayment(ctx context.Context, schoolID, studentID,
 			ledger.CurrentBalance = totalBilled - ledger.PaidAmount
 			ledger.CreditBalance = 0.00
 		}
-		_ = s.store.SaveFeeLedger(ctx, ledger)
+		if err := s.store.SaveFeeLedger(ctx, ledger); err != nil {
+			return errInternal(err)
+		}
 	}
 
 	// 4. Send in-app payment receipt notification to student's guardians
@@ -321,7 +413,10 @@ func (s *Service) handleSTKCallbackHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	_ = s.HandleSTKCallback(r.Context(), payload)
+	if err := s.HandleSTKCallback(r.Context(), payload); err != nil {
+		respondError(w, err)
+		return
+	}
 
 	// Daraja expects standard JSON acknowledgement
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

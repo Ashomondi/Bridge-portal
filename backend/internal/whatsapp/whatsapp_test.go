@@ -1,7 +1,13 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -332,5 +338,122 @@ func TestCrossSchoolBotIsolation(t *testing.T) {
 	replyB, _ := svc.ProcessIncomingMessage(ctx, botSchoolB, senderWA, "ADM/100")
 	if strings.Contains(replyB, "could not verify") {
 		t.Errorf("School B bot should have found its own student, got: %s", replyB)
+	}
+}
+
+func TestWebhookAuthenticationAndSignature(t *testing.T) {
+	svc, _, _, _ := setupTestWhatsApp()
+	verifyToken := "my-webhook-verify-token-12345"
+	appSecret := "my-facebook-app-secret-67890"
+	svc.SetWebhookAuth(verifyToken, appSecret)
+
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux)
+
+	// 1. GET with correct verification token -> 200 OK + returns challenge
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/whatsapp/webhook?hub.mode=subscribe&hub.verify_token="+verifyToken+"&hub.challenge=test_challenge_code", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for valid verify token, got %d", rr.Code)
+	}
+	if rr.Body.String() != "test_challenge_code" {
+		t.Errorf("expected body %q, got %q", "test_challenge_code", rr.Body.String())
+	}
+
+	// 2. GET with invalid verify token -> 403 Forbidden
+	reqBad := httptest.NewRequest(http.MethodGet, "/api/v1/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=wrong-token&hub.challenge=test_challenge_code", nil)
+	rrBad := httptest.NewRecorder()
+	mux.ServeHTTP(rrBad, reqBad)
+	if rrBad.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for bad verify token, got %d", rrBad.Code)
+	}
+
+	// 3. POST with missing signature -> 401 Unauthorized
+	body := []byte(`{"object":"whatsapp_business_account","entry":[]}`)
+	reqNoSig := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook", bytes.NewReader(body))
+	rrNoSig := httptest.NewRecorder()
+	mux.ServeHTTP(rrNoSig, reqNoSig)
+	if rrNoSig.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for missing signature, got %d", rrNoSig.Code)
+	}
+
+	// 4. POST with tampered signature -> 401 Unauthorized
+	reqTampered := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook", bytes.NewReader(body))
+	reqTampered.Header.Set("X-Hub-Signature-256", "sha256=invalidhexsignature00000000000000000000000000000000000000000000000")
+	rrTampered := httptest.NewRecorder()
+	mux.ServeHTTP(rrTampered, reqTampered)
+	if rrTampered.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for tampered signature, got %d", rrTampered.Code)
+	}
+
+	// 5. POST with valid HMAC-SHA256 signature -> 200 OK
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	mac.Write(body)
+	validSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	reqValid := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook", bytes.NewReader(body))
+	reqValid.Header.Set("X-Hub-Signature-256", validSig)
+	rrValid := httptest.NewRecorder()
+	mux.ServeHTTP(rrValid, reqValid)
+	if rrValid.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for valid signature, got %d", rrValid.Code)
+	}
+}
+
+func TestOTPHashingAndMaxAttemptsExceeded(t *testing.T) {
+	_, store, _, _ := setupTestWhatsApp()
+	ctx := context.Background()
+	sessionID := "sess-otp-test-1"
+
+	store.Sessions[sessionID] = &ChatSession{
+		ID:             sessionID,
+		SchoolID:       "school-1",
+		SenderWANumber: "+254700111222",
+	}
+
+	rawOTP := "849201"
+	hashed := hashOTP(rawOTP)
+
+	if hashed == rawOTP {
+		t.Fatalf("SECURITY FAULT: OTP was not hashed")
+	}
+
+	expires := time.Now().Add(10 * time.Minute)
+	if err := store.SaveOTP(ctx, sessionID, hashed, expires); err != nil {
+		t.Fatalf("SaveOTP failed: %v", err)
+	}
+
+	// 1st attempt: wrong code
+	ok, err := store.VerifyOTP(ctx, sessionID, "000000")
+	if ok || err != nil {
+		t.Errorf("expected false and nil error on 1st failed attempt, got ok=%v, err=%v", ok, err)
+	}
+
+	// 2nd attempt: wrong code
+	ok, err = store.VerifyOTP(ctx, sessionID, "111111")
+	if ok || err != nil {
+		t.Errorf("expected false and nil error on 2nd failed attempt, got ok=%v, err=%v", ok, err)
+	}
+
+	// 3rd attempt: wrong code
+	ok, err = store.VerifyOTP(ctx, sessionID, "222222")
+	if ok || err != nil {
+		t.Errorf("expected false and nil error on 3rd failed attempt, got ok=%v, err=%v", ok, err)
+	}
+
+	// 4th attempt: exceeds max attempts limit -> must invalidate OTP and return error
+	ok, err = store.VerifyOTP(ctx, sessionID, rawOTP)
+	if ok || err == nil {
+		t.Fatalf("expected error on 4th attempt exceeding limit, got ok=%v, err=%v", ok, err)
+	}
+	if !strings.Contains(err.Error(), "maximum verification attempts exceeded") {
+		t.Errorf("expected max attempts error message, got: %v", err)
+	}
+
+	// Verify OTP is completely consumed/invalidated
+	ok, err = store.VerifyOTP(ctx, sessionID, rawOTP)
+	if ok {
+		t.Errorf("invalidated OTP must not succeed")
 	}
 }

@@ -1,11 +1,13 @@
 package internalapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -100,17 +102,32 @@ type Handler struct {
 	aiServiceURL string
 }
 
-func NewHandler(serviceToken string, signer *ContextSigner, store Store, billing BillingBridge, aiServiceURL string) *Handler {
-	if serviceToken == "" {
-		serviceToken = "test-internal-service-token-secret"
+func NewHandler(serviceToken string, signer *ContextSigner, store Store, billing BillingBridge, aiServiceURL string) (*Handler, error) {
+	if len(strings.TrimSpace(serviceToken)) < 16 {
+		return nil, errors.New("internalapi: service token is required and must be at least 16 characters")
+	}
+	if signer == nil {
+		return nil, errors.New("internalapi: context signer is required")
+	}
+	if aiServiceURL == "" {
+		aiServiceURL = "http://localhost:8000"
 	}
 	return &Handler{
-		serviceToken: serviceToken,
+		serviceToken: strings.TrimSpace(serviceToken),
 		signer:       signer,
 		store:        store,
 		billing:      billing,
-		aiServiceURL: aiServiceURL,
+		aiServiceURL: strings.TrimRight(aiServiceURL, "/"),
+	}, nil
+}
+
+// MustNewHandler constructs a Handler or panics on configuration failure
+func MustNewHandler(serviceToken string, signer *ContextSigner, store Store, billing BillingBridge, aiServiceURL string) *Handler {
+	h, err := NewHandler(serviceToken, signer, store, billing, aiServiceURL)
+	if err != nil {
+		panic(err)
 	}
+	return h
 }
 
 // RegisterRoutes registers internal endpoints onto mux
@@ -384,26 +401,98 @@ func (h *Handler) handleAIAuditLog(w http.ResponseWriter, r *http.Request, u *Us
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "logged"})
 }
 
-// Frontend Chat Proxy: POST /api/v1/chat/message
+// Frontend Chat Proxy: POST /api/v1/chat/message (enforcing parent auth, child ownership, and AI forwarding)
 func (h *Handler) handleFrontendChatMessage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req struct {
-		Message   string `json:"message"`
-		StudentID string `json:"student_id,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+	id, ok := billing.IdentityFromContext(r.Context())
+	if !ok || id.UserID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"reply": "Your message has been processed successfully.",
+	var req struct {
+		Message   string `json:"message"`
+		StudentID string `json:"student_id"`
+		ChildID   string `json:"child_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		return
+	}
+	if req.StudentID == "" && req.ChildID != "" {
+		req.StudentID = req.ChildID
+	}
+	if strings.TrimSpace(req.Message) == "" || req.StudentID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "message and student_id are required"})
+		return
+	}
+
+	// Enforce parent-child ownership
+	if id.Role == "parent" {
+		isGuardian, err := h.store.IsGuardianOf(r.Context(), id.SchoolID, req.StudentID, id.UserID)
+		if err != nil || !isGuardian {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "parent is not a registered guardian of this student"})
+			return
+		}
+	}
+
+	uCtx := UserContext{
+		UserID:   id.UserID,
+		SchoolID: id.SchoolID,
+		Role:     id.Role,
+		Channel:  "in_app",
+		Exp:      time.Now().Add(15 * time.Minute).Unix(),
+	}
+	signedCtx, err := h.signer.Sign(uCtx, 15*time.Minute)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to sign user context"})
+		return
+	}
+
+	aiReqBody, _ := json.Marshal(map[string]interface{}{
+		"school_id":  id.SchoolID,
+		"user_id":    id.UserID,
+		"student_id": req.StudentID,
+		"query":      req.Message,
 	})
+	aiHTTPReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.aiServiceURL+"/api/v1/ai/parent-query", bytes.NewReader(aiReqBody))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	aiHTTPReq.Header.Set("Content-Type", "application/json")
+	aiHTTPReq.Header.Set(HeaderInternalServiceToken, h.serviceToken)
+	aiHTTPReq.Header.Set(HeaderUserContext, signedCtx)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	aiResp, err := client.Do(aiHTTPReq)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("ai service unavailable: %v", err)})
+		return
+	}
+	defer aiResp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(aiResp.StatusCode)
+	_, _ = io.Copy(w, aiResp.Body)
 }
 
 // MemoryStore implementation for internalapi
