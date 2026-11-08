@@ -12,8 +12,9 @@ import (
 
 // SQLStore is the PostgreSQL implementation of internalapi.Store.
 type SQLStore struct {
-	db *sql.DB
-	tx *sql.Tx
+	db       *sql.DB
+	tx       *sql.Tx
+	schoolID string
 }
 
 func NewSQLStore(db *sql.DB) *SQLStore {
@@ -34,6 +35,15 @@ func (s *SQLStore) q() sqlQuerier {
 }
 
 func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store) error) error {
+	if schoolID == "" {
+		return errors.New("tenant school_id is required")
+	}
+	if s.tx != nil {
+		if schoolID != s.schoolID {
+			return errors.New("transaction belongs to another school")
+		}
+		return fn(s)
+	}
 	if s.db == nil {
 		return errors.New("internalapi: SQLStore has no database connection")
 	}
@@ -41,13 +51,14 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 	if err != nil {
 		return err
 	}
-	if schoolID != "" {
+	defer tx.Rollback()
+	{
 		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.school_id', $1, true)`, schoolID); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
 	}
-	tenantStore := &SQLStore{db: s.db, tx: tx}
+	tenantStore := &SQLStore{db: s.db, tx: tx, schoolID: schoolID}
 	if err := fn(tenantStore); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -147,77 +158,55 @@ func (s *SQLStore) GetAttendanceSummary(ctx context.Context, schoolID, studentID
 
 func (s *SQLStore) GetMarksSummary(ctx context.Context, schoolID, studentID, termID string) (*StudentMarksSummary, error) {
 	query := `
-		SELECT s.code, s.name, sm.score, sm.updated_at
-		FROM student_marks sm
-		JOIN subjects s ON s.id = sm.subject_id
-		WHERE sm.school_id = $1 AND sm.student_id = $2 AND sm.term_id = $3
-		ORDER BY s.code ASC;
+		SELECT sub.code, sub.name, snap.score, snap.cbc_level, snap.published_at,
+		       scale.ee_min, scale.me_min, scale.ae_min
+		FROM released_marks_snapshots snap
+		JOIN subjects sub ON sub.school_id = snap.school_id AND sub.id = snap.subject_id
+		JOIN result_releases rel ON rel.school_id = snap.school_id AND rel.id = snap.result_release_id AND rel.term_id = snap.term_id
+		JOIN grading_scale_versions scale ON scale.school_id = rel.school_id AND scale.id = rel.grading_scale_version_id
+		WHERE snap.school_id = $1 AND snap.student_id = $2 AND snap.term_id = $3
+		  AND rel.released_at IS NOT NULL AND rel.status IN ('released', 'reopened', 'rereleased')
+		ORDER BY sub.code ASC;
 	`
 	rows, err := s.q().QueryContext(ctx, query, schoolID, studentID, termID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var subjects []SubjectMarkSummary
 	var latestPub time.Time
-	var totalScore float64
-
+	var totalScore, eeMin, meMin, aeMin float64
 	for rows.Next() {
-		var code, name string
-		var score float64
-		var updatedAt time.Time
-		if err := rows.Scan(&code, &name, &score, &updatedAt); err != nil {
+		var subject SubjectMarkSummary
+		var publishedAt time.Time
+		if err := rows.Scan(&subject.SubjectCode, &subject.SubjectName, &subject.Score, &subject.CBCLevel, &publishedAt, &eeMin, &meMin, &aeMin); err != nil {
 			return nil, err
 		}
-		if updatedAt.After(latestPub) {
-			latestPub = updatedAt
+		if publishedAt.After(latestPub) {
+			latestPub = publishedAt
 		}
-		totalScore += score
-
-		level := "BE"
-		switch {
-		case score >= 80:
-			level = "EE"
-		case score >= 50:
-			level = "ME"
-		case score >= 30:
-			level = "AE"
-		}
-
-		subjects = append(subjects, SubjectMarkSummary{
-			SubjectCode: code,
-			SubjectName: name,
-			Score:       score,
-			CBCLevel:    level,
-		})
+		totalScore += subject.Score
+		subjects = append(subjects, subject)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if len(subjects) == 0 {
-		return nil, errors.New("marks summary not found")
+		return nil, errors.New("released marks summary not found")
 	}
-
-	meanGrade := ""
+	meanGrade := "BE"
 	avg := totalScore / float64(len(subjects))
 	switch {
-	case avg >= 80:
+	case avg >= eeMin:
 		meanGrade = "EE"
-	case avg >= 50:
+	case avg >= meMin:
 		meanGrade = "ME"
-	case avg >= 30:
+	case avg >= aeMin:
 		meanGrade = "AE"
-	default:
-		meanGrade = "BE"
 	}
-
 	return &StudentMarksSummary{
-		StudentID:   studentID,
-		TermID:      termID,
-		Subjects:    subjects,
-		MeanGrade:   meanGrade,
-		PublishedAt: latestPub,
+		StudentID: studentID, TermID: termID, Subjects: subjects,
+		MeanGrade: meanGrade, PublishedAt: latestPub,
 	}, nil
 }
 

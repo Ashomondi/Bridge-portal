@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,7 +152,7 @@ func (h *Handler) authenticateInternal(next func(http.ResponseWriter, *http.Requ
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Validate X-Internal-Service-Token
 		token := r.Header.Get(HeaderInternalServiceToken)
-		if token != h.serviceToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(h.serviceToken)) != 1 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid internal service token"})
@@ -298,6 +299,12 @@ func (h *Handler) handleStudentEndpoints(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	if action == "marks-summary" && u.Channel == "whatsapp" {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "results are available in the parent portal"})
+		return
+	}
+
 	// Enforce Guardian-Child ownership (Docs/API_CONTRACTS.md, SECURITY.md)
 	// Parent can ONLY query their own children!
 	if u.Role == "parent" {
@@ -427,11 +434,19 @@ func (h *Handler) handleSTKPush(w http.ResponseWriter, r *http.Request, u *UserC
 		return
 	}
 
-	resp, err := h.billing.InitiateSTKPush(r.Context(), req)
+	ctx := billing.WithIdentity(r.Context(), billing.Identity{
+		UserID: u.UserID, SchoolID: u.SchoolID, MembershipID: u.MembershipID, Role: u.Role,
+	})
+	resp, err := h.billing.InitiateSTKPush(ctx, req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		status := http.StatusInternalServerError
+		var apiErr *billing.APIError
+		if errors.As(err, &apiErr) {
+			status = apiErr.Status
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "error": err})
 		return
 	}
 
@@ -486,7 +501,7 @@ func (h *Handler) handleFrontendChatMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	id, ok := billing.IdentityFromContext(r.Context())
-	if !ok || id.UserID == "" {
+	if !ok || id.UserID == "" || id.SchoolID == "" || id.Role != "parent" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
@@ -497,6 +512,7 @@ func (h *Handler) handleFrontendChatMessage(w http.ResponseWriter, r *http.Reque
 		Message   string `json:"message"`
 		StudentID string `json:"student_id"`
 		ChildID   string `json:"child_id"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -537,50 +553,102 @@ func (h *Handler) handleFrontendChatMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	uCtx := UserContext{
-		UserID:   id.UserID,
-		SchoolID: id.SchoolID,
-		Role:     id.Role,
-		Channel:  "in_app",
-		Exp:      time.Now().Add(15 * time.Minute).Unix(),
+		UserID:       id.UserID,
+		MembershipID: id.MembershipID,
+		SessionID:    req.SessionID,
+		SchoolID:     id.SchoolID,
+		Role:         id.Role,
+		Channel:      "in_app",
+		Exp:          time.Now().Add(15 * time.Minute).Unix(),
 	}
-	signedCtx, err := h.signer.Sign(uCtx, 15*time.Minute)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to sign user context"})
-		return
-	}
-
-	aiReqBody, _ := json.Marshal(map[string]interface{}{
-		"school_id":  id.SchoolID,
-		"user_id":    id.UserID,
-		"student_id": req.StudentID,
-		"query":      req.Message,
-	})
-	aiHTTPReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.aiServiceURL+"/api/v1/ai/parent-query", bytes.NewReader(aiReqBody))
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	aiHTTPReq.Header.Set("Content-Type", "application/json")
-	aiHTTPReq.Header.Set(HeaderInternalServiceToken, h.serviceToken)
-	aiHTTPReq.Header.Set(HeaderUserContext, signedCtx)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	aiResp, err := client.Do(aiHTTPReq)
+	body, status, err := h.requestParentQuery(r.Context(), uCtx, req.StudentID, req.Message)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("ai service unavailable: %v", err)})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "AI service request failed"})
 		return
 	}
-	defer aiResp.Body.Close()
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(aiResp.StatusCode)
-	_, _ = io.Copy(w, aiResp.Body)
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+func (h *Handler) ForwardParentQuery(ctx context.Context, schoolID, guardianUserID, studentID, query, sessionID string) (string, error) {
+	var guardian bool
+	err := h.withTenantStore(ctx, schoolID, func(store Store) error {
+		var err error
+		guardian, err = store.IsGuardianOf(ctx, schoolID, studentID, guardianUserID)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	if !guardian || sessionID == "" {
+		return "", errors.New("verified guardian session is required")
+	}
+	body, status, err := h.requestParentQuery(ctx, UserContext{
+		UserID: guardianUserID, SchoolID: schoolID, Role: "parent", Channel: "whatsapp", SessionID: sessionID,
+	}, studentID, query)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("AI service returned HTTP %d", status)
+	}
+	var response struct {
+		Data struct {
+			Reply string `json:"reply"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", err
+	}
+	if response.Data.Reply == "" {
+		return "", errors.New("AI service returned no reply")
+	}
+	return response.Data.Reply, nil
+}
+
+func (h *Handler) requestParentQuery(ctx context.Context, u UserContext, studentID, query string) ([]byte, int, error) {
+	signed, err := h.signer.Sign(u, 15*time.Minute)
+	if err != nil {
+		return nil, 0, err
+	}
+	body, err := json.Marshal(map[string]string{
+		"school_id": u.SchoolID, "user_id": u.UserID, "student_id": studentID,
+		"query": query, "channel": u.Channel, "session_id": u.SessionID,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, h.aiServiceURL+"/api/v1/ai/parent-query", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(HeaderInternalServiceToken, h.serviceToken)
+	request.Header.Set(HeaderUserContext, signed)
+	if err := h.withTenantStore(ctx, u.SchoolID, func(store Store) error {
+		return store.SaveAIAuditLog(ctx, &AIAuditLogEntry{
+			SchoolID: u.SchoolID, UserID: u.UserID, SessionID: u.SessionID, Channel: u.Channel,
+			Feature: "parent_assistant", ActionTaken: "query_forwarded", CreatedAt: time.Now(),
+		})
+	}); err != nil {
+		return nil, 0, err
+	}
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	body, err = io.ReadAll(response.Body)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !json.Valid(body) {
+		return nil, 0, errors.New("invalid JSON from AI service")
+	}
+	return body, response.StatusCode, nil
 }
 
 // MemoryStore implementation for internalapi

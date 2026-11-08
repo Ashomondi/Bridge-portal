@@ -13,12 +13,13 @@ import (
 
 // UserContext carries the authenticated user's authorization and channel context
 type UserContext struct {
-	UserID    string `json:"user_id"`
-	SchoolID  string `json:"school_id"`
-	Role      string `json:"role"`
-	Channel   string `json:"channel"` // "whatsapp" or "in_app"
-	SessionID string `json:"session_id,omitempty"`
-	Exp       int64  `json:"exp"` // Unix timestamp
+	MembershipID string `json:"membership_id,omitempty"`
+	UserID       string `json:"user_id"`
+	SchoolID     string `json:"school_id"`
+	Role         string `json:"role"`
+	Channel      string `json:"channel"` // "whatsapp" or "in_app"
+	SessionID    string `json:"session_id,omitempty"`
+	Exp          int64  `json:"exp"` // Unix timestamp
 }
 
 // ContextSigner signs and verifies HMAC-SHA256 signatures for X-User-Context
