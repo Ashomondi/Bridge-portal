@@ -95,14 +95,57 @@ CBC only (Grade 7–12), not 8-4-4. `grade_levels.number` is constrained to
 ever needed, that's a schema change, not a workaround — raise it as a new
 decision rather than bolting it on.
 
+## Channels and sessions (added 2026-10-29)
+
+- **WhatsApp Business Cloud API, one bot per school.** The receiving number
+  maps to `school_id`, so an admission number is only ever looked up inside
+  that school. The Go backend owns the webhook; the AI service is reached only
+  through the backend.
+- **Parent identity in chat:** sender enters the admission number → masked
+  guardian numbers → OTP by SMS to the chosen registered number → a 6-hour
+  verified session. Any WhatsApp number may start a chat; the OTP goes only
+  to the registered number.
+- **Release 1 event notifications are in-app only.** SMS is used for OTP and
+  security messages.
+
+## Additional entities (planned)
+
+`school_whatsapp_bots`, `chat_sessions`, `otp_requests`, `parent_qr_codes`,
+`staff_qr_codes`, `registration_submissions`, `verification_records`, badge
+delegations, `attendance_daily`, `assessments` and `marks`, `report_comments`,
+`result_releases`, `grading_scale_versions` (per term), `fee_periods`,
+`fee_charges`, `fee_change_notes`, `ledger_entries` (including credit),
+`unmatched_payments`, `school_profile` (contact details required), and a
+`whatsapp` value for `consents.purpose`. See `ikonex.md` section 9.
+
+Build `fee_periods` on generic billing periods even though Release 1 is terms
+only, so custom structures later need no migration (a recommendation).
+
+## Behaviour that shapes the model
+
+- **Results release is a state machine** per class per term: draft → released
+  → reopened → re-released. Parents keep seeing the last released version
+  while a class is reopened.
+- **Grading scale is versioned per term.** A term's levels are computed from
+  the scale in force when it was released.
+- **Fee due dates follow term start dates.** A term-date change moves due
+  dates and creates a fee-change event with a note.
+- **Pending registrations are not active records** and grant no access until
+  a staff verifier confirms them; uploaded documents are deleted after
+  approval.
+
 ## Settled vs. open decisions
 
 Settled decisions and their reasoning live in `DECISIONS.md` — don't
 re-litigate them here. Open questions that affect this document:
 
+- Hosting location (Kenya only vs regional Africa, and where the AI model
+  runs) — to be discussed with the project group.
 - Sports/activities performance model (how it's scored, who enters it) — not
   yet designed.
 - Store and caterer module data model — not yet designed.
+- Fee structure variants (boarder/day, optional items).
+- How a shared parent QR links each parent to the right child.
 - Payment execution: the system records approved payments; whether it will
   ever initiate transfers itself (beyond the parent-initiated M-Pesa STK push)
   is undecided.
