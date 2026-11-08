@@ -195,11 +195,22 @@ func (s *Service) HandleSTKCallback(ctx context.Context, payload STKCallbackPayl
 
 // creditStudentPayment handles ledger crediting, double entry, overpayment credit_balance, and guardian notification (AC-24, AC-25).
 func (s *Service) creditStudentPayment(ctx context.Context, schoolID, studentID, origRef, transactionRef, provider string, amount float64, payerPhone, payerName string) error {
-	// If studentID is empty, try to resolve from original payment reference
-	if studentID == "" && origRef != "" && schoolID != "" {
+	// If studentID or schoolID is empty, try to resolve from original payment reference
+	if (studentID == "" || schoolID == "") && origRef != "" {
 		p, err := s.store.GetPayment(ctx, schoolID, origRef)
-		if err == nil && p != nil && p.StudentID != nil {
-			studentID = *p.StudentID
+		if err == nil && p != nil {
+			if schoolID == "" {
+				schoolID = p.SchoolID
+			}
+			if studentID == "" && p.StudentID != nil {
+				studentID = *p.StudentID
+			}
+			if amount <= 0 {
+				amount = p.Amount
+			}
+			if payerPhone == "" {
+				payerPhone = p.PayerPhone
+			}
 		}
 	}
 

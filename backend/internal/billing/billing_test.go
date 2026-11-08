@@ -604,4 +604,199 @@ func TestC2BUnmatchedQueueAndManualMatch(t *testing.T) {
 	if !foundAudit {
 		t.Errorf("expected audit action payment.manual_matched")
 	}
+
+	// Verify unmatched queue is now empty after resolution
+	remainingUnmatched, err := svc.ListUnmatchedPayments(ctx, schoolID)
+	if err != nil || len(remainingUnmatched) != 0 {
+		t.Errorf("expected 0 unmatched payments after manual match, got %v", remainingUnmatched)
+	}
+}
+
+func TestFeeChangeAndDueDateScopeIsolation(t *testing.T) {
+	svc, store, notifier, _ := setupTestBillingService()
+	ctx := context.Background()
+
+	school1 := "school-1"
+	school2 := "school-2"
+	year := "2026"
+
+	studentG7T1 := "student-s1-g7"
+	studentG8T1 := "student-s1-g8"
+	studentS2G7 := "student-s2-g7"
+
+	guardianG7 := "guardian-s1-g7"
+	guardianG8 := "guardian-s1-g8"
+	guardianS2 := "guardian-s2-g7"
+
+	// Seed enrollments and student profiles across grades and schools
+	store.EnrolledStudents[school1+":grade-7:"+year] = []string{studentG7T1}
+	store.EnrolledStudents[school1+":grade-8:"+year] = []string{studentG8T1}
+	store.EnrolledStudents[school2+":grade-7:"+year] = []string{studentS2G7}
+
+	store.Students[school1+":"+studentG7T1] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentG7T1, Admission: "S1/G7/001", Name: "Grade 7 Student", GradeID: "grade-7", YearID: year,
+	}
+	store.Students[school1+":"+studentG8T1] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentG8T1, Admission: "S1/G8/001", Name: "Grade 8 Student", GradeID: "grade-8", YearID: year,
+	}
+	store.Students[school2+":"+studentS2G7] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: studentS2G7, Admission: "S2/G7/001", Name: "School 2 Grade 7", GradeID: "grade-7", YearID: year,
+	}
+
+	store.Guardians[school1+":"+studentG7T1] = []string{guardianG7}
+	store.Guardians[school1+":"+studentG8T1] = []string{guardianG8}
+	store.Guardians[school2+":"+studentS2G7] = []string{guardianS2}
+
+	t1Due := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
+	t2Due := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC)
+
+	// Load structures for School 1 Grade 7 (Term 1 & Term 2), School 1 Grade 8 (Term 1), and School 2 Grade 7 (Term 1)
+	_, err := svc.LoadFeeStructure(ctx, LoadFeeStructureRequest{
+		SchoolID: school1, AcademicYearID: year, GradeLevelID: "grade-7", TermID: "term-1", TermStartDate: t1Due,
+		Items: []FeeStructureItemInput{{Title: "Tuition T1", Amount: 20000, IsCompulsory: true}},
+	})
+	if err != nil {
+		t.Fatalf("failed loading S1 G7 T1: %v", err)
+	}
+	_, err = svc.LoadFeeStructure(ctx, LoadFeeStructureRequest{
+		SchoolID: school1, AcademicYearID: year, GradeLevelID: "grade-7", TermID: "term-2", TermStartDate: t2Due,
+		Items: []FeeStructureItemInput{{Title: "Tuition T2", Amount: 22000, IsCompulsory: true}},
+	})
+	if err != nil {
+		t.Fatalf("failed loading S1 G7 T2: %v", err)
+	}
+	_, err = svc.LoadFeeStructure(ctx, LoadFeeStructureRequest{
+		SchoolID: school1, AcademicYearID: year, GradeLevelID: "grade-8", TermID: "term-1", TermStartDate: t1Due,
+		Items: []FeeStructureItemInput{{Title: "Tuition G8 T1", Amount: 25000, IsCompulsory: true}},
+	})
+	if err != nil {
+		t.Fatalf("failed loading S1 G8 T1: %v", err)
+	}
+	_, err = svc.LoadFeeStructure(ctx, LoadFeeStructureRequest{
+		SchoolID: school2, AcademicYearID: year, GradeLevelID: "grade-7", TermID: "term-1", TermStartDate: t1Due,
+		Items: []FeeStructureItemInput{{Title: "Tuition S2 T1", Amount: 18000, IsCompulsory: true}},
+	})
+	if err != nil {
+		t.Fatalf("failed loading S2 G7 T1: %v", err)
+	}
+
+	// 1. Apply mid-year fee change ONLY to School 1, Term 1, Grade 7 (+3000)
+	note, err := svc.ApplyMidYearFeeChange(ctx, FeeChangeRequest{
+		SchoolID:     school1,
+		TermID:       "term-1",
+		GradeLevelID: "grade-7",
+		AmountDelta:  3000,
+		Note:         "Grade 7 laboratory levy for Term 1",
+	})
+	if err != nil {
+		t.Fatalf("ApplyMidYearFeeChange failed: %v", err)
+	}
+	if note.AffectedStudentsCount != 1 {
+		t.Errorf("expected exactly 1 affected student, got %d", note.AffectedStudentsCount)
+	}
+
+	// Verify S1 G7 Term 1 charge & ledger increased by 3000 (20000 -> 23000)
+	s1G7T1Ledger, err := store.GetFeeLedger(ctx, school1, studentG7T1, year, "term-1")
+	if err != nil || s1G7T1Ledger.BilledAmount != 23000 {
+		t.Errorf("expected S1 G7 Term 1 billed amount 23000, got %+v (err=%v)", s1G7T1Ledger, err)
+	}
+
+	// Verify S1 G7 Term 2 ledger & charge were NOT mutated (must remain 22000 billed)
+	s1G7T2Ledger, err := store.GetFeeLedger(ctx, school1, studentG7T1, year, "term-2")
+	if err != nil || s1G7T2Ledger.BilledAmount != 22000 {
+		t.Errorf("term isolation failure: S1 G7 Term 2 billed amount mutated to %f (expected 22000)", s1G7T2Ledger.BilledAmount)
+	}
+
+	// Verify S1 G8 Term 1 ledger & charge were NOT mutated (must remain 25000)
+	s1G8T1Ledger, err := store.GetFeeLedger(ctx, school1, studentG8T1, year, "term-1")
+	if err != nil || s1G8T1Ledger.BilledAmount != 25000 {
+		t.Errorf("grade isolation failure: S1 G8 Term 1 billed amount mutated to %f (expected 25000)", s1G8T1Ledger.BilledAmount)
+	}
+
+	// Verify School 2 G7 Term 1 ledger & charge were NOT mutated (must remain 18000)
+	s2G7T1Ledger, err := store.GetFeeLedger(ctx, school2, studentS2G7, year, "term-1")
+	if err != nil || s2G7T1Ledger.BilledAmount != 18000 {
+		t.Errorf("tenant isolation failure: S2 G7 Term 1 billed amount mutated to %f (expected 18000)", s2G7T1Ledger.BilledAmount)
+	}
+
+	// Verify ONLY guardianG7 received notification
+	if len(notifier.notifications) != 1 || notifier.notifications[0].RecipientUserID != guardianG7 {
+		t.Errorf("expected only guardianG7 to be notified, got %+v", notifier.notifications)
+	}
+
+	// 2. Shift due date ONLY for School 1, Term 2
+	shiftedT2Due := time.Date(2026, 5, 18, 0, 0, 0, 0, time.UTC)
+	if err := svc.OnTermStartDateChanged(ctx, school1, "term-2", shiftedT2Due, "admin-1", "Term 2 opening shifted"); err != nil {
+		t.Fatalf("OnTermStartDateChanged failed: %v", err)
+	}
+
+	// Verify S1 G7 Term 1 charge still has original t1Due, while Term 2 charge has shiftedT2Due
+	s1G7Charges, _ := store.ListFeeChargesForStudent(ctx, school1, studentG7T1)
+	t1Period, _ := store.GetFeePeriod(ctx, school1, year, "term-1")
+	t2Period, _ := store.GetFeePeriod(ctx, school1, year, "term-2")
+	for _, ch := range s1G7Charges {
+		if ch.FeePeriodID == t1Period.ID && !ch.DueDate.Equal(t1Due) {
+			t.Errorf("term-1 charge due date was wrongly shifted to %v (expected %v)", ch.DueDate, t1Due)
+		}
+		if ch.FeePeriodID == t2Period.ID && !ch.DueDate.Equal(shiftedT2Due) {
+			t.Errorf("term-2 charge due date was not shifted to %v (got %v)", shiftedT2Due, ch.DueDate)
+		}
+	}
+
+	// Verify S1 G8 Term 1 charge still has original t1Due
+	s1G8Charges, _ := store.ListFeeChargesForStudent(ctx, school1, studentG8T1)
+	if len(s1G8Charges) != 1 || !s1G8Charges[0].DueDate.Equal(t1Due) {
+		t.Errorf("S1 G8 Term 1 charge due date wrongly mutated: %+v", s1G8Charges)
+	}
+}
+
+func TestC2BFailsClosedOnUnknownOrCrossTenantShortcode(t *testing.T) {
+	svc, store, _, _ := setupTestBillingService()
+	ctx := context.Background()
+
+	school1 := "school-1"
+	school2 := "school-2"
+	shortcode1 := "600111"
+	shortcode2 := "600222"
+
+	_ = store.SaveSchoolMpesaConfig(ctx, &SchoolMpesaConfig{SchoolID: school1, Shortcode: shortcode1})
+	_ = store.SaveSchoolMpesaConfig(ctx, &SchoolMpesaConfig{SchoolID: school2, Shortcode: shortcode2})
+
+	// Student ADM/SHARED/01 exists in School 1
+	store.Students[school1+":st-1"] = struct{ ID, Admission, Name, GradeID, YearID string }{
+		ID: "st-1", Admission: "ADM/SHARED/01", Name: "School 1 Student", GradeID: "g-7", YearID: "2026",
+	}
+	store.StudentsByAdmin[school1+":ADM/SHARED/01"] = "st-1"
+
+	// 1. Unknown shortcode MUST fail closed with validation error (never fallback to school-1)
+	_, err := svc.HandleC2BConfirmation(ctx, C2BConfirmationPayload{
+		TransactionType:   "Pay Bill",
+		TransID:           "TX_UNKNOWN_SC",
+		TransAmount:       "10000.00",
+		BusinessShortCode: "999999",
+		BillRefNumber:     "ADM/SHARED/01",
+		MSISDN:            "254700000001",
+	})
+	if err == nil {
+		t.Fatalf("expected error when BusinessShortCode is unknown, got nil")
+	}
+
+	// 2. Payment sent to School 2's shortcode with School 1's admission number must NOT match School 1's student
+	p, err := svc.HandleC2BConfirmation(ctx, C2BConfirmationPayload{
+		TransactionType:   "Pay Bill",
+		TransID:           "TX_CROSS_TENANT",
+		TransAmount:       "10000.00",
+		BusinessShortCode: shortcode2,
+		BillRefNumber:     "ADM/SHARED/01",
+		MSISDN:            "254700000002",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for valid School 2 shortcode: %v", err)
+	}
+	if p.SchoolID != school2 {
+		t.Errorf("expected payment scoped to %s, got %s", school2, p.SchoolID)
+	}
+	if p.MatchedStatus != "unmatched" || p.StudentID != nil {
+		t.Errorf("cross-tenant leak: School 2 shortcode matched School 1 student: %+v", p)
+	}
 }

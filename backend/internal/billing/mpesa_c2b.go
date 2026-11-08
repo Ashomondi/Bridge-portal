@@ -31,25 +31,12 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 		return nil, errValidation("transaction amount must be greater than zero")
 	}
 
-	// 1. Resolve school_id from BusinessShortCode (AC-25)
-	cfg, err := s.store.GetSchoolMpesaConfigByShortcode(ctx, payload.BusinessShortCode)
-	schoolID := ""
-	if err == nil && cfg != nil {
-		schoolID = cfg.SchoolID
+	// 1. Resolve school_id strictly from BusinessShortCode; fail closed if unknown (AC-25)
+	cfg, err := s.store.GetSchoolMpesaConfigByShortcode(ctx, strings.TrimSpace(payload.BusinessShortCode))
+	if err != nil || cfg == nil || cfg.SchoolID == "" {
+		return nil, errValidation("unrecognized BusinessShortCode: no school configured for shortcode")
 	}
-	// Fallback for default sandbox shortcode if configured
-	if schoolID == "" {
-		// Look up any default school if in sandbox
-		for _, sID := range []string{"school-1", "school-default"} {
-			if _, e := s.store.GetSchoolMpesaConfig(ctx, sID); e == nil {
-				schoolID = sID
-				break
-			}
-		}
-	}
-	if schoolID == "" {
-		schoolID = "school-1"
-	}
+	schoolID := cfg.SchoolID
 
 	rawBillRef := strings.TrimSpace(payload.BillRefNumber)
 	payerPhone := payload.MSISDN

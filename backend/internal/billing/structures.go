@@ -10,11 +10,11 @@ import (
 
 // LoadFeeStructureRequest payload for POST /api/v1/billing/fee-structures
 type LoadFeeStructureRequest struct {
-	SchoolID       string                 `json:"school_id"`
-	AcademicYearID string                 `json:"academic_year_id"`
-	GradeLevelID   string                 `json:"grade_level_id"`
-	TermID         string                 `json:"term_id"`
-	TermStartDate  time.Time              `json:"term_start_date"`
+	SchoolID       string                  `json:"school_id"`
+	AcademicYearID string                  `json:"academic_year_id"`
+	GradeLevelID   string                  `json:"grade_level_id"`
+	TermID         string                  `json:"term_id"`
+	TermStartDate  time.Time               `json:"term_start_date"`
 	Items          []FeeStructureItemInput `json:"items"`
 }
 

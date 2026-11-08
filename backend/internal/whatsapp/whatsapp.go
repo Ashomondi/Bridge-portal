@@ -24,30 +24,30 @@ const (
 
 // Common Error Codes
 const (
-	CodeRateLimited          = "RATE_LIMIT_EXCEEDED"
-	CodeSenderBlocked        = "SENDER_BLOCKED"
-	CodeInvalidOTP           = "INVALID_OTP"
-	CodeSessionExpired       = "SESSION_EXPIRED"
-	CodeAdmissionNotFound    = "ADMISSION_NOT_FOUND"
-	CodeUnknownBot           = "UNKNOWN_WHATSAPP_BOT"
+	CodeRateLimited       = "RATE_LIMIT_EXCEEDED"
+	CodeSenderBlocked     = "SENDER_BLOCKED"
+	CodeInvalidOTP        = "INVALID_OTP"
+	CodeSessionExpired    = "SESSION_EXPIRED"
+	CodeAdmissionNotFound = "ADMISSION_NOT_FOUND"
+	CodeUnknownBot        = "UNKNOWN_WHATSAPP_BOT"
 )
 
 // ChatSession represents an ongoing WhatsApp or In-App chat verification session
 type ChatSession struct {
-	ID               string    `json:"id"`
-	SchoolID         string    `json:"school_id"`
-	Channel          string    `json:"channel"` // "whatsapp" or "in_app"
-	SenderWANumber   string    `json:"sender_wa_number"`
-	StudentID        string    `json:"student_id,omitempty"`
-	AdmissionNumber  string    `json:"admission_number,omitempty"`
-	GuardianUserID   string    `json:"guardian_user_id,omitempty"`
-	State            string    `json:"state"`
-	VerifiedAt       *time.Time`json:"verified_at,omitempty"`
-	ExpiresAt        *time.Time`json:"expires_at,omitempty"`
-	LookupCount      int       `json:"lookup_count"`
-	PaymentInitCount int       `json:"payment_init_count"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string     `json:"id"`
+	SchoolID         string     `json:"school_id"`
+	Channel          string     `json:"channel"` // "whatsapp" or "in_app"
+	SenderWANumber   string     `json:"sender_wa_number"`
+	StudentID        string     `json:"student_id,omitempty"`
+	AdmissionNumber  string     `json:"admission_number,omitempty"`
+	GuardianUserID   string     `json:"guardian_user_id,omitempty"`
+	State            string     `json:"state"`
+	VerifiedAt       *time.Time `json:"verified_at,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	LookupCount      int        `json:"lookup_count"`
+	PaymentInitCount int        `json:"payment_init_count"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // SchoolWhatsAppBot links a WhatsApp Business phone number to a school (AC-12)
@@ -111,10 +111,10 @@ type Store interface {
 
 // Service coordinates WhatsApp conversational state machine and OTP verification
 type Service struct {
-	store      Store
-	sms        SMSDispatcher
-	aiBridge   AIServiceBridge
-	waClient   WhatsAppClient
+	store    Store
+	sms      SMSDispatcher
+	aiBridge AIServiceBridge
+	waClient WhatsAppClient
 }
 
 // NewService constructs WhatsApp Service
@@ -131,6 +131,9 @@ func NewService(store Store, sms SMSDispatcher, aiBridge AIServiceBridge, waClie
 func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, senderWANumber, text string) (reply string, err error) {
 	// 1. Resolve school from receiving WhatsApp Business number (C16, AC-12)
 	bot, err := s.store.GetSchoolByBotPhone(ctx, botPhoneNumber)
+	if err != nil || bot == nil {
+		bot, err = s.store.GetSchoolByBotPhoneID(ctx, botPhoneNumber)
+	}
 	if err != nil || bot == nil || !bot.IsActive {
 		return "", errors.New(CodeUnknownBot)
 	}
@@ -313,22 +316,25 @@ func generate6DigitOTP() string {
 
 // MemoryStore implementation for WhatsApp
 type MemoryStore struct {
-	mu            sync.RWMutex
-	Bots          map[string]*SchoolWhatsAppBot // key: display_phone
-	BotsByID      map[string]*SchoolWhatsAppBot // key: phone_id
-	Sessions      map[string]*ChatSession       // key: sessionID
-	ActiveSessions map[string]string            // key: schoolID:senderWANumber -> sessionID
-	Students      map[string]struct{ ID, Name string } // key: schoolID:upper(adminNum)
-	Guardians     map[string][]GuardianCandidate       // key: schoolID:studentID
-	GuardianUsers map[string]struct{ Phone, Name string } // key: userID
-	BlockedSenders map[string]time.Time         // key: senderWANumber -> blockedUntil
-	OTPRequests   []struct {
+	mu             sync.RWMutex
+	Bots           map[string]*SchoolWhatsAppBot           // key: display_phone
+	BotsByID       map[string]*SchoolWhatsAppBot           // key: phone_id
+	Sessions       map[string]*ChatSession                 // key: sessionID
+	ActiveSessions map[string]string                       // key: schoolID:senderWANumber -> sessionID
+	Students       map[string]struct{ ID, Name string }    // key: schoolID:upper(adminNum)
+	Guardians      map[string][]GuardianCandidate          // key: schoolID:studentID
+	GuardianUsers  map[string]struct{ Phone, Name string } // key: userID
+	BlockedSenders map[string]time.Time                    // key: senderWANumber -> blockedUntil
+	OTPRequests    []struct {
 		SenderWA        string
 		SchoolID        string
 		AdmissionNumber string
 		CreatedAt       time.Time
 	}
-	OTPCodes      map[string]struct{ Code string; Expires time.Time } // key: sessionID
+	OTPCodes map[string]struct {
+		Code    string
+		Expires time.Time
+	} // key: sessionID
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -341,7 +347,10 @@ func NewMemoryStore() *MemoryStore {
 		Guardians:      make(map[string][]GuardianCandidate),
 		GuardianUsers:  make(map[string]struct{ Phone, Name string }),
 		BlockedSenders: make(map[string]time.Time),
-		OTPCodes:       make(map[string]struct{ Code string; Expires time.Time }),
+		OTPCodes: make(map[string]struct {
+			Code    string
+			Expires time.Time
+		}),
 	}
 }
 

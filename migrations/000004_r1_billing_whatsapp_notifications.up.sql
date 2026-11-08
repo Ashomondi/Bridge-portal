@@ -169,7 +169,7 @@ CREATE INDEX idx_chat_sessions_sender ON chat_sessions(school_id, sender_wa_numb
 -- ------------------------------------------------------------------------------
 CREATE TABLE sender_rate_blocks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID REFERENCES schools(id) ON DELETE CASCADE,
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     sender_wa_number VARCHAR(30) NOT NULL,
     blocked_until TIMESTAMPTZ NOT NULL,
     reason VARCHAR(100) NOT NULL,
@@ -217,7 +217,7 @@ CREATE INDEX idx_in_app_notifications_user ON in_app_notifications(recipient_use
 -- ------------------------------------------------------------------------------
 CREATE TABLE ai_action_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    school_id UUID REFERENCES schools(id) ON DELETE CASCADE,
+    school_id UUID NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     session_id UUID,
     channel VARCHAR(20) NOT NULL,
@@ -256,7 +256,7 @@ BEGIN
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
         EXECUTE format(
-            'CREATE POLICY %I_tenant_isolation ON %I FOR ALL USING (school_id = current_school_id() OR school_id IS NULL) WITH CHECK (school_id = current_school_id() OR school_id IS NULL);',
+            'CREATE POLICY %I_tenant_isolation ON %I FOR ALL USING (school_id = current_school_id()) WITH CHECK (school_id = current_school_id());',
             tbl, tbl
         );
     END LOOP;

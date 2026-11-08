@@ -22,11 +22,11 @@ const (
 
 // Models for internal facts
 type SchoolProfile struct {
-	ID       string `json:"id"`
-	Code     string `json:"code"`
-	Name     string `json:"name"`
-	County   string `json:"county,omitempty"`
-	LogoURL  string `json:"logo_url,omitempty"`
+	ID      string `json:"id"`
+	Code    string `json:"code"`
+	Name    string `json:"name"`
+	County  string `json:"county,omitempty"`
+	LogoURL string `json:"logo_url,omitempty"`
 }
 
 type LinkedChild struct {
@@ -38,12 +38,12 @@ type LinkedChild struct {
 }
 
 type AttendanceSummary struct {
-	StudentID       string  `json:"student_id"`
-	TermID          string  `json:"term_id"`
-	TotalDays       int     `json:"total_days"`
-	DaysPresent     int     `json:"days_present"`
-	DaysAbsent      int     `json:"days_absent"`
-	AttendanceRate  float64 `json:"attendance_rate"` // e.g. 96.5%
+	StudentID      string  `json:"student_id"`
+	TermID         string  `json:"term_id"`
+	TotalDays      int     `json:"total_days"`
+	DaysPresent    int     `json:"days_present"`
+	DaysAbsent     int     `json:"days_absent"`
+	AttendanceRate float64 `json:"attendance_rate"` // e.g. 96.5%
 }
 
 type SubjectMarkSummary struct {
@@ -317,7 +317,7 @@ func (h *Handler) handleSTKPush(w http.ResponseWriter, r *http.Request, u *UserC
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "PARENT_CONFIRMATION_REQUIRED",
+			"error":   "PARENT_CONFIRMATION_REQUIRED",
 			"message": "explicit parent confirmation required before initiating payment",
 		})
 		return
@@ -408,13 +408,13 @@ func (h *Handler) handleFrontendChatMessage(w http.ResponseWriter, r *http.Reque
 
 // MemoryStore implementation for internalapi
 type MemoryStore struct {
-	mu            sync.RWMutex
+	mu             sync.RWMutex
 	SchoolProfiles map[string]*SchoolProfile
-	Children      map[string][]LinkedChild // key: schoolID:parentUserID
-	Guardians     map[string]bool          // key: schoolID:studentID:parentUserID
-	Attendance    map[string]*AttendanceSummary
-	Marks         map[string]*StudentMarksSummary
-	AuditLogs     []*AIAuditLogEntry
+	Children       map[string][]LinkedChild // key: schoolID:parentUserID
+	Guardians      map[string]bool          // key: schoolID:studentID:parentUserID
+	Attendance     map[string]*AttendanceSummary
+	Marks          map[string]*StudentMarksSummary
+	AuditLogs      []*AIAuditLogEntry
 }
 
 func NewMemoryStore() *MemoryStore {

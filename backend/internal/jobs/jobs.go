@@ -46,6 +46,8 @@ type QueueManager struct {
 	handlers   map[string]func(ctx context.Context, payload []byte) error
 	mu         sync.RWMutex
 	stopSignal chan struct{}
+	stopped    bool
+	running    bool
 }
 
 func NewQueueManager(bufferSize int) *QueueManager {
@@ -104,17 +106,43 @@ func (qm *QueueManager) EnqueueSMS(ctx context.Context, to, message string) erro
 
 // StartWorker starts the background task loop
 func (qm *QueueManager) StartWorker(ctx context.Context) {
-	go func() {
+	qm.mu.Lock()
+	if qm.running {
+		qm.mu.Unlock()
+		return
+	}
+	if qm.stopped || qm.stopSignal == nil {
+		qm.stopSignal = make(chan struct{})
+		qm.stopped = false
+	}
+	stopCh := qm.stopSignal
+	qm.running = true
+	qm.mu.Unlock()
+
+	go func(stop <-chan struct{}) {
+		defer func() {
+			qm.mu.Lock()
+			if qm.stopSignal == stop {
+				qm.running = false
+			}
+			qm.mu.Unlock()
+		}()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-qm.stopSignal:
+			case <-stop:
 				return
 			case task := <-qm.tasks:
-				// If task is scheduled in future, sleep until then
+				// If task is scheduled in future, wait until then or shutdown
 				if wait := time.Until(task.ExecuteAt); wait > 0 {
-					time.Sleep(wait)
+					select {
+					case <-ctx.Done():
+						return
+					case <-stop:
+						return
+					case <-time.After(wait):
+					}
 				}
 				qm.mu.RLock()
 				handler, ok := qm.handlers[task.Type]
@@ -127,10 +155,16 @@ func (qm *QueueManager) StartWorker(ctx context.Context) {
 				}
 			}
 		}
-	}()
+	}(stopCh)
 }
 
-// Stop cleanly stops the worker
+// Stop cleanly and idempotently stops the worker
 func (qm *QueueManager) Stop() {
-	close(qm.stopSignal)
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+	if !qm.stopped && qm.stopSignal != nil {
+		close(qm.stopSignal)
+		qm.stopped = true
+		qm.running = false
+	}
 }

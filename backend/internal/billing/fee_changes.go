@@ -41,13 +41,19 @@ func (s *Service) ApplyMidYearFeeChange(ctx context.Context, req FeeChangeReques
 
 	// 2. Adjust fee ledgers and record ledger_entries for each affected student
 	for _, studentID := range affectedStudentIDs {
-		ledger, err := s.store.GetLatestFeeLedger(ctx, req.SchoolID, studentID)
-		if err == nil && ledger != nil {
+		ledger, err := s.store.GetFeeLedger(ctx, req.SchoolID, studentID, "", req.TermID)
+		if err != nil || ledger == nil {
+			ledger, err = s.store.GetLatestFeeLedger(ctx, req.SchoolID, studentID)
+		}
+		if err == nil && ledger != nil && (ledger.TermID == "" || ledger.TermID == req.TermID) {
 			ledger.BilledAmount += req.AmountDelta
-			ledger.CurrentBalance += req.AmountDelta
-			if ledger.CurrentBalance < 0 {
-				ledger.CreditBalance += (-ledger.CurrentBalance)
-				ledger.CurrentBalance = 0
+			totalBilled := ledger.OpeningBalance + ledger.BilledAmount
+			if ledger.PaidAmount >= totalBilled {
+				ledger.CurrentBalance = 0.00
+				ledger.CreditBalance = ledger.PaidAmount - totalBilled
+			} else {
+				ledger.CurrentBalance = totalBilled - ledger.PaidAmount
+				ledger.CreditBalance = 0.00
 			}
 			_ = s.store.SaveFeeLedger(ctx, ledger)
 		}
