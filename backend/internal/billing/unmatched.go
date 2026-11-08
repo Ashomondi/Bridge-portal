@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 )
 
@@ -17,7 +18,13 @@ func (s *Service) ListUnmatchedPayments(ctx context.Context, schoolID string) ([
 	if schoolID == "" {
 		return nil, errValidation("school_id is required")
 	}
-	return s.store.ListUnmatchedPayments(ctx, schoolID)
+	var items []UnmatchedPayment
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		items, err = store.ListUnmatchedPayments(ctx, schoolID)
+		return err
+	})
+	return items, err
 }
 
 // MatchUnmatchedPayment resolves an unmatched payment by assigning it to a student and crediting their ledger (AC-25).
@@ -26,62 +33,58 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, schoolID, paymentID
 		return nil, errValidation("school_id, payment_id, and student_id are required")
 	}
 
-	// 1. Verify student exists in this school
-	_, _, _, err := s.store.GetStudent(ctx, schoolID, studentID)
-	if err != nil {
-		return nil, errNotFound("student not found in this school")
-	}
-
-	// 2. Look up unmatched payment and verify it is not already resolved
-	unmatched, err := s.store.GetUnmatchedPayment(ctx, schoolID, paymentID)
-	if err != nil {
-		return nil, errNotFound("unmatched payment record not found")
-	}
-	if unmatched.Status != "unmatched" {
-		return nil, &APIError{
-			Status:  http.StatusConflict,
-			Code:    "PAYMENT_ALREADY_RESOLVED",
-			Message: "unmatched payment has already been resolved",
+	var payment *Payment
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		if _, _, _, err := store.GetStudent(ctx, schoolID, studentID); err != nil {
+			return err
 		}
-	}
-
-	// 3. Look up payment and ensure it has not already been matched
-	payment, err := s.store.GetPayment(ctx, schoolID, unmatched.PaymentID)
-	if err != nil {
-		payment, err = s.store.GetPayment(ctx, schoolID, paymentID)
-	}
-	if err != nil {
-		return nil, errNotFound("payment record not found")
-	}
-	if payment.MatchedStatus == "matched" {
-		return nil, &APIError{
-			Status:  http.StatusConflict,
-			Code:    "PAYMENT_ALREADY_RESOLVED",
-			Message: "payment record has already been matched",
+		unmatched, err := store.GetUnmatchedPayment(ctx, schoolID, paymentID)
+		if err != nil {
+			return err
 		}
-	}
-
-	// Match and credit the payment in one transaction before marking the queue item resolved.
-	if err := s.creditStudentPayment(ctx, schoolID, studentID, payment.ID, payment.TransactionRef, payment.Provider, payment.Amount, payment.PayerPhone, payment.PayerName); err != nil {
+		if unmatched.Status != "unmatched" {
+			return &APIError{Status: http.StatusConflict, Code: "PAYMENT_ALREADY_RESOLVED", Message: "payment has already been resolved"}
+		}
+		payment, err = store.GetPayment(ctx, schoolID, unmatched.PaymentID)
+		if err != nil {
+			return err
+		}
+		applied, err := creditStudentPayment(ctx, store, schoolID, studentID, payment.ID, payment.TransactionRef, payment.Provider, payment.Amount, payment.PayerPhone, payment.PayerName)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return &APIError{Status: http.StatusConflict, Code: "PAYMENT_ALREADY_RESOLVED", Message: "payment has already been matched"}
+		}
+		if err := store.ResolveUnmatchedPayment(ctx, schoolID, unmatched.ID, studentID, actorUserID, resolutionNote); err != nil {
+			return err
+		}
+		if err := store.UpdatePaymentMatched(ctx, schoolID, payment.ID, studentID, actorUserID); err != nil {
+			return err
+		}
+		if s.auditLogger != nil {
+			if err := s.auditLogger.LogAction(ctx, schoolID, actorUserID, "payment.manual_matched", "payment", payment.ID, map[string]interface{}{
+				"student_id": studentID, "amount": payment.Amount, "transaction_ref": payment.TransactionRef, "resolution_note": resolutionNote,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			return nil, apiErr
+		}
+		if errors.Is(err, ErrNotFound) {
+			return nil, errNotFound("student or unmatched payment not found in this school")
+		}
 		return nil, errInternal(err)
 	}
-	if err := s.store.ResolveUnmatchedPayment(ctx, schoolID, paymentID, studentID, actorUserID, resolutionNote); err != nil {
-		return nil, errInternal(err)
-	}
-
-	if s.auditLogger != nil {
-		_ = s.auditLogger.LogAction(ctx, schoolID, actorUserID, "payment.manual_matched", "payment", payment.ID, map[string]interface{}{
-			"student_id":      studentID,
-			"amount":          payment.Amount,
-			"transaction_ref": payment.TransactionRef,
-			"resolution_note": resolutionNote,
-		})
-	}
-
 	payment.MatchedStatus = "matched"
 	payment.StudentID = &studentID
 	payment.MatchedBy = &actorUserID
-
+	s.notifyPaymentReceipt(ctx, schoolID, studentID, payment.TransactionRef, payment.Amount)
 	return payment, nil
 }
 

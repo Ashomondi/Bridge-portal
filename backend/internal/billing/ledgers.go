@@ -44,16 +44,19 @@ func getStudentFeeBalance(ctx context.Context, store Store, schoolID, studentID,
 
 	ledger, err := store.GetLatestFeeLedger(ctx, schoolID, studentID)
 	if errors.Is(err, ErrNotFound) {
-		// If no charges or ledger exists yet, return zero balances
+		credit, err := prepaidCredit(ctx, store, schoolID, studentID)
+		if err != nil {
+			return nil, errInternal(err)
+		}
 		return &StudentBalance{
 			StudentID:       studentID,
 			AdmissionNumber: adminNum,
 			FullName:        fullName,
 			OpeningBalance:  0,
 			BilledAmount:    0,
-			PaidAmount:      0,
+			PaidAmount:      credit,
 			CurrentBalance:  0,
-			CreditBalance:   0,
+			CreditBalance:   credit,
 			DueDate:         time.Time{},
 			Items:           []FeeStructureItem{},
 			Notes:           []FeeChangeNote{},
@@ -96,6 +99,24 @@ func getStudentFeeBalance(ctx context.Context, store Store, schoolID, studentID,
 		Items:           items,
 		Notes:           notes,
 	}, nil
+}
+
+func prepaidCredit(ctx context.Context, store Store, schoolID, studentID string) (float64, error) {
+	entries, err := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if err != nil {
+		return 0, err
+	}
+	var cents int64
+	for _, entry := range entries {
+		if entry.EntryType == "payment" {
+			amount, err := paymentAmountCents(entry.Amount)
+			if err != nil {
+				return 0, err
+			}
+			cents += amount
+		}
+	}
+	return float64(cents) / 100, nil
 }
 
 // GetStudentLedger returns double-entry ledger entries for student (C10, AC-24).

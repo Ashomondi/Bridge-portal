@@ -11,8 +11,9 @@ import (
 // SQLStore is the PostgreSQL implementation of billing.Store.
 // It enforces Row-Level Security (RLS) via current_school_id() and tenant parameters.
 type SQLStore struct {
-	db *sql.DB
-	tx *sql.Tx
+	db       *sql.DB
+	tx       *sql.Tx
+	schoolID string
 }
 
 // NewSQLStore wraps an existing *sql.DB.
@@ -35,6 +36,15 @@ func (s *SQLStore) q() sqlQuerier {
 
 // WithTx starts a transaction, sets the RLS tenant context, and commits on success.
 func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store) error) error {
+	if schoolID == "" {
+		return errors.New("tenant school_id is required")
+	}
+	if s.tx != nil {
+		if schoolID != s.schoolID {
+			return errors.New("transaction belongs to another school")
+		}
+		return fn(s)
+	}
 	if s.db == nil {
 		return errors.New("billing: SQLStore has no database connection")
 	}
@@ -42,13 +52,14 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 	if err != nil {
 		return err
 	}
-	if schoolID != "" {
+	defer tx.Rollback()
+	{
 		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.school_id', $1, true)`, schoolID); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
 	}
-	tenantStore := &SQLStore{db: s.db, tx: tx}
+	tenantStore := &SQLStore{db: s.db, tx: tx, schoolID: schoolID}
 	if err := fn(tenantStore); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -502,6 +513,12 @@ func (s *SQLStore) GetFeeLedger(ctx context.Context, schoolID, studentID, academ
 }
 
 func (s *SQLStore) GetLatestFeeLedger(ctx context.Context, schoolID, studentID string) (*FeeLedger, error) {
+	if s.tx != nil {
+		var id string
+		if err := s.tx.QueryRowContext(ctx, `SELECT id FROM students WHERE school_id = $1 AND id = $2 FOR UPDATE`, schoolID, studentID).Scan(&id); err != nil {
+			return nil, err
+		}
+	}
 	query := `
 		SELECT id, school_id, student_id, academic_year_id, term_id,
 		       opening_balance, billed_amount, paid_amount, current_balance,
@@ -752,7 +769,7 @@ func (s *SQLStore) GetPaymentByCheckoutID(ctx context.Context, checkoutID string
 		       COALESCE(payer_phone, ''), COALESCE(payer_name, ''), matched_status, matched_by,
 		       payment_date, COALESCE(raw_payload::text, '')
 		FROM payments
-		WHERE transaction_ref = $1 OR raw_payload->>'checkout_request_id' = $1
+		WHERE school_id = current_school_id() AND (transaction_ref = $1 OR raw_payload->>'checkout_request_id' = $1)
 		LIMIT 1;
 	`
 	return s.scanPaymentRow(s.q().QueryRowContext(ctx, query, checkoutID))
@@ -764,7 +781,7 @@ func (s *SQLStore) GetPaymentByTransactionRef(ctx context.Context, transactionRe
 		       COALESCE(payer_phone, ''), COALESCE(payer_name, ''), matched_status, matched_by,
 		       payment_date, COALESCE(raw_payload::text, '')
 		FROM payments
-		WHERE transaction_ref = $1
+		WHERE school_id = current_school_id() AND transaction_ref = $1
 		LIMIT 1;
 	`
 	return s.scanPaymentRow(s.q().QueryRowContext(ctx, query, transactionRef))
@@ -801,7 +818,7 @@ func (s *SQLStore) UpdatePaymentStatus(ctx context.Context, schoolID, paymentID,
 	query := `
 		UPDATE payments
 		SET matched_status = $1
-		WHERE school_id = $2 AND id = $3;
+		WHERE school_id = $2 AND id = $3 AND matched_status != 'matched';
 	`
 	res, err := s.q().ExecContext(ctx, query, status, schoolID, paymentID)
 	if err != nil {
@@ -809,6 +826,10 @@ func (s *SQLStore) UpdatePaymentStatus(ctx context.Context, schoolID, paymentID,
 	}
 	n, err := res.RowsAffected()
 	if err == nil && n == 0 {
+		payment, lookupErr := s.GetPayment(ctx, schoolID, paymentID)
+		if lookupErr == nil && payment.MatchedStatus == "matched" {
+			return nil
+		}
 		return ErrNotFound
 	}
 	return err
@@ -979,7 +1000,7 @@ func (s *SQLStore) ResolveUnmatchedPayment(ctx context.Context, schoolID, id, st
 		    resolved_by = $2,
 		    resolution_note = $3,
 		    resolved_at = NOW()
-		WHERE school_id = $4 AND (id = $5 OR payment_id = $5);
+		WHERE school_id = $4 AND (id = $5 OR payment_id = $5) AND status = 'unmatched';
 	`
 	res, err := s.q().ExecContext(ctx, query, studentID, resolvedBy, note, schoolID, id)
 	if err != nil {
@@ -1000,11 +1021,14 @@ func (s *SQLStore) GetUserChatPaymentPausedUntil(ctx context.Context, userID str
 	query := `SELECT chat_payment_paused_until FROM users WHERE id = $1 LIMIT 1;`
 	var t sql.NullTime
 	err := s.q().QueryRowContext(ctx, query, userID).Scan(&t)
-	if errors.Is(err, sql.ErrNoRows) || !t.Valid {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !t.Valid {
+		return nil, nil
 	}
 	val := t.Time
 	return &val, nil

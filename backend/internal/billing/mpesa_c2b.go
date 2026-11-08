@@ -27,9 +27,12 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 		return nil, errValidation("TransID and BusinessShortCode are required")
 	}
 
-	amount, _ := strconv.ParseFloat(payload.TransAmount, 64)
-	if amount <= 0 {
-		return nil, errValidation("transaction amount must be greater than zero")
+	amount, err := strconv.ParseFloat(payload.TransAmount, 64)
+	if err != nil {
+		return nil, errValidation("invalid transaction amount")
+	}
+	if _, err := paymentAmountCents(amount); err != nil {
+		return nil, errValidation(err.Error())
 	}
 
 	// 1. Resolve school_id strictly from BusinessShortCode; fail closed if unknown (AC-25)
@@ -37,94 +40,77 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 	if err != nil || cfg == nil || cfg.SchoolID == "" {
 		return nil, errValidation("unrecognized BusinessShortCode: no school configured for shortcode")
 	}
-	schoolID := cfg.SchoolID
-
-	// 2. Idempotency: repeated C2B callbacks must not create duplicate payments or credits
-	existing, err := s.store.GetPaymentByTransactionRef(ctx, payload.TransID)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, errInternal(err)
-	}
-	if existing != nil && existing.MatchedStatus == "matched" {
-		return existing, nil
-	}
-
-	rawBillRef := strings.TrimSpace(payload.BillRefNumber)
-	payerPhone := payload.MSISDN
-	payerName := payload.FirstName
-
-	rawJSON, _ := json.Marshal(payload)
-
-	// 3. Look up student in that school where UPPER(TRIM(admission_number)) = UPPER(TRIM(BillRefNumber)) (AC-25)
-	studentID, _, err := s.store.GetStudentByAdmissionNumber(ctx, schoolID, rawBillRef)
-
-	// CASE A: Valid Student Match Found (AC-25)
-	if err == nil && studentID != "" {
-		origRef := ""
-		if existing != nil {
-			origRef = existing.ID
-		}
-		if err := s.creditStudentPayment(ctx, schoolID, studentID, origRef, payload.TransID, "mpesa_c2b", amount, payerPhone, payerName); err != nil {
-			return nil, errInternal(err)
-		}
-		payment, err := s.store.GetPaymentByTransactionRef(ctx, payload.TransID)
+	var payment *Payment
+	applied := false
+	err = s.withTransaction(ctx, cfg.SchoolID, func(store Store) error {
+		var err error
+		payment, applied, err = recordC2BConfirmation(ctx, store, cfg.SchoolID, amount, payload)
 		if err != nil {
-			return nil, errInternal(err)
+			return err
 		}
-
 		if s.auditLogger != nil {
-			_ = s.auditLogger.LogAction(ctx, schoolID, "", "payment.c2b.auto_matched", "payment", payment.ID, map[string]interface{}{
-				"admission_number": rawBillRef,
-				"student_id":       studentID,
-				"amount":           amount,
-				"transaction_ref":  payload.TransID,
+			action := "payment.c2b.unmatched_queued"
+			if payment.MatchedStatus == "matched" {
+				action = "payment.c2b.auto_matched"
+			}
+			return s.auditLogger.LogAction(ctx, cfg.SchoolID, "", action, "payment", payment.ID, map[string]interface{}{
+				"transaction_ref": payment.TransactionRef, "amount": amount, "raw_bill_ref": payload.BillRefNumber,
 			})
 		}
-
-		return payment, nil
-	}
-
-	// CASE B: Admission number missing or not found in school (C50, AC-25)
-	unmatchedPayment := &Payment{
-		SchoolID:       schoolID,
-		StudentID:      nil,
-		TransactionRef: payload.TransID,
-		Provider:       "mpesa_c2b",
-		Amount:         amount,
-		PayerPhone:     payerPhone,
-		PayerName:      payerName,
-		MatchedStatus:  "unmatched",
-		PaymentDate:    time.Now(),
-		RawPayload:     string(rawJSON),
-	}
-	if err := s.store.CreatePayment(ctx, unmatchedPayment); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, errInternal(err)
 	}
-
-	queueItem := &UnmatchedPayment{
-		SchoolID:       schoolID,
-		PaymentID:      unmatchedPayment.ID,
-		TransactionRef: payload.TransID,
-		Amount:         amount,
-		PayerPhone:     payerPhone,
-		PayerName:      payerName,
-		RawAccountRef:  rawBillRef,
-		Status:         "unmatched",
-		CreatedAt:      time.Now(),
+	if applied && payment.StudentID != nil {
+		s.notifyPaymentReceipt(ctx, cfg.SchoolID, *payment.StudentID, payment.TransactionRef, payment.Amount)
 	}
-	if err := s.store.CreateUnmatchedPayment(ctx, queueItem); err != nil {
-		return nil, errInternal(err)
-	}
+	return payment, nil
+}
 
-	if s.auditLogger != nil {
-		_ = s.auditLogger.LogAction(ctx, schoolID, "", "payment.c2b.unmatched_queued", "unmatched_payment", queueItem.ID, map[string]interface{}{
-			"raw_bill_ref":    rawBillRef,
-			"amount":          amount,
-			"transaction_ref": payload.TransID,
-			"payer_phone":     payerPhone,
-		})
+func recordC2BConfirmation(ctx context.Context, store Store, schoolID string, amount float64, payload C2BConfirmationPayload) (*Payment, bool, error) {
+	existing, err := store.GetPaymentByTransactionRef(ctx, payload.TransID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, false, err
 	}
-
-	return unmatchedPayment, nil
+	if existing != nil {
+		if existing.SchoolID != schoolID || existing.Amount != amount {
+			return nil, false, errForbidden("C2B receipt does not match the recorded payment")
+		}
+		return existing, false, nil
+	}
+	rawBillRef := strings.TrimSpace(payload.BillRefNumber)
+	studentID, _, err := store.GetStudentByAdmissionNumber(ctx, schoolID, rawBillRef)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, false, err
+	}
+	if studentID != "" {
+		applied, err := creditStudentPayment(ctx, store, schoolID, studentID, "", payload.TransID, "mpesa_c2b", amount, payload.MSISDN, payload.FirstName)
+		if err != nil {
+			return nil, false, err
+		}
+		payment, err := store.GetPaymentByTransactionRef(ctx, payload.TransID)
+		return payment, applied, err
+	}
+	rawJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false, err
+	}
+	payment := &Payment{
+		SchoolID: schoolID, TransactionRef: payload.TransID, Provider: "mpesa_c2b", Amount: amount,
+		PayerPhone: payload.MSISDN, PayerName: payload.FirstName, MatchedStatus: "unmatched",
+		PaymentDate: time.Now(), RawPayload: string(rawJSON),
+	}
+	if err := store.CreatePayment(ctx, payment); err != nil {
+		return nil, false, err
+	}
+	if err := store.CreateUnmatchedPayment(ctx, &UnmatchedPayment{
+		SchoolID: schoolID, PaymentID: payment.ID, TransactionRef: payload.TransID, Amount: amount,
+		PayerPhone: payload.MSISDN, PayerName: payload.FirstName, RawAccountRef: rawBillRef, Status: "unmatched", CreatedAt: time.Now(),
+	}); err != nil {
+		return nil, false, err
+	}
+	return payment, false, nil
 }
 
 func (s *Service) handleC2BConfirmationHTTP(w http.ResponseWriter, r *http.Request) {

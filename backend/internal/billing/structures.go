@@ -227,6 +227,11 @@ func chargeStudentForStructure(ctx context.Context, store Store, schoolID, stude
 		creditAvail = latestLedger.CreditBalance
 		// If there is an outstanding current balance from earlier, roll it over as opening balance
 		openingBal = latestLedger.CurrentBalance
+	} else if errors.Is(err, ErrNotFound) {
+		creditAvail, err = prepaidCredit(ctx, store, schoolID, studentID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 4. Create new term ledger
@@ -249,7 +254,7 @@ func chargeStudentForStructure(ctx context.Context, store Store, schoolID, stude
 		if creditAvail >= totalDue {
 			// Credit covers the entire charge and opening balance!
 			applied := totalDue
-			newLedger.PaidAmount = applied
+			newLedger.PaidAmount = creditAvail
 			newLedger.CurrentBalance = 0.0
 			newLedger.CreditBalance = creditAvail - applied
 

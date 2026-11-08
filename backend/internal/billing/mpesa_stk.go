@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,13 +49,41 @@ type STKCallbackPayload struct {
 
 // InitiateSTKPush handles initiating an M-Pesa STK push for school fees (C23, C24, C27, AC-23, AC-24, AC-26).
 func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STKPushResponse, error) {
+	var response *STKPushResponse
+	err := s.withTransaction(ctx, req.SchoolID, func(store Store) error {
+		tenantService := *s
+		tenantService.store = store
+		var err error
+		response, err = tenantService.initiateSTKPush(ctx, req)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if s.enqueuer != nil {
+		if err := s.enqueuer.EnqueueSTKPoll(ctx, req.SchoolID, response.CheckoutRequestID, 45*time.Second); err != nil {
+			return response, errInternal(errors.New("STK request recorded but status polling could not be scheduled"))
+		}
+	}
+	if s.auditLogger != nil {
+		caller, _ := IdentityFromContext(ctx)
+		if err := s.auditLogger.LogAction(ctx, req.SchoolID, caller.UserID, "payment.stk_push.initiated", "payment", response.CheckoutRequestID, map[string]interface{}{
+			"student_id": req.StudentID, "amount": req.Amount, "phone": req.PhoneNumber, "source": req.Source,
+		}); err != nil {
+			return response, errInternal(errors.New("STK request recorded but initiation audit could not be written"))
+		}
+	}
+	return response, nil
+}
+
+func (s *Service) initiateSTKPush(ctx context.Context, req STKPushRequest) (*STKPushResponse, error) {
 	if req.SchoolID == "" || req.StudentID == "" || req.PhoneNumber == "" {
 		return nil, errValidation("school_id, student_id, and phone_number are required")
 	}
 
 	// 1. Any positive amount accepted (C24, AC-23). Never reject for being less or greater than current balance.
-	if req.Amount <= 0 {
-		return nil, errValidation("payment amount must be greater than zero")
+	if _, err := paymentAmountCents(req.Amount); err != nil {
+		return nil, errValidation(err.Error())
 	}
 
 	callerID := ""
@@ -80,7 +109,10 @@ func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STK
 		targetUserID := callerID
 		if targetUserID != "" {
 			pausedUntil, err := s.store.GetUserChatPaymentPausedUntil(ctx, targetUserID)
-			if err == nil && pausedUntil != nil && pausedUntil.After(time.Now()) {
+			if err != nil {
+				return nil, errInternal(fmt.Errorf("failed to check chat payment pause: %w", err))
+			}
+			if pausedUntil != nil && pausedUntil.After(time.Now()) {
 				return nil, &APIError{
 					Status:  http.StatusForbidden,
 					Code:    CodeChatPaymentPaused,
@@ -168,21 +200,6 @@ func (s *Service) InitiateSTKPush(ctx context.Context, req STKPushRequest) (*STK
 	}
 	if err := s.store.CreatePayment(ctx, pendingPayment); err != nil {
 		return nil, errInternal(err)
-	}
-
-	// 7. Enqueue fallback Asynq job to poll Daraja after 45s (C23, AC-23)
-	if s.enqueuer != nil {
-		_ = s.enqueuer.EnqueueSTKPoll(ctx, req.SchoolID, checkoutID, 45*time.Second)
-	}
-
-	if s.auditLogger != nil {
-		_ = s.auditLogger.LogAction(ctx, req.SchoolID, callerID, "payment.stk_push.initiated", "payment", checkoutID, map[string]interface{}{
-			"student_id":       req.StudentID,
-			"admission_number": adminNum,
-			"amount":           req.Amount,
-			"phone":            phone,
-			"source":           req.Source,
-		})
 	}
 
 	customerMsg := darajaResp.CustomerMessage
@@ -291,7 +308,9 @@ func (s *Service) HandleSTKCallback(ctx context.Context, payload STKCallbackPayl
 	if strings.TrimSpace(mpesaReceipt) == "" {
 		return errValidation("missing or invalid MpesaReceiptNumber in callback metadata")
 	}
-	if amount <= 0 || amount != pendingPayment.Amount {
+	callbackCents, amountErr := paymentAmountCents(amount)
+	pendingCents, pendingErr := paymentAmountCents(pendingPayment.Amount)
+	if amountErr != nil || pendingErr != nil || callbackCents != pendingCents {
 		return errValidation("callback amount does not match the initiated payment")
 	}
 	if pendingPayment.PayerPhone != "" && normalizeDarajaPhone(phone) != normalizeDarajaPhone(pendingPayment.PayerPhone) {
@@ -314,124 +333,112 @@ func (s *Service) HandleSTKCallback(ctx context.Context, payload STKCallbackPayl
 
 // creditStudentPayment handles ledger crediting, double entry, overpayment credit_balance, and guardian notification (AC-24, AC-25).
 func (s *Service) creditStudentPayment(ctx context.Context, schoolID, studentID, origRef, transactionRef, provider string, amount float64, payerPhone, payerName string) error {
-	// If studentID or schoolID is empty, try to resolve from original payment reference
-	var pendingPayment *Payment
-	if origRef != "" {
-		p, err := s.store.GetPayment(ctx, schoolID, origRef)
-		if err == nil && p != nil {
-			pendingPayment = p
-			if schoolID == "" {
-				schoolID = p.SchoolID
-			}
-			if studentID == "" && p.StudentID != nil {
-				studentID = *p.StudentID
-			}
-			if amount <= 0 {
-				amount = p.Amount
-			}
-			if payerPhone == "" {
-				payerPhone = p.PayerPhone
-			}
-		}
-	}
-
-	if studentID == "" || schoolID == "" {
-		return errValidation("school_id and student_id are required to credit payment")
-	}
-
-	// Idempotency check: has this transactionRef already been recorded?
-	existing, err := s.store.GetPaymentByTransactionRef(ctx, transactionRef)
-	if err == nil && existing != nil && existing.MatchedStatus == "matched" && existing.ID != origRef {
-		return nil
-	}
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return errInternal(err)
-	}
-
 	applied := false
-	err = s.withTransaction(ctx, schoolID, func(store Store) error {
-		payment := &Payment{
-			SchoolID:       schoolID,
-			StudentID:      &studentID,
-			TransactionRef: transactionRef,
-			Provider:       provider,
-			Amount:         amount,
-			PayerPhone:     payerPhone,
-			PayerName:      payerName,
-			MatchedStatus:  "matched",
-			PaymentDate:    time.Now(),
-		}
-		if pendingPayment != nil {
-			payment.ID = pendingPayment.ID
-			wasMatched, err := store.MatchPayment(ctx, payment)
-			if err != nil {
-				return err
-			}
-			if !wasMatched {
-				return nil
-			}
-		} else if err := store.CreatePayment(ctx, payment); err != nil {
-			return err
-		}
-
-		if err := store.CreateLedgerEntry(ctx, &LedgerEntry{
-			SchoolID:    schoolID,
-			StudentID:   studentID,
-			EntryType:   "payment",
-			Amount:      amount,
-			Reference:   transactionRef,
-			Description: fmt.Sprintf("Fee payment via %s (Ref: %s)", provider, transactionRef),
-		}); err != nil {
-			return err
-		}
-
-		ledger, err := store.GetLatestFeeLedger(ctx, schoolID, studentID)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return err
-		}
-		if ledger != nil {
-			ledger.PaidAmount += amount
-			totalBilled := ledger.OpeningBalance + ledger.BilledAmount
-			if ledger.PaidAmount >= totalBilled {
-				ledger.CurrentBalance = 0
-				ledger.CreditBalance = ledger.PaidAmount - totalBilled
-			} else {
-				ledger.CurrentBalance = totalBilled - ledger.PaidAmount
-				ledger.CreditBalance = 0
-			}
-			if err := store.SaveFeeLedger(ctx, ledger); err != nil {
-				return err
-			}
-		}
-		applied = true
-		return nil
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		applied, err = creditStudentPayment(ctx, store, schoolID, studentID, origRef, transactionRef, provider, amount, payerPhone, payerName)
+		return err
 	})
 	if err != nil {
 		return errInternal(err)
 	}
-	if !applied {
-		return nil
+	if applied {
+		s.notifyPaymentReceipt(ctx, schoolID, studentID, transactionRef, amount)
 	}
-
-	// 4. Send in-app payment receipt notification to student's guardians
-	if s.notifier != nil {
-		guardians, err := s.store.ListGuardiansForStudent(ctx, schoolID, studentID)
-		if err != nil {
-			log.Printf("billing: payment %s committed but guardian lookup for receipt notification failed: %v", transactionRef, err)
-			return nil
-		}
-		for _, guardianUserID := range guardians {
-			if err := s.notifier.CreateInAppNotification(ctx, schoolID, guardianUserID, "payment_receipt", "Fee Payment Received", fmt.Sprintf("M-Pesa payment of KES %.2f (Receipt: %s) has been successfully credited to fees.", amount, transactionRef), map[string]interface{}{
-				"student_id":      studentID,
-				"amount":          amount,
-				"transaction_ref": transactionRef,
-			}); err != nil {
-				log.Printf("billing: payment %s committed but receipt notification to %s failed: %v", transactionRef, guardianUserID, err)
-			}
-		}
-	}
-
 	return nil
+}
+
+func creditStudentPayment(ctx context.Context, store Store, schoolID, studentID, origRef, transactionRef, provider string, amount float64, payerPhone, payerName string) (bool, error) {
+	if schoolID == "" || studentID == "" {
+		return false, errValidation("school_id and student_id are required to credit payment")
+	}
+	if _, err := paymentAmountCents(amount); err != nil {
+		return false, errValidation(err.Error())
+	}
+	if _, _, _, err := store.GetStudent(ctx, schoolID, studentID); err != nil {
+		return false, err
+	}
+	payment := &Payment{
+		ID: origRef, SchoolID: schoolID, StudentID: &studentID,
+		TransactionRef: transactionRef, Provider: provider, Amount: amount,
+		PayerPhone: payerPhone, PayerName: payerName,
+		MatchedStatus: "matched", PaymentDate: time.Now(),
+	}
+	if origRef != "" {
+		matched, err := store.MatchPayment(ctx, payment)
+		if err != nil || !matched {
+			return false, err
+		}
+	} else {
+		existing, err := store.GetPaymentByTransactionRef(ctx, transactionRef)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return false, err
+		}
+		if existing != nil {
+			if existing.SchoolID != schoolID {
+				return false, errForbidden("payment belongs to another school")
+			}
+			return false, nil
+		}
+		if err := store.CreatePayment(ctx, payment); err != nil {
+			return false, err
+		}
+	}
+	ledger, err := store.GetLatestFeeLedger(ctx, schoolID, studentID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, err
+	}
+	entry := &LedgerEntry{
+		SchoolID: schoolID, StudentID: studentID, EntryType: "payment", Amount: amount,
+		Reference: transactionRef, Description: fmt.Sprintf("Fee payment via %s (Ref: %s)", provider, transactionRef),
+	}
+	if ledger != nil {
+		entry.TermID = ledger.TermID
+		amountCents, err := paymentAmountCents(amount)
+		if err != nil {
+			return false, err
+		}
+		paid := int64(math.Round(ledger.PaidAmount*100)) + amountCents
+		billed := int64(math.Round(ledger.OpeningBalance*100)) + int64(math.Round(ledger.BilledAmount*100))
+		ledger.PaidAmount = float64(paid) / 100
+		if paid >= billed {
+			ledger.CurrentBalance = 0
+			ledger.CreditBalance = float64(paid-billed) / 100
+		} else {
+			ledger.CurrentBalance = float64(billed-paid) / 100
+			ledger.CreditBalance = 0
+		}
+		if err := store.SaveFeeLedger(ctx, ledger); err != nil {
+			return false, err
+		}
+	}
+	if err := store.CreateLedgerEntry(ctx, entry); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Service) notifyPaymentReceipt(ctx context.Context, schoolID, studentID, transactionRef string, amount float64) {
+	if s.notifier == nil {
+		return
+	}
+	var guardians []string
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		guardians, err = store.ListGuardiansForStudent(ctx, schoolID, studentID)
+		return err
+	})
+	if err != nil {
+		log.Printf("billing: payment %s committed but receipt guardian lookup failed: %v", transactionRef, err)
+		return
+	}
+	for _, guardianUserID := range guardians {
+		if err := s.notifier.CreateInAppNotification(ctx, schoolID, guardianUserID, "payment_receipt", "Fee Payment Received", fmt.Sprintf("M-Pesa payment of KES %.2f (Receipt: %s) has been successfully credited to fees.", amount, transactionRef), map[string]interface{}{
+			"student_id": studentID, "amount": amount, "transaction_ref": transactionRef,
+		}); err != nil {
+			log.Printf("billing: payment %s committed but receipt notification failed: %v", transactionRef, err)
+		}
+	}
 }
 
 func normalizeDarajaPhone(phone string) string {
@@ -440,6 +447,55 @@ func normalizeDarajaPhone(phone string) string {
 		return "254" + phone[1:]
 	}
 	return phone
+}
+
+func (s *Service) QuerySTKPushStatus(ctx context.Context, schoolID, checkoutRequestID string) error {
+	var payment *Payment
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		payment, err = store.GetPaymentByCheckoutID(ctx, checkoutRequestID)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if payment.SchoolID != schoolID || payment.Provider != "mpesa_stk" || payment.StudentID == nil {
+		return errForbidden("checkout request does not belong to this school's STK payment")
+	}
+	if payment.MatchedStatus == "matched" || payment.MatchedStatus == "failed" {
+		return nil
+	}
+	var config *SchoolMpesaConfig
+	err = s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		config, err = store.GetSchoolMpesaConfig(ctx, schoolID)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	result, err := s.darajaClient.QuerySTKStatus(ctx, config, checkoutRequestID)
+	if err != nil {
+		return err
+	}
+	if result == nil || result.CheckoutRequestID != checkoutRequestID || result.ResponseCode != "0" || result.ResultCode == "" {
+		return errors.New("Daraja has not confirmed the STK checkout status")
+	}
+	var initiation struct {
+		MerchantRequestID string `json:"merchant_request_id"`
+	}
+	if err := json.Unmarshal([]byte(payment.RawPayload), &initiation); err != nil {
+		return err
+	}
+	if initiation.MerchantRequestID != "" && result.MerchantRequestID != initiation.MerchantRequestID {
+		return errForbidden("Daraja merchant request ID does not match the recorded STK request")
+	}
+	if result.ResultCode != "0" {
+		return s.withTransaction(ctx, schoolID, func(store Store) error {
+			return store.UpdatePaymentStatus(ctx, schoolID, payment.ID, "failed")
+		})
+	}
+	return s.creditStudentPayment(ctx, schoolID, *payment.StudentID, payment.ID, payment.TransactionRef, payment.Provider, payment.Amount, payment.PayerPhone, payment.PayerName)
 }
 
 func (s *Service) handleSTKPush(w http.ResponseWriter, r *http.Request) {

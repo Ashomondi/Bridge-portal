@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,6 +102,9 @@ func (c *HTTPDarajaClient) getAccessToken(ctx context.Context, baseURL, consumer
 }
 
 func (c *HTTPDarajaClient) InitiateSTKPush(ctx context.Context, cfg *SchoolMpesaConfig, params STKInitiateParams) (*DarajaSTKResponse, error) {
+	if _, err := paymentAmountCents(params.Amount); err != nil {
+		return nil, err
+	}
 	if cfg == nil {
 		return nil, errors.New("school mpesa config is required")
 	}
@@ -128,7 +132,7 @@ func (c *HTTPDarajaClient) InitiateSTKPush(ctx context.Context, cfg *SchoolMpesa
 		"Password":          password,
 		"Timestamp":         timestamp,
 		"TransactionType":   "CustomerPayBillOnline",
-		"Amount":            int(params.Amount),
+		"Amount":            json.Number(strconv.FormatFloat(params.Amount, 'f', 2, 64)),
 		"PartyA":            params.PhoneNumber,
 		"PartyB":            params.Shortcode,
 		"PhoneNumber":       params.PhoneNumber,

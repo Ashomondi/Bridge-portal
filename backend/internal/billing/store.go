@@ -619,6 +619,9 @@ func (m *MemoryStore) UpdatePaymentStatus(ctx context.Context, schoolID, payment
 	if !ok || (schoolID != "" && p.SchoolID != schoolID) {
 		return ErrNotFound
 	}
+	if p.MatchedStatus == "matched" {
+		return nil
+	}
 	p.MatchedStatus = status
 	return nil
 }
