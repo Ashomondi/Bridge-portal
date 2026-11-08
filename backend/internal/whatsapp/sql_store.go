@@ -31,8 +31,9 @@ func maskPhoneNumber(phone string) string {
 // SQLStore is the PostgreSQL implementation of whatsapp.Store.
 // It persists sessions, bots, rate limits, and hashed OTP requests to PostgreSQL.
 type SQLStore struct {
-	db *sql.DB
-	tx *sql.Tx
+	db       *sql.DB
+	tx       *sql.Tx
+	schoolID string
 }
 
 func NewSQLStore(db *sql.DB) *SQLStore {
@@ -53,6 +54,15 @@ func (s *SQLStore) q() sqlQuerier {
 }
 
 func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store) error) error {
+	if schoolID == "" {
+		return errors.New("tenant school_id is required")
+	}
+	if s.tx != nil {
+		if schoolID != s.schoolID {
+			return errors.New("transaction belongs to another school")
+		}
+		return fn(s)
+	}
 	if s.db == nil {
 		return errors.New("whatsapp: SQLStore has no database connection")
 	}
@@ -60,13 +70,14 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 	if err != nil {
 		return err
 	}
-	if schoolID != "" {
+	defer tx.Rollback()
+	{
 		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.school_id', $1, true)`, schoolID); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
 	}
-	tenantStore := &SQLStore{db: s.db, tx: tx}
+	tenantStore := &SQLStore{db: s.db, tx: tx, schoolID: schoolID}
 	if err := fn(tenantStore); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -124,6 +135,11 @@ func (s *SQLStore) RegisterSchoolBot(ctx context.Context, bot *SchoolWhatsAppBot
 }
 
 func (s *SQLStore) GetActiveSession(ctx context.Context, schoolID, senderWANumber string) (*ChatSession, error) {
+	if s.tx != nil {
+		if _, err := s.tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, schoolID+":"+senderWANumber); err != nil {
+			return nil, err
+		}
+	}
 	query := `
 		SELECT cs.id, cs.school_id, cs.channel, cs.sender_wa_number,
 		       COALESCE(cs.student_id::text, ''), COALESCE(s.admission_number, ''),
@@ -148,7 +164,7 @@ func (s *SQLStore) GetSessionByID(ctx context.Context, sessionID string) (*ChatS
 		       cs.created_at, cs.updated_at
 		FROM chat_sessions cs
 		LEFT JOIN students s ON s.id = cs.student_id
-		WHERE cs.id = $1
+		WHERE cs.school_id = current_school_id() AND cs.id = $1
 		LIMIT 1;
 	`
 	return s.scanSession(s.q().QueryRowContext(ctx, query, sessionID))
@@ -166,7 +182,7 @@ func (s *SQLStore) scanSession(row *sql.Row) (*ChatSession, error) {
 		&cs.CreatedAt, &cs.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("chat session not found")
+		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -230,7 +246,7 @@ func (s *SQLStore) GetStudentByAdmission(ctx context.Context, schoolID, admissio
 	`
 	err = s.q().QueryRowContext(ctx, query, schoolID, admissionNumber).Scan(&studentID, &fullName)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", errors.New("student not found")
+		return "", "", ErrNotFound
 	}
 	return studentID, fullName, err
 }
@@ -279,7 +295,7 @@ func (s *SQLStore) IsSenderBlocked(ctx context.Context, senderWANumber string) (
 	query := `
 		SELECT blocked_until
 		FROM sender_rate_blocks
-		WHERE sender_wa_number = $1 AND blocked_until > NOW()
+		WHERE school_id = current_school_id() AND sender_wa_number = $1 AND blocked_until > NOW()
 		ORDER BY blocked_until DESC
 		LIMIT 1;
 	`
@@ -308,7 +324,7 @@ func (s *SQLStore) GetRecentOTPRequestCount(ctx context.Context, senderWANumber 
 	query := `
 		SELECT COUNT(*)
 		FROM chat_otp_requests
-		WHERE sender_wa_number = $1 AND created_at > $2;
+		WHERE school_id = current_school_id() AND sender_wa_number = $1 AND created_at > $2;
 	`
 	var count int
 	err := s.q().QueryRowContext(ctx, query, senderWANumber, cutoff).Scan(&count)
@@ -316,6 +332,11 @@ func (s *SQLStore) GetRecentOTPRequestCount(ctx context.Context, senderWANumber 
 }
 
 func (s *SQLStore) HasRecentOTPForStudent(ctx context.Context, schoolID, admissionNumber string, window time.Duration) (bool, error) {
+	if s.tx != nil {
+		if _, err := s.tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, schoolID+":admission:"+strings.ToUpper(strings.TrimSpace(admissionNumber))); err != nil {
+			return false, err
+		}
+	}
 	cutoff := time.Now().Add(-window)
 	query := `
 		SELECT EXISTS (
@@ -333,7 +354,7 @@ func (s *SQLStore) HasRecentOTPForSender(ctx context.Context, senderWANumber str
 	query := `
 		SELECT EXISTS (
 			SELECT 1 FROM chat_otp_requests
-			WHERE sender_wa_number = $1 AND created_at > $2
+			WHERE school_id = current_school_id() AND sender_wa_number = $1 AND created_at > $2
 		);
 	`
 	var exists bool
@@ -347,6 +368,9 @@ func (s *SQLStore) SaveOTP(ctx context.Context, sessionID, codeHash string, expi
 		return fmt.Errorf("session not found for OTP save: %w", err)
 	}
 
+	if _, err := s.q().ExecContext(ctx, `UPDATE chat_otp_requests SET expires_at = NOW() WHERE school_id = $1 AND session_id = $2`, sess.SchoolID, sessionID); err != nil {
+		return err
+	}
 	query := `
 		INSERT INTO chat_otp_requests (
 			id, school_id, session_id, sender_wa_number, admission_number,
@@ -367,9 +391,9 @@ func (s *SQLStore) VerifyOTP(ctx context.Context, sessionID, code string) (bool,
 	query := `
 		SELECT id, otp_code, expires_at, attempts
 		FROM chat_otp_requests
-		WHERE session_id = $1 AND expires_at > NOW()
+		WHERE school_id = current_school_id() AND session_id = $1 AND expires_at > NOW()
 		ORDER BY created_at DESC
-		LIMIT 1;
+		LIMIT 1 FOR UPDATE;
 	`
 	var id, storedHash string
 	var expiresAt time.Time
@@ -377,7 +401,7 @@ func (s *SQLStore) VerifyOTP(ctx context.Context, sessionID, code string) (bool,
 
 	err := s.q().QueryRowContext(ctx, query, sessionID).Scan(&id, &storedHash, &expiresAt, &attempts)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, errors.New("expired or invalid OTP")
+		return false, ErrInvalidOTP
 	}
 	if err != nil {
 		return false, err
@@ -386,19 +410,25 @@ func (s *SQLStore) VerifyOTP(ctx context.Context, sessionID, code string) (bool,
 	attempts++
 	if attempts > 3 {
 		// Consume OTP on max attempts to prevent brute force
-		_, _ = s.q().ExecContext(ctx, `DELETE FROM chat_otp_requests WHERE id = $1`, id)
-		return false, errors.New("maximum verification attempts exceeded; OTP invalidated")
+		if _, err := s.q().ExecContext(ctx, `UPDATE chat_otp_requests SET expires_at = NOW() WHERE school_id = current_school_id() AND id = $1`, id); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("maximum verification attempts exceeded; OTP invalidated: %w", ErrInvalidOTP)
 	}
 
 	// Update attempt count
-	_, _ = s.q().ExecContext(ctx, `UPDATE chat_otp_requests SET attempts = $1 WHERE id = $2`, attempts, id)
+	if _, err := s.q().ExecContext(ctx, `UPDATE chat_otp_requests SET attempts = $1 WHERE school_id = current_school_id() AND id = $2`, attempts, id); err != nil {
+		return false, err
+	}
 
 	hashed := hashOTP(code)
-	if hashed != storedHash && code != storedHash {
+	if hashed != storedHash {
 		return false, nil
 	}
 
 	// Successfully verified: consume OTP so it cannot be replayed
-	_, _ = s.q().ExecContext(ctx, `DELETE FROM chat_otp_requests WHERE id = $1`, id)
+	if _, err := s.q().ExecContext(ctx, `UPDATE chat_otp_requests SET expires_at = NOW() WHERE school_id = current_school_id() AND id = $1`, id); err != nil {
+		return false, err
+	}
 	return true, nil
 }

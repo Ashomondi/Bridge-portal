@@ -17,6 +17,19 @@ import (
 	"time"
 )
 
+var ErrNotFound = errors.New("whatsapp: record not found")
+var ErrInvalidOTP = errors.New("expired or invalid OTP")
+
+type chatError struct {
+	Code    string
+	Message string
+}
+
+func (e *chatError) Error() string { return e.Message }
+func rateLimitReply(code, message string) (string, error) {
+	return message, &chatError{Code: code, Message: message}
+}
+
 // Session States
 const (
 	StateAwaitingAdmissionNumber   = "AWAITING_ADMISSION_NUMBER"
@@ -148,19 +161,48 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 	if err != nil || bot == nil || !bot.IsActive {
 		return "", errors.New(CodeUnknownBot)
 	}
-	schoolID := bot.SchoolID
+	if txStore, ok := s.store.(interface {
+		WithTx(context.Context, string, func(Store) error) error
+	}); ok {
+		var refusal error
+		err := txStore.WithTx(ctx, bot.SchoolID, func(store Store) error {
+			tenantService := *s
+			tenantService.store = store
+			var err error
+			reply, err = tenantService.processSchoolMessage(ctx, bot.SchoolID, senderWANumber, text)
+			var rateError *chatError
+			if errors.As(err, &rateError) {
+				refusal = err
+				return nil
+			}
+			return err
+		})
+		if err != nil {
+			return "", err
+		}
+		return reply, refusal
+	}
+	return s.processSchoolMessage(ctx, bot.SchoolID, senderWANumber, text)
+}
 
+func (s *Service) processSchoolMessage(ctx context.Context, schoolID, senderWANumber, text string) (string, error) {
 	// 2. Check 24-hour rate limit block on requesting WhatsApp number (C20, AC-10)
 	blocked, until, err := s.store.IsSenderBlocked(ctx, senderWANumber)
-	if err == nil && blocked {
-		return fmt.Sprintf("Your WhatsApp number has exceeded verification attempts and is temporarily blocked until %s. Please try again later or contact the school office.", until.Format("15:04 Jan 02")), nil
+	if err != nil {
+		return "", fmt.Errorf("failed to check sender block: %w", err)
+	}
+	if blocked {
+		return rateLimitReply(CodeSenderBlocked, fmt.Sprintf("Your WhatsApp number has exceeded verification attempts and is temporarily blocked until %s. Please try again later or contact the school office.", until.Format("15:04 Jan 02")))
 	}
 
 	trimmedText := strings.TrimSpace(text)
 
 	// 3. Fetch or initialize chat session
 	session, err := s.store.GetActiveSession(ctx, schoolID, senderWANumber)
-	if err != nil || session == nil {
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("failed to load chat session: %w", err)
+	}
+	if session == nil {
 		session = &ChatSession{
 			SchoolID:       schoolID,
 			Channel:        "whatsapp",
@@ -169,32 +211,41 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}
-		_ = s.store.SaveSession(ctx, session)
+		if err := s.store.SaveSession(ctx, session); err != nil {
+			return "", fmt.Errorf("failed to save chat session: %w", err)
+		}
 	}
 
 	// If session was verified but has expired past 6 hours, reset to AWAITING_ADMISSION_NUMBER (C13, AC-11)
 	if session.State == StateVerified {
-		if session.ExpiresAt != nil && time.Now().After(*session.ExpiresAt) {
+		if session.ExpiresAt == nil || !time.Now().Before(*session.ExpiresAt) {
 			session.State = StateAwaitingAdmissionNumber
 			session.StudentID = ""
 			session.AdmissionNumber = ""
 			session.GuardianUserID = ""
 			session.VerifiedAt = nil
 			session.ExpiresAt = nil
-			_ = s.store.SaveSession(ctx, session)
+			if err := s.store.SaveSession(ctx, session); err != nil {
+				return "", fmt.Errorf("failed to save chat session: %w", err)
+			}
 			return "Your previous 6-hour verified session has expired. To access student records, please enter the student's admission number:", nil
 		}
 
 		// Session is active and verified! Forward query to AI service (C21, AC-28)
 		session.LookupCount++
-		_ = s.store.SaveSession(ctx, session)
+		if err := s.store.SaveSession(ctx, session); err != nil {
+			return "", fmt.Errorf("failed to save chat session: %w", err)
+		}
 		if s.aiBridge != nil {
 			aiReply, err := s.aiBridge.ForwardParentQuery(ctx, schoolID, session.GuardianUserID, session.StudentID, trimmedText, session.ID)
-			if err == nil && aiReply != "" {
+			if err != nil {
+				return "", fmt.Errorf("AI query failed: %w", err)
+			}
+			if aiReply != "" {
 				return aiReply, nil
 			}
 		}
-		return "Hello! How can I assist you today regarding fees, academic progress, or events?", nil
+		return "", errors.New("AI service bridge is unavailable")
 	}
 
 	// State Machine Transition
@@ -203,7 +254,10 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 		// User submits admission number
 		admissionNum := strings.ToUpper(trimmedText)
 		studentID, studentName, err := s.store.GetStudentByAdmission(ctx, schoolID, admissionNum)
-		if err != nil || studentID == "" {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return "", fmt.Errorf("student lookup failed: %w", err)
+		}
+		if studentID == "" {
 			// C14 Rule: If no student in school matches, return generic error and SEND NO DATA AND NO OTP
 			return "We could not verify that admission number. Please check and try again or contact the school office.", nil
 		}
@@ -213,14 +267,19 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 
 		// Matched! Fetch linked guardians in student_guardians (C15, AC-09)
 		guardians, err := s.store.ListGuardiansForStudent(ctx, schoolID, studentID)
-		if err != nil || len(guardians) == 0 {
+		if err != nil {
+			return "", fmt.Errorf("guardian lookup failed: %w", err)
+		}
+		if len(guardians) == 0 {
 			return "We could not locate a registered guardian contact for this student. Please contact the school office to register your phone number.", nil
 		}
 
 		// Multiple guardians: display numbered masked phone numbers (AC-09)
 		if len(guardians) > 1 {
 			session.State = StateAwaitingGuardianSelection
-			_ = s.store.SaveSession(ctx, session)
+			if err := s.store.SaveSession(ctx, session); err != nil {
+				return "", fmt.Errorf("failed to save chat session: %w", err)
+			}
 
 			var sb strings.Builder
 			sb.WriteString(fmt.Sprintf("Found record for %s. Multiple guardians are registered. Please reply with the number corresponding to your registered phone number:\n", studentName))
@@ -233,16 +292,23 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 		// Single guardian: proceed directly to OTP request
 		session.GuardianUserID = guardians[0].UserID
 		session.State = StateAwaitingOTP
-		_ = s.store.SaveSession(ctx, session)
+		if err := s.store.SaveSession(ctx, session); err != nil {
+			return "", fmt.Errorf("failed to save chat session: %w", err)
+		}
 
 		return s.dispatchOTP(ctx, session, guardians[0].MaskedPhone, guardians[0].PhoneNumber)
 
 	case StateAwaitingGuardianSelection:
 		// User replies with choice (e.g. "1" or "2")
 		guardians, err := s.store.ListGuardiansForStudent(ctx, schoolID, session.StudentID)
-		if err != nil || len(guardians) == 0 {
+		if err != nil {
+			return "", fmt.Errorf("guardian lookup failed: %w", err)
+		}
+		if len(guardians) == 0 {
 			session.State = StateAwaitingAdmissionNumber
-			_ = s.store.SaveSession(ctx, session)
+			if err := s.store.SaveSession(ctx, session); err != nil {
+				return "", fmt.Errorf("failed to save chat session: %w", err)
+			}
 			return "Session error. Please enter the student's admission number again:", nil
 		}
 
@@ -255,7 +321,9 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 		selected := guardians[choice-1]
 		session.GuardianUserID = selected.UserID
 		session.State = StateAwaitingOTP
-		_ = s.store.SaveSession(ctx, session)
+		if err := s.store.SaveSession(ctx, session); err != nil {
+			return "", fmt.Errorf("failed to save chat session: %w", err)
+		}
 
 		return s.dispatchOTP(ctx, session, selected.MaskedPhone, selected.PhoneNumber)
 
@@ -263,7 +331,10 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 		// User submits OTP code
 		code := strings.TrimSpace(trimmedText)
 		valid, err := s.store.VerifyOTP(ctx, session.ID, code)
-		if err != nil || !valid {
+		if err != nil && !errors.Is(err, ErrInvalidOTP) {
+			return "", fmt.Errorf("OTP verification failed: %w", err)
+		}
+		if !valid {
 			return "Invalid or expired OTP code. Please enter the 6-digit code sent via SMS to your registered number:", nil
 		}
 
@@ -273,13 +344,17 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 		session.State = StateVerified
 		session.VerifiedAt = &now
 		session.ExpiresAt = &expires
-		_ = s.store.SaveSession(ctx, session)
+		if err := s.store.SaveSession(ctx, session); err != nil {
+			return "", fmt.Errorf("failed to save chat session: %w", err)
+		}
 
 		return "Identity verified successfully! Your session is active for the next 6 hours. You can now inquire about your child's fee balance, term results, attendance, or pay school fees via M-Pesa.", nil
 
 	default:
 		session.State = StateAwaitingAdmissionNumber
-		_ = s.store.SaveSession(ctx, session)
+		if err := s.store.SaveSession(ctx, session); err != nil {
+			return "", fmt.Errorf("failed to save chat session: %w", err)
+		}
 		return "Please enter the student's admission number to start:", nil
 	}
 }
@@ -288,33 +363,52 @@ func (s *Service) ProcessIncomingMessage(ctx context.Context, botPhoneNumber, se
 func (s *Service) dispatchOTP(ctx context.Context, session *ChatSession, maskedPhone, registeredPhone string) (string, error) {
 	// 1. Rate Limit Check: 1 OTP per minute per sender OR per student admission number (A3, AC-10)
 	recentSender, err := s.store.HasRecentOTPForSender(ctx, session.SenderWANumber, 60*time.Second)
-	if err == nil && recentSender {
-		return "An OTP was already requested recently for this session. Please wait 60 seconds before requesting another code.", nil
+	if err != nil {
+		return "", fmt.Errorf("failed to check sender cooldown: %w", err)
+	}
+	if recentSender {
+		return rateLimitReply(CodeRateLimited, "An OTP was already requested recently for this session. Please wait 60 seconds before requesting another code.")
 	}
 	recentStudent, err := s.store.HasRecentOTPForStudent(ctx, session.SchoolID, session.AdmissionNumber, 60*time.Second)
-	if err == nil && recentStudent {
-		return "An OTP was recently requested for this student's admission number. Please wait 60 seconds before trying again.", nil
+	if err != nil {
+		return "", fmt.Errorf("failed to check student cooldown: %w", err)
+	}
+	if recentStudent {
+		return rateLimitReply(CodeRateLimited, "An OTP was recently requested for this student's admission number. Please wait 60 seconds before trying again.")
 	}
 
 	// 2. 6 requests in 30 minutes blocks sender_wa_number for 24 hours (C18–C20, AC-10)
 	count, err := s.store.GetRecentOTPRequestCount(ctx, session.SenderWANumber, 30*time.Minute)
-	if err == nil && count >= 5 {
+	if err != nil {
+		return "", fmt.Errorf("failed to check OTP request count: %w", err)
+	}
+	if count >= 5 {
 		// 6th request: block requesting WhatsApp number for 24 hours (C20, AC-10)
 		// Crucial: Only block sender_wa_number, NEVER block guardian's account or phone!
 		blockUntil := time.Now().Add(24 * time.Hour)
-		_ = s.store.BlockSender(ctx, session.SchoolID, session.SenderWANumber, "Excessive OTP verification requests (>5 in 30m)", blockUntil)
-		return "You have exceeded the maximum allowed verification attempts. Your WhatsApp number is blocked from requesting OTPs for 24 hours. The student's registered guardian can still log in normally via the web portal.", nil
+		if err := s.store.BlockSender(ctx, session.SchoolID, session.SenderWANumber, "Excessive OTP verification requests (>5 in 30m)", blockUntil); err != nil {
+			return "", fmt.Errorf("failed to block OTP sender: %w", err)
+		}
+		return rateLimitReply(CodeSenderBlocked, "You have exceeded the maximum allowed verification attempts. Your WhatsApp number is blocked from requesting OTPs for 24 hours. The student's registered guardian can still log in normally via the web portal.")
 	}
 
 	// 3. Generate 6-digit OTP and store one-way hash (AC-10)
-	otpCode := generate6DigitOTP()
+	otpCode, err := generate6DigitOTP()
+	if err != nil {
+		return "", err
+	}
 	expiresAt := time.Now().Add(10 * time.Minute)
-	_ = s.store.SaveOTP(ctx, session.ID, hashOTP(otpCode), expiresAt)
+	if err := s.store.SaveOTP(ctx, session.ID, hashOTP(otpCode), expiresAt); err != nil {
+		return "", fmt.Errorf("failed to persist OTP: %w", err)
+	}
 
 	// 4. Send SMS OTP strictly to registered phone number in users.phone_number (C12, C13, AC-08, AC-09)
 	smsMessage := fmt.Sprintf("Your Ikonex Academy WhatsApp verification code is %s. Valid for 10 minutes. Do not share this code.", otpCode)
-	if s.sms != nil {
-		_ = s.sms.SendTransactionalSMS(ctx, registeredPhone, smsMessage)
+	if s.sms == nil {
+		return "", errors.New("SMS dispatcher is unavailable")
+	}
+	if err := s.sms.SendTransactionalSMS(ctx, registeredPhone, smsMessage); err != nil {
+		return "", errors.New("verification SMS delivery failed")
 	}
 
 	return fmt.Sprintf("A 6-digit verification code has been sent via SMS to your registered number %s. Please reply with the code to verify your identity:", maskedPhone), nil
@@ -325,9 +419,12 @@ func hashOTP(code string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func generate6DigitOTP() string {
-	n, _ := rand.Int(rand.Reader, big.NewInt(900000))
-	return fmt.Sprintf("%06d", n.Int64()+100000)
+func generate6DigitOTP() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(900000))
+	if err != nil {
+		return "", fmt.Errorf("failed to generate OTP: %w", err)
+	}
+	return fmt.Sprintf("%06d", n.Int64()+100000), nil
 }
 
 type OTPEntry struct {
@@ -404,10 +501,11 @@ func (m *MemoryStore) GetActiveSession(ctx context.Context, schoolID, senderWANu
 	key := fmt.Sprintf("%s:%s", schoolID, senderWANumber)
 	id, ok := m.ActiveSessions[key]
 	if !ok {
-		return nil, errors.New("no active session")
+		return nil, ErrNotFound
 	}
 	s := m.Sessions[id]
-	return s, nil
+	copy := *s
+	return &copy, nil
 }
 
 func (m *MemoryStore) GetSessionByID(ctx context.Context, sessionID string) (*ChatSession, error) {
@@ -415,9 +513,10 @@ func (m *MemoryStore) GetSessionByID(ctx context.Context, sessionID string) (*Ch
 	defer m.mu.RUnlock()
 	s, ok := m.Sessions[sessionID]
 	if !ok {
-		return nil, errors.New("session not found")
+		return nil, ErrNotFound
 	}
-	return s, nil
+	copy := *s
+	return &copy, nil
 }
 
 func (m *MemoryStore) SaveSession(ctx context.Context, session *ChatSession) error {
@@ -427,7 +526,8 @@ func (m *MemoryStore) SaveSession(ctx context.Context, session *ChatSession) err
 		session.ID = fmt.Sprintf("cs_%d", time.Now().UnixNano())
 	}
 	session.UpdatedAt = time.Now()
-	m.Sessions[session.ID] = session
+	copy := *session
+	m.Sessions[session.ID] = &copy
 	key := fmt.Sprintf("%s:%s", session.SchoolID, session.SenderWANumber)
 	m.ActiveSessions[key] = session.ID
 	return nil
@@ -439,7 +539,7 @@ func (m *MemoryStore) GetStudentByAdmission(ctx context.Context, schoolID, admis
 	key := fmt.Sprintf("%s:%s", schoolID, strings.ToUpper(strings.TrimSpace(admissionNumber)))
 	st, ok := m.Students[key]
 	if !ok {
-		return "", "", errors.New("student not found")
+		return "", "", ErrNotFound
 	}
 	return st.ID, st.Name, nil
 }
@@ -522,6 +622,9 @@ func (m *MemoryStore) SaveOTP(ctx context.Context, sessionID, codeHash string, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.Sessions[sessionID]
+	if !ok {
+		return ErrNotFound
+	}
 	if ok {
 		m.OTPRequests = append(m.OTPRequests, struct {
 			SenderWA        string
@@ -547,16 +650,16 @@ func (m *MemoryStore) VerifyOTP(ctx context.Context, sessionID, code string) (bo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	item, ok := m.OTPCodes[sessionID]
-	if !ok || time.Now().After(item.Expires) {
-		return false, errors.New("expired or invalid OTP")
+	if !ok || !time.Now().Before(item.Expires) {
+		return false, ErrInvalidOTP
 	}
 	item.Attempts++
 	if item.Attempts > 3 {
 		delete(m.OTPCodes, sessionID)
-		return false, errors.New("maximum verification attempts exceeded; OTP invalidated")
+		return false, fmt.Errorf("maximum verification attempts exceeded; OTP invalidated: %w", ErrInvalidOTP)
 	}
 	hashed := hashOTP(code)
-	if hashed != item.CodeHash && code != item.CodeHash {
+	if hashed != item.CodeHash {
 		return false, nil
 	}
 	// Consume OTP so it cannot be replayed
@@ -637,14 +740,33 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		} `json:"entry"`
 	}
 
-	if err := json.Unmarshal(body, &payload); err == nil && len(payload.Entry) > 0 {
+	if err := json.Unmarshal(body, &payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if len(payload.Entry) > 0 {
 		for _, entry := range payload.Entry {
 			for _, ch := range entry.Changes {
-				botPhone := ch.Value.Metadata.DisplayPhoneNumber
+				botPhone := ch.Value.Metadata.PhoneNumberID
+				if botPhone == "" {
+					botPhone = ch.Value.Metadata.DisplayPhoneNumber
+				}
 				for _, msg := range ch.Value.Messages {
-					reply, _ := s.ProcessIncomingMessage(r.Context(), botPhone, msg.From, msg.Text.Body)
-					if s.waClient != nil && reply != "" {
-						_ = s.waClient.SendTextMessage(r.Context(), msg.From, reply)
+					reply, err := s.ProcessIncomingMessage(r.Context(), botPhone, msg.From, msg.Text.Body)
+					var rateError *chatError
+					if err != nil && !errors.As(err, &rateError) {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					if reply != "" {
+						if s.waClient == nil {
+							w.WriteHeader(http.StatusServiceUnavailable)
+							return
+						}
+						if err := s.waClient.SendTextMessage(r.Context(), msg.From, reply); err != nil {
+							w.WriteHeader(http.StatusBadGateway)
+							return
+						}
 					}
 				}
 			}
@@ -672,8 +794,14 @@ func (s *Service) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	reply, err := s.ProcessIncomingMessage(r.Context(), req.BotPhoneNumber, req.SenderWANumber, req.Message)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		var rateError *chatError
+		if errors.As(err, &rateError) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": rateError.Code, "reply": reply})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to process chat message"})
 		return
 	}
 
