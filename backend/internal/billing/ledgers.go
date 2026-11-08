@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -9,27 +10,40 @@ import (
 
 // GetStudentFeeBalance returns the student's balance sheet, enforcing guardian ownership (C10, AC-24).
 func (s *Service) GetStudentFeeBalance(ctx context.Context, schoolID, studentID, callerUserID, callerRole string) (*StudentBalance, error) {
+	var balance *StudentBalance
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		balance, err = getStudentFeeBalance(ctx, store, schoolID, studentID, callerUserID, callerRole)
+		return err
+	})
+	return balance, err
+}
+
+func getStudentFeeBalance(ctx context.Context, store Store, schoolID, studentID, callerUserID, callerRole string) (*StudentBalance, error) {
 	if schoolID == "" || studentID == "" {
 		return nil, errValidation("school_id and student_id are required")
 	}
 
 	// Permission check (C10): Linked guardian OR authorized school/ikonex staff
 	if callerRole == RoleParent {
-		isGuardian, err := s.store.IsGuardianOf(ctx, schoolID, studentID, callerUserID)
-		if err != nil || !isGuardian {
+		isGuardian, err := store.IsGuardianOf(ctx, schoolID, studentID, callerUserID)
+		if err != nil {
+			return nil, errInternal(err)
+		}
+		if !isGuardian {
 			return nil, errForbidden("parent is not a registered guardian of this student")
 		}
-	} else if callerRole != RoleIkonexAdmin && callerRole != RoleBursar && callerRole != RolePrincipal && callerRole != RoleDeputy {
+	} else if callerRole != RoleIkonexAdmin {
 		return nil, errForbidden("caller is not authorized to view student fee balance")
 	}
 
-	_, adminNum, fullName, err := s.store.GetStudent(ctx, schoolID, studentID)
+	_, adminNum, fullName, err := store.GetStudent(ctx, schoolID, studentID)
 	if err != nil {
 		return nil, errNotFound("student not found in this school")
 	}
 
-	ledger, err := s.store.GetLatestFeeLedger(ctx, schoolID, studentID)
-	if err != nil {
+	ledger, err := store.GetLatestFeeLedger(ctx, schoolID, studentID)
+	if errors.Is(err, ErrNotFound) {
 		// If no charges or ledger exists yet, return zero balances
 		return &StudentBalance{
 			StudentID:       studentID,
@@ -40,22 +54,34 @@ func (s *Service) GetStudentFeeBalance(ctx context.Context, schoolID, studentID,
 			PaidAmount:      0,
 			CurrentBalance:  0,
 			CreditBalance:   0,
-			DueDate:         time.Now(),
+			DueDate:         time.Time{},
 			Items:           []FeeStructureItem{},
 			Notes:           []FeeChangeNote{},
 		}, nil
 	}
+	if err != nil {
+		return nil, errInternal(err)
+	}
 
 	// Fetch fee structure items for current term
 	var items []FeeStructureItem
-	charges, _ := s.store.ListFeeChargesForStudent(ctx, schoolID, studentID)
+	charges, err := store.ListFeeChargesForStudent(ctx, schoolID, studentID)
+	if err != nil {
+		return nil, errInternal(err)
+	}
 	if len(charges) > 0 {
 		latestCharge := charges[len(charges)-1]
-		items, _ = s.store.ListFeeStructureItems(ctx, latestCharge.FeeStructureID)
+		items, err = store.ListFeeStructureItems(ctx, latestCharge.FeeStructureID)
+		if err != nil {
+			return nil, errInternal(err)
+		}
 	}
 
 	// Fetch fee change notes for school/term
-	notes, _ := s.store.ListFeeChangeNotes(ctx, schoolID, ledger.TermID)
+	notes, err := store.ListFeeChangeNotes(ctx, schoolID, ledger.TermID)
+	if err != nil {
+		return nil, errInternal(err)
+	}
 
 	return &StudentBalance{
 		StudentID:       studentID,
@@ -74,25 +100,38 @@ func (s *Service) GetStudentFeeBalance(ctx context.Context, schoolID, studentID,
 
 // GetStudentLedger returns double-entry ledger entries for student (C10, AC-24).
 func (s *Service) GetStudentLedger(ctx context.Context, schoolID, studentID, callerUserID, callerRole string) ([]LedgerEntry, error) {
+	var entries []LedgerEntry
+	err := s.withTransaction(ctx, schoolID, func(store Store) error {
+		var err error
+		entries, err = getStudentLedger(ctx, store, schoolID, studentID, callerUserID, callerRole)
+		return err
+	})
+	return entries, err
+}
+
+func getStudentLedger(ctx context.Context, store Store, schoolID, studentID, callerUserID, callerRole string) ([]LedgerEntry, error) {
 	if schoolID == "" || studentID == "" {
 		return nil, errValidation("school_id and student_id are required")
 	}
 
 	if callerRole == RoleParent {
-		isGuardian, err := s.store.IsGuardianOf(ctx, schoolID, studentID, callerUserID)
-		if err != nil || !isGuardian {
+		isGuardian, err := store.IsGuardianOf(ctx, schoolID, studentID, callerUserID)
+		if err != nil {
+			return nil, errInternal(err)
+		}
+		if !isGuardian {
 			return nil, errForbidden("parent is not a registered guardian of this student")
 		}
-	} else if callerRole != RoleIkonexAdmin && callerRole != RoleBursar && callerRole != RolePrincipal && callerRole != RoleDeputy {
+	} else if callerRole != RoleIkonexAdmin {
 		return nil, errForbidden("caller is not authorized to view student ledger")
 	}
 
-	_, _, _, err := s.store.GetStudent(ctx, schoolID, studentID)
+	_, _, _, err := store.GetStudent(ctx, schoolID, studentID)
 	if err != nil {
 		return nil, errNotFound("student not found in this school")
 	}
 
-	return s.store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	return store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
 }
 
 // HTTP Handlers

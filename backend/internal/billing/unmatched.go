@@ -61,18 +61,11 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, schoolID, paymentID
 		}
 	}
 
-	// 4. Mark unmatched_payments resolved
-	if err := s.store.ResolveUnmatchedPayment(ctx, schoolID, paymentID, studentID, actorUserID, resolutionNote); err != nil {
-		return nil, errInternal(err)
-	}
-
-	// 5. Update payment record to matched
-	if err := s.store.UpdatePaymentMatched(ctx, schoolID, payment.ID, studentID, actorUserID); err != nil {
-		return nil, errInternal(err)
-	}
-
-	// 6. Credit student's fee ledger with overpayment calculation (AC-24, AC-25)
+	// Match and credit the payment in one transaction before marking the queue item resolved.
 	if err := s.creditStudentPayment(ctx, schoolID, studentID, payment.ID, payment.TransactionRef, payment.Provider, payment.Amount, payment.PayerPhone, payment.PayerName); err != nil {
+		return nil, errInternal(err)
+	}
+	if err := s.store.ResolveUnmatchedPayment(ctx, schoolID, paymentID, studentID, actorUserID, resolutionNote); err != nil {
 		return nil, errInternal(err)
 	}
 
@@ -99,8 +92,8 @@ func (s *Service) handleListUnmatchedPayments(w http.ResponseWriter, r *http.Req
 	}
 
 	id, ok := IdentityFromContext(r.Context())
-	if !ok || (id.Role != RoleIkonexAdmin && id.Role != RoleBursar && id.Role != RolePrincipal) {
-		respondError(w, errForbidden("only school bursar or Ikonex admin can view unmatched payments"))
+	if !ok || id.Role != RoleIkonexAdmin {
+		respondError(w, errForbidden("only Ikonex admin can view unmatched payments in Release 1"))
 		return
 	}
 
@@ -120,8 +113,8 @@ func (s *Service) handleMatchPayment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, ok := IdentityFromContext(r.Context())
-	if !ok || (id.Role != RoleIkonexAdmin && id.Role != RoleBursar) {
-		respondError(w, errForbidden("only Ikonex team or school bursar can match payments"))
+	if !ok || id.Role != RoleIkonexAdmin {
+		respondError(w, errForbidden("only Ikonex admin can match payments in Release 1"))
 		return
 	}
 

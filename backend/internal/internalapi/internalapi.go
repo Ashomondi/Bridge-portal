@@ -109,6 +109,9 @@ func NewHandler(serviceToken string, signer *ContextSigner, store Store, billing
 	if signer == nil {
 		return nil, errors.New("internalapi: context signer is required")
 	}
+	if store == nil {
+		return nil, errors.New("internalapi: store is required")
+	}
 	if aiServiceURL == "" {
 		aiServiceURL = "http://localhost:8000"
 	}
@@ -171,6 +174,31 @@ func (h *Handler) authenticateInternal(next func(http.ResponseWriter, *http.Requ
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("invalid user context: %v", err)})
 			return
 		}
+		if uContext.UserID == "" || uContext.SchoolID == "" || uContext.Role == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "incomplete user context"})
+			return
+		}
+		entry := &AIAuditLogEntry{
+			SchoolID:      uContext.SchoolID,
+			UserID:        uContext.UserID,
+			SessionID:     uContext.SessionID,
+			Channel:       uContext.Channel,
+			Feature:       "internal_api",
+			Intent:        r.Method,
+			EndpointsRead: []string{r.URL.Path},
+			ActionTaken:   "request_received",
+			CreatedAt:     time.Now(),
+		}
+		if err := h.withTenantStore(r.Context(), uContext.SchoolID, func(store Store) error {
+			return store.SaveAIAuditLog(r.Context(), entry)
+		}); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to record AI request"})
+			return
+		}
 
 		next(w, r, uContext)
 	}
@@ -183,7 +211,12 @@ func (h *Handler) handleSchoolProfile(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 
-	profile, err := h.store.GetSchoolProfile(r.Context(), u.SchoolID)
+	var profile *SchoolProfile
+	err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+		var err error
+		profile, err = store.GetSchoolProfile(r.Context(), u.SchoolID)
+		return err
+	})
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "school profile not found"})
@@ -202,15 +235,13 @@ func (h *Handler) handleParentChildren(w http.ResponseWriter, r *http.Request, u
 	}
 
 	// Extract parent user_id from path
-	parts := strings.Split(r.URL.Path, "/")
-	// e.g. /api/v1/internal/parents/{user_id}/children
-	parentUserID := ""
-	for i, p := range parts {
-		if p == "parents" && i+1 < len(parts) {
-			parentUserID = parts[i+1]
-			break
-		}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/internal/parents/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "children" {
+		http.NotFound(w, r)
+		return
 	}
+	parentUserID := parts[0]
 
 	// Parent can only query their own children unless staff
 	if u.Role == "parent" && parentUserID != u.UserID {
@@ -219,7 +250,12 @@ func (h *Handler) handleParentChildren(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	children, err := h.store.ListChildrenForParent(r.Context(), u.SchoolID, parentUserID)
+	var children []LinkedChild
+	err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+		var err error
+		children, err = store.ListChildrenForParent(r.Context(), u.SchoolID, parentUserID)
+		return err
+	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -252,17 +288,31 @@ func (h *Handler) handleStudentEndpoints(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	if studentID == "" {
+	if studentID == "" || len(parts) != 7 || action == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "student ID required"})
+		return
+	}
+	if action != "fee-balance" && action != "attendance-summary" && action != "marks-summary" {
+		http.NotFound(w, r)
 		return
 	}
 
 	// Enforce Guardian-Child ownership (Docs/API_CONTRACTS.md, SECURITY.md)
 	// Parent can ONLY query their own children!
 	if u.Role == "parent" {
-		isGuardian, err := h.store.IsGuardianOf(r.Context(), u.SchoolID, studentID, u.UserID)
-		if err != nil || !isGuardian {
+		var isGuardian bool
+		err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+			var err error
+			isGuardian, err = store.IsGuardianOf(r.Context(), u.SchoolID, studentID, u.UserID)
+			return err
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to verify guardian relationship"})
+			return
+		}
+		if !isGuardian {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "parent is not a registered guardian of this student"})
@@ -289,7 +339,12 @@ func (h *Handler) handleStudentEndpoints(w http.ResponseWriter, r *http.Request,
 
 	case "attendance-summary":
 		termID := r.URL.Query().Get("term_id")
-		summary, err := h.store.GetAttendanceSummary(r.Context(), u.SchoolID, studentID, termID)
+		var summary *AttendanceSummary
+		err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+			var err error
+			summary, err = store.GetAttendanceSummary(r.Context(), u.SchoolID, studentID, termID)
+			return err
+		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -299,7 +354,12 @@ func (h *Handler) handleStudentEndpoints(w http.ResponseWriter, r *http.Request,
 
 	case "marks-summary":
 		termID := r.URL.Query().Get("term_id")
-		summary, err := h.store.GetMarksSummary(r.Context(), u.SchoolID, studentID, termID)
+		var summary *StudentMarksSummary
+		err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+			var err error
+			summary, err = store.GetMarksSummary(r.Context(), u.SchoolID, studentID, termID)
+			return err
+		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -342,8 +402,19 @@ func (h *Handler) handleSTKPush(w http.ResponseWriter, r *http.Request, u *UserC
 
 	// Enforce parent-child ownership
 	if u.Role == "parent" {
-		isGuardian, err := h.store.IsGuardianOf(r.Context(), u.SchoolID, req.StudentID, u.UserID)
-		if err != nil || !isGuardian {
+		var isGuardian bool
+		err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+			var err error
+			isGuardian, err = store.IsGuardianOf(r.Context(), u.SchoolID, req.StudentID, u.UserID)
+			return err
+		})
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to verify guardian relationship"})
+			return
+		}
+		if !isGuardian {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "parent is not a registered guardian of this student"})
@@ -394,7 +465,13 @@ func (h *Handler) handleAIAuditLog(w http.ResponseWriter, r *http.Request, u *Us
 	}
 	entry.CreatedAt = time.Now()
 
-	_ = h.store.SaveAIAuditLog(r.Context(), &entry)
+	if err := h.withTenantStore(r.Context(), u.SchoolID, func(store Store) error {
+		return store.SaveAIAuditLog(r.Context(), &entry)
+	}); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to record AI action"})
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -439,8 +516,19 @@ func (h *Handler) handleFrontendChatMessage(w http.ResponseWriter, r *http.Reque
 
 	// Enforce parent-child ownership
 	if id.Role == "parent" {
-		isGuardian, err := h.store.IsGuardianOf(r.Context(), id.SchoolID, req.StudentID, id.UserID)
-		if err != nil || !isGuardian {
+		var isGuardian bool
+		err := h.withTenantStore(r.Context(), id.SchoolID, func(store Store) error {
+			var err error
+			isGuardian, err = store.IsGuardianOf(r.Context(), id.SchoolID, req.StudentID, id.UserID)
+			return err
+		})
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to verify guardian relationship"})
+			return
+		}
+		if !isGuardian {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "parent is not a registered guardian of this student"})
@@ -549,14 +637,7 @@ func (m *MemoryStore) GetAttendanceSummary(ctx context.Context, schoolID, studen
 	key := fmt.Sprintf("%s:%s:%s", schoolID, studentID, termID)
 	a, ok := m.Attendance[key]
 	if !ok {
-		return &AttendanceSummary{
-			StudentID:      studentID,
-			TermID:         termID,
-			TotalDays:      60,
-			DaysPresent:    58,
-			DaysAbsent:     2,
-			AttendanceRate: 96.67,
-		}, nil
+		return nil, errors.New("attendance summary not found")
 	}
 	return a, nil
 }
@@ -567,19 +648,20 @@ func (m *MemoryStore) GetMarksSummary(ctx context.Context, schoolID, studentID, 
 	key := fmt.Sprintf("%s:%s:%s", schoolID, studentID, termID)
 	marks, ok := m.Marks[key]
 	if !ok {
-		return &StudentMarksSummary{
-			StudentID: studentID,
-			TermID:    termID,
-			Subjects: []SubjectMarkSummary{
-				{SubjectCode: "ENG", SubjectName: "English", Score: 82.0, CBCLevel: "EE"},
-				{SubjectCode: "MAT", SubjectName: "Mathematics", Score: 76.5, CBCLevel: "ME"},
-				{SubjectCode: "KIS", SubjectName: "Kiswahili", Score: 88.0, CBCLevel: "EE"},
-			},
-			MeanGrade:   "EE",
-			PublishedAt: time.Now(),
-		}, nil
+		return nil, errors.New("marks summary not found")
 	}
 	return marks, nil
+}
+
+type tenantStore interface {
+	WithTx(ctx context.Context, schoolID string, fn func(Store) error) error
+}
+
+func (h *Handler) withTenantStore(ctx context.Context, schoolID string, fn func(Store) error) error {
+	if store, ok := h.store.(tenantStore); ok {
+		return store.WithTx(ctx, schoolID, fn)
+	}
+	return fn(h.store)
 }
 
 func (m *MemoryStore) SaveAIAuditLog(ctx context.Context, entry *AIAuditLogEntry) error {

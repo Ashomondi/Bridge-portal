@@ -207,8 +207,8 @@ func (s *Service) handleFeeChange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, ok := IdentityFromContext(r.Context())
-	if !ok || (id.Role != RoleIkonexAdmin && id.Role != RoleBursar && id.Role != RolePrincipal) {
-		respondError(w, errForbidden("only authorized school staff or Ikonex admin can apply fee changes"))
+	if !ok || id.Role != RoleIkonexAdmin {
+		respondError(w, errForbidden("only Ikonex admin can apply fee changes in Release 1"))
 		return
 	}
 

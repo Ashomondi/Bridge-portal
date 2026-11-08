@@ -75,13 +75,13 @@ func (s *SQLStore) CreateFeePeriod(ctx context.Context, period *FeePeriod) error
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (school_id, academic_year_id, term_id) DO UPDATE SET
 			name = EXCLUDED.name,
-			due_date = EXCLUDED.due_date;
+			due_date = EXCLUDED.due_date
+		RETURNING id;
 	`
-	_, err := s.q().ExecContext(ctx, query,
+	return s.q().QueryRowContext(ctx, query,
 		period.ID, period.SchoolID, period.AcademicYearID, period.TermID,
 		period.PeriodType, period.Name, period.DueDate, period.CreatedAt,
-	)
-	return err
+	).Scan(&period.ID)
 }
 
 func (s *SQLStore) GetFeePeriod(ctx context.Context, schoolID, academicYearID, termID string) (*FeePeriod, error) {
@@ -134,17 +134,20 @@ func (s *SQLStore) CreateFeeStructure(ctx context.Context, structure *FeeStructu
 		INSERT INTO fee_structures (id, school_id, academic_year_id, grade_level_id, term_id, total_amount, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (school_id, academic_year_id, grade_level_id, term_id) DO UPDATE SET
-			total_amount = EXCLUDED.total_amount;
+			total_amount = EXCLUDED.total_amount
+		RETURNING id;
 	`
-	if _, err := s.q().ExecContext(ctx, insertStruct,
+	if err := s.q().QueryRowContext(ctx, insertStruct,
 		structure.ID, structure.SchoolID, structure.AcademicYearID,
 		structure.GradeLevelID, structure.TermID, structure.TotalAmount, structure.CreatedAt,
-	); err != nil {
+	).Scan(&structure.ID); err != nil {
 		return err
 	}
 
 	// Remove old items on update
-	_, _ = s.q().ExecContext(ctx, `DELETE FROM fee_structure_items WHERE fee_structure_id = $1`, structure.ID)
+	if _, err := s.q().ExecContext(ctx, `DELETE FROM fee_structure_items WHERE fee_structure_id = $1`, structure.ID); err != nil {
+		return err
+	}
 
 	for _, item := range items {
 		itemID := item.ID
@@ -299,6 +302,11 @@ func (s *SQLStore) IsGuardianOf(ctx context.Context, schoolID, studentID, userID
 // ----------------------------------------------------------------------------
 
 func (s *SQLStore) CreateFeeCharge(ctx context.Context, charge *FeeCharge) error {
+	_, err := s.CreateFeeChargeIfAbsent(ctx, charge)
+	return err
+}
+
+func (s *SQLStore) CreateFeeChargeIfAbsent(ctx context.Context, charge *FeeCharge) (bool, error) {
 	if charge.ID == "" {
 		charge.ID = newUUID()
 	}
@@ -308,15 +316,17 @@ func (s *SQLStore) CreateFeeCharge(ctx context.Context, charge *FeeCharge) error
 	query := `
 		INSERT INTO fee_charges (id, school_id, student_id, fee_period_id, fee_structure_id, amount, due_date, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (school_id, student_id, fee_period_id) DO UPDATE SET
-			amount = EXCLUDED.amount,
-			due_date = EXCLUDED.due_date;
+		ON CONFLICT (school_id, student_id, fee_period_id) DO NOTHING;
 	`
-	_, err := s.q().ExecContext(ctx, query,
+	result, err := s.q().ExecContext(ctx, query,
 		charge.ID, charge.SchoolID, charge.StudentID, charge.FeePeriodID,
 		charge.FeeStructureID, charge.Amount, charge.DueDate, charge.CreatedAt,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 func (s *SQLStore) ListFeeChargesForStudent(ctx context.Context, schoolID, studentID string) ([]FeeCharge, error) {
@@ -699,10 +709,7 @@ func (s *SQLStore) CreatePayment(ctx context.Context, payment *Payment) error {
 			$1, $2, NULLIF($3, '')::uuid, $4, $5, $6,
 			$7, $8, $9, NULLIF($10, '')::uuid, $11, $12::jsonb
 		)
-		ON CONFLICT (transaction_ref) DO UPDATE SET
-			matched_status = EXCLUDED.matched_status,
-			student_id = EXCLUDED.student_id,
-			matched_by = EXCLUDED.matched_by;
+		ON CONFLICT (transaction_ref) DO NOTHING;
 	`
 	studentID := ""
 	if payment.StudentID != nil {
@@ -713,10 +720,17 @@ func (s *SQLStore) CreatePayment(ctx context.Context, payment *Payment) error {
 		matchedBy = *payment.MatchedBy
 	}
 
-	_, err := s.q().ExecContext(ctx, query,
+	result, err := s.q().ExecContext(ctx, query,
 		payment.ID, payment.SchoolID, studentID, payment.TransactionRef, payment.Provider, payment.Amount,
 		payment.PayerPhone, payment.PayerName, payment.MatchedStatus, matchedBy, payment.PaymentDate, rawPayload,
 	)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err == nil && n == 0 {
+		return errors.New("payment transaction reference already exists")
+	}
 	return err
 }
 
@@ -738,7 +752,7 @@ func (s *SQLStore) GetPaymentByCheckoutID(ctx context.Context, checkoutID string
 		       COALESCE(payer_phone, ''), COALESCE(payer_name, ''), matched_status, matched_by,
 		       payment_date, COALESCE(raw_payload::text, '')
 		FROM payments
-		WHERE transaction_ref = $1 OR raw_payload::text LIKE '%' || $1 || '%'
+		WHERE transaction_ref = $1 OR raw_payload->>'checkout_request_id' = $1
 		LIMIT 1;
 	`
 	return s.scanPaymentRow(s.q().QueryRowContext(ctx, query, checkoutID))
@@ -815,6 +829,35 @@ func (s *SQLStore) UpdatePaymentMatched(ctx context.Context, schoolID, paymentID
 		return ErrNotFound
 	}
 	return err
+}
+
+func (s *SQLStore) MatchPayment(ctx context.Context, payment *Payment) (bool, error) {
+	query := `
+		UPDATE payments
+		SET matched_status = 'matched',
+		    student_id = NULLIF($1, '')::uuid,
+		    transaction_ref = $2,
+		    provider = $3,
+		    amount = $4,
+		    payer_phone = $5,
+		    payer_name = $6,
+		    payment_date = $7
+		WHERE school_id = $8 AND id = $9 AND matched_status != 'matched';
+	`
+	studentID := ""
+	if payment.StudentID != nil {
+		studentID = *payment.StudentID
+	}
+	result, err := s.q().ExecContext(ctx, query,
+		studentID, payment.TransactionRef, payment.Provider, payment.Amount,
+		payment.PayerPhone, payment.PayerName, payment.PaymentDate,
+		payment.SchoolID, payment.ID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 // ----------------------------------------------------------------------------

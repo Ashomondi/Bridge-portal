@@ -125,11 +125,10 @@ type Service struct {
 // NewService constructs WhatsApp Service
 func NewService(store Store, sms SMSDispatcher, aiBridge AIServiceBridge, waClient WhatsAppClient) *Service {
 	return &Service{
-		store:       store,
-		sms:         sms,
-		aiBridge:    aiBridge,
-		waClient:    waClient,
-		verifyToken: "ikonex-whatsapp-verify-token-change-in-prod",
+		store:    store,
+		sms:      sms,
+		aiBridge: aiBridge,
+		waClient: waClient,
 	}
 }
 
@@ -567,7 +566,7 @@ func (m *MemoryStore) VerifyOTP(ctx context.Context, sessionID, code string) (bo
 
 func verifyHubSignature(body []byte, secret, header string) bool {
 	if secret == "" {
-		return true
+		return false
 	}
 	if !strings.HasPrefix(header, "sha256=") {
 		return false
@@ -612,14 +611,11 @@ func (s *Service) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify Meta signature if appSecret is configured
-	if s.appSecret != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if !verifyHubSignature(body, s.appSecret, sig) {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"invalid webhook signature"}`))
-			return
-		}
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if !verifyHubSignature(body, s.appSecret, sig) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid webhook signature"}`))
+		return
 	}
 
 	var payload struct {

@@ -24,6 +24,7 @@ type Store interface {
 
 	GetEnrolledStudentsForGrade(ctx context.Context, schoolID, gradeLevelID, academicYearID string) ([]string, error)
 	CreateFeeCharge(ctx context.Context, charge *FeeCharge) error
+	CreateFeeChargeIfAbsent(ctx context.Context, charge *FeeCharge) (bool, error)
 	ListFeeChargesForStudent(ctx context.Context, schoolID, studentID string) ([]FeeCharge, error)
 	UpdateFeeChargesDueDate(ctx context.Context, schoolID, termID string, newDueDate time.Time) (int, error)
 	AdjustFeeChargesForGrade(ctx context.Context, schoolID, termID, gradeLevelID string, delta float64) ([]string, error)
@@ -53,6 +54,7 @@ type Store interface {
 	GetPaymentByTransactionRef(ctx context.Context, transactionRef string) (*Payment, error)
 	UpdatePaymentStatus(ctx context.Context, schoolID, paymentID, status string) error
 	UpdatePaymentMatched(ctx context.Context, schoolID, paymentID, studentID, matchedBy string) error
+	MatchPayment(ctx context.Context, payment *Payment) (bool, error)
 	GetStudentsWithChargesForTerm(ctx context.Context, schoolID, termID string) ([]string, error)
 
 	CreateUnmatchedPayment(ctx context.Context, unmatched *UnmatchedPayment) error
@@ -116,10 +118,12 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) CreateFeePeriod(ctx context.Context, p *FeePeriod) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if p.ID == "" {
+	key := fmt.Sprintf("%s:%s:%s", p.SchoolID, p.AcademicYearID, p.TermID)
+	if existing, ok := m.FeePeriods[key]; ok {
+		p.ID = existing.ID
+	} else if p.ID == "" {
 		p.ID = newUUID()
 	}
-	key := fmt.Sprintf("%s:%s:%s", p.SchoolID, p.AcademicYearID, p.TermID)
 	m.FeePeriods[key] = p
 	return nil
 }
@@ -150,10 +154,12 @@ func (m *MemoryStore) UpdateFeePeriodDueDate(ctx context.Context, schoolID, term
 func (m *MemoryStore) CreateFeeStructure(ctx context.Context, s *FeeStructure, items []FeeStructureItem) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s.ID == "" {
+	key := fmt.Sprintf("%s:%s:%s:%s", s.SchoolID, s.AcademicYearID, s.GradeLevelID, s.TermID)
+	if existing, ok := m.FeeStructures[key]; ok {
+		s.ID = existing.ID
+	} else if s.ID == "" {
 		s.ID = newUUID()
 	}
-	key := fmt.Sprintf("%s:%s:%s:%s", s.SchoolID, s.AcademicYearID, s.GradeLevelID, s.TermID)
 	m.FeeStructures[key] = s
 	for i := range items {
 		if items[i].ID == "" {
@@ -203,14 +209,22 @@ func (m *MemoryStore) GetEnrolledStudentsForGrade(ctx context.Context, schoolID,
 }
 
 func (m *MemoryStore) CreateFeeCharge(ctx context.Context, charge *FeeCharge) error {
+	_, err := m.CreateFeeChargeIfAbsent(ctx, charge)
+	return err
+}
+
+func (m *MemoryStore) CreateFeeChargeIfAbsent(ctx context.Context, charge *FeeCharge) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	key := fmt.Sprintf("%s:%s:%s", charge.SchoolID, charge.StudentID, charge.FeePeriodID)
+	if _, exists := m.FeeCharges[key]; exists {
+		return false, nil
+	}
 	if charge.ID == "" {
 		charge.ID = newUUID()
 	}
-	key := fmt.Sprintf("%s:%s:%s", charge.SchoolID, charge.StudentID, charge.FeePeriodID)
 	m.FeeCharges[key] = charge
-	return nil
+	return true, nil
 }
 
 func (m *MemoryStore) ListFeeChargesForStudent(ctx context.Context, schoolID, studentID string) ([]FeeCharge, error) {
@@ -530,6 +544,11 @@ func (m *MemoryStore) SaveSchoolMpesaConfig(ctx context.Context, config *SchoolM
 func (m *MemoryStore) CreatePayment(ctx context.Context, payment *Payment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, existing := range m.Payments {
+		if existing.TransactionRef == payment.TransactionRef {
+			return fmt.Errorf("payment transaction reference already exists")
+		}
+	}
 	if payment.ID == "" {
 		payment.ID = newUUID()
 	}
@@ -635,6 +654,32 @@ func (m *MemoryStore) UpdatePaymentMatched(ctx context.Context, schoolID, paymen
 	p.StudentID = &studentID
 	p.MatchedBy = &matchedBy
 	return nil
+}
+
+func (m *MemoryStore) MatchPayment(ctx context.Context, payment *Payment) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing, ok := m.Payments[payment.ID]
+	if !ok || existing.SchoolID != payment.SchoolID {
+		return false, ErrNotFound
+	}
+	if existing.MatchedStatus == "matched" {
+		return false, nil
+	}
+	for id, candidate := range m.Payments {
+		if id != existing.ID && candidate.TransactionRef == payment.TransactionRef {
+			return false, fmt.Errorf("payment transaction reference already exists")
+		}
+	}
+	existing.StudentID = payment.StudentID
+	existing.TransactionRef = payment.TransactionRef
+	existing.Provider = payment.Provider
+	existing.Amount = payment.Amount
+	existing.PayerPhone = payment.PayerPhone
+	existing.PayerName = payment.PayerName
+	existing.MatchedStatus = "matched"
+	existing.PaymentDate = payment.PaymentDate
+	return true, nil
 }
 
 func (m *MemoryStore) CreateUnmatchedPayment(ctx context.Context, unmatched *UnmatchedPayment) error {

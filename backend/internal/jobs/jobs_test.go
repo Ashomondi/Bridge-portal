@@ -129,7 +129,9 @@ func TestAsynqHandlerExecution(t *testing.T) {
 	billing := &mockBillingQuerier{}
 	purger := &mockOnboardingPurger{}
 
-	RegisterAsynqHandlers(serveMux, sms, billing, purger)
+	if err := RegisterAsynqHandlers(serveMux, sms, billing, purger); err != nil {
+		t.Fatalf("RegisterAsynqHandlers failed: %v", err)
+	}
 
 	ctx := context.Background()
 
@@ -142,6 +144,7 @@ func TestAsynqHandlerExecution(t *testing.T) {
 	if err := serveMux.ProcessTask(ctx, smsTask); err != nil {
 		t.Fatalf("ProcessTask for SMS failed: %v", err)
 	}
+
 	if sms.sentTo != "+254712345678" || sms.sentMsg != "Your OTP is 123456" {
 		t.Errorf("unexpected SMS dispatch: %+v", sms)
 	}
@@ -169,5 +172,11 @@ func TestAsynqHandlerExecution(t *testing.T) {
 	}
 	if purger.purgedRetention != 7 {
 		t.Errorf("unexpected retention days: %d", purger.purgedRetention)
+	}
+}
+
+func TestAsynqHandlerRegistrationRequiresDependencies(t *testing.T) {
+	if err := RegisterAsynqHandlers(asynq.NewServeMux(), nil, &mockBillingQuerier{}, &mockOnboardingPurger{}); err == nil {
+		t.Fatal("expected missing SMS dispatcher to prevent handler registration")
 	}
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -29,7 +28,9 @@ func main() {
 	mux := asynq.NewServeMux()
 
 	// Register Asynq task handlers
-	jobs.RegisterAsynqHandlers(mux, nil, nil, nil)
+	if err := jobs.RegisterAsynqHandlers(mux, nil, nil, nil); err != nil {
+		log.Fatal(err)
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -42,13 +43,7 @@ func main() {
 
 	log.Printf("Worker starting on Redis %s. Processing queues (critical, default, low)...", redisAddr)
 	if err := server.Run(mux); err != nil {
-		log.Printf("Asynq server exited or could not connect: %v. Running in-memory queue manager fallback...", err)
-		qm := jobs.NewQueueManager(500)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		qm.StartWorker(ctx)
-		<-sigChan
-		qm.Stop()
+		log.Fatalf("Asynq worker failed: %v", err)
 	}
 	log.Println("Worker stopped.")
 }

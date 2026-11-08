@@ -236,17 +236,17 @@ func NewAsynqServer(redisOpt asynq.RedisClientOpt, concurrency int) *asynq.Serve
 }
 
 // RegisterAsynqHandlers configures an Asynq ServeMux with real task processors
-func RegisterAsynqHandlers(mux *asynq.ServeMux, sms SMSDispatcher, bQuerier BillingQuerier, purger OnboardingPurger) {
+func RegisterAsynqHandlers(mux *asynq.ServeMux, sms SMSDispatcher, bQuerier BillingQuerier, purger OnboardingPurger) error {
+	if mux == nil || sms == nil || bQuerier == nil || purger == nil {
+		return fmt.Errorf("Asynq handler mux, SMS dispatcher, STK status querier, and onboarding purger are required")
+	}
+
 	mux.HandleFunc(TypeSMSTransactional, func(ctx context.Context, t *asynq.Task) error {
 		var p SMSTaskPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
 			return fmt.Errorf("invalid sms payload: %w", err)
 		}
-		if sms != nil {
-			return sms.SendTransactionalSMS(ctx, p.ToPhoneNumber, p.Message)
-		}
-		log.Printf("[Worker SMS] Sent to %s: %s", p.ToPhoneNumber, p.Message)
-		return nil
+		return sms.SendTransactionalSMS(ctx, p.ToPhoneNumber, p.Message)
 	})
 
 	mux.HandleFunc(TypeMPesaSTKPoll, func(ctx context.Context, t *asynq.Task) error {
@@ -254,11 +254,7 @@ func RegisterAsynqHandlers(mux *asynq.ServeMux, sms SMSDispatcher, bQuerier Bill
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
 			return fmt.Errorf("invalid stk poll payload: %w", err)
 		}
-		if bQuerier != nil {
-			return bQuerier.QuerySTKPushStatus(ctx, p.SchoolID, p.CheckoutRequestID)
-		}
-		log.Printf("[Worker STK Poll] Checked checkout_id %s for school %s", p.CheckoutRequestID, p.SchoolID)
-		return nil
+		return bQuerier.QuerySTKPushStatus(ctx, p.SchoolID, p.CheckoutRequestID)
 	})
 
 	mux.HandleFunc(TypeOnboardingPurgeUnverified, func(ctx context.Context, t *asynq.Task) error {
@@ -266,12 +262,8 @@ func RegisterAsynqHandlers(mux *asynq.ServeMux, sms SMSDispatcher, bQuerier Bill
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
 			return fmt.Errorf("invalid purge payload: %w", err)
 		}
-		if purger != nil {
-			count, err := purger.PurgeExpiredUnverifiedSubmissions(ctx, p.RetentionDays)
-			log.Printf("[Worker Purge] Purged %d expired unverified submissions", count)
-			return err
-		}
-		log.Printf("[Worker Purge] Purged submissions older than %d days", p.RetentionDays)
-		return nil
+		_, err := purger.PurgeExpiredUnverifiedSubmissions(ctx, p.RetentionDays)
+		return err
 	})
+	return nil
 }

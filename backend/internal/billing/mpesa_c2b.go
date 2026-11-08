@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,7 +41,10 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 
 	// 2. Idempotency: repeated C2B callbacks must not create duplicate payments or credits
 	existing, err := s.store.GetPaymentByTransactionRef(ctx, payload.TransID)
-	if err == nil && existing != nil {
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, errInternal(err)
+	}
+	if existing != nil && existing.MatchedStatus == "matched" {
 		return existing, nil
 	}
 
@@ -55,24 +59,15 @@ func (s *Service) HandleC2BConfirmation(ctx context.Context, payload C2BConfirma
 
 	// CASE A: Valid Student Match Found (AC-25)
 	if err == nil && studentID != "" {
-		payment := &Payment{
-			SchoolID:       schoolID,
-			StudentID:      &studentID,
-			TransactionRef: payload.TransID,
-			Provider:       "mpesa_c2b",
-			Amount:         amount,
-			PayerPhone:     payerPhone,
-			PayerName:      payerName,
-			MatchedStatus:  "matched",
-			PaymentDate:    time.Now(),
-			RawPayload:     string(rawJSON),
+		origRef := ""
+		if existing != nil {
+			origRef = existing.ID
 		}
-		if err := s.store.CreatePayment(ctx, payment); err != nil {
+		if err := s.creditStudentPayment(ctx, schoolID, studentID, origRef, payload.TransID, "mpesa_c2b", amount, payerPhone, payerName); err != nil {
 			return nil, errInternal(err)
 		}
-
-		// Apply credit to student's ledger (AC-24)
-		if err := s.creditStudentPayment(ctx, schoolID, studentID, payment.ID, payload.TransID, "mpesa_c2b", amount, payerPhone, payerName); err != nil {
+		payment, err := s.store.GetPaymentByTransactionRef(ctx, payload.TransID)
+		if err != nil {
 			return nil, errInternal(err)
 		}
 

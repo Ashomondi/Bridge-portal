@@ -401,6 +401,26 @@ func TestWebhookAuthenticationAndSignature(t *testing.T) {
 	}
 }
 
+func TestWebhookRejectsRequestsWithoutConfiguredSecrets(t *testing.T) {
+	svc, _, _, _ := setupTestWhatsApp()
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux)
+
+	post := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook", bytes.NewBufferString(`{"entry":[]}`))
+	postRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(postRecorder, post)
+	if postRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unsigned webhook to be rejected without app secret, got %d", postRecorder.Code)
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/api/v1/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=guess&hub.challenge=123", nil)
+	getRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(getRecorder, get)
+	if getRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected webhook verification to fail without configured token, got %d", getRecorder.Code)
+	}
+}
+
 func TestOTPHashingAndMaxAttemptsExceeded(t *testing.T) {
 	_, store, _, _ := setupTestWhatsApp()
 	ctx := context.Background()

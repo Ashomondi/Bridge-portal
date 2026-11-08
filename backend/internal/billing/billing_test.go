@@ -64,9 +64,10 @@ func (m *mockDarajaClient) QuerySTKStatus(ctx context.Context, cfg *SchoolMpesaC
 		return m.queryFunc(ctx, cfg, checkoutRequestID)
 	}
 	return &DarajaQueryResponse{
-		ResponseCode: "0",
-		ResultCode:   "0",
-		ResultDesc:   "The service request is processed successfully.",
+		ResponseCode:      "0",
+		CheckoutRequestID: checkoutRequestID,
+		ResultCode:        "0",
+		ResultDesc:        "The service request is processed successfully.",
 	}, nil
 }
 
@@ -138,6 +139,25 @@ func TestAutomatedTermChargingAndCreditRollover(t *testing.T) {
 	if !charges[0].DueDate.Equal(termStartDate) {
 		t.Errorf("expected due date %v, got %v", termStartDate, charges[0].DueDate)
 	}
+	if _, err := svc.LoadFeeStructure(ctx, req); err != nil {
+		t.Fatalf("reloading the same fee structure failed: %v", err)
+	}
+	charges, _ = store.ListFeeChargesForStudent(ctx, schoolID, studentID)
+	entries, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(charges) != 1 || len(entries) != 1 {
+		t.Fatalf("reloading a fee structure duplicated charges: charges=%d ledger_entries=%d", len(charges), len(entries))
+	}
+	changedReq := req
+	changedReq.Items = append([]FeeStructureItemInput(nil), req.Items...)
+	changedReq.Items[0].Amount++
+	if _, err := svc.LoadFeeStructure(ctx, changedReq); err == nil {
+		t.Fatal("expected an existing fee structure to reject changes outside the fee-change flow")
+	} else {
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+			t.Fatalf("expected 409 conflict for changed structure, got %v", err)
+		}
+	}
 
 	// Verify ledger created: current_balance = 35000, credit_balance = 0
 	ledger, err := store.GetLatestFeeLedger(ctx, schoolID, studentID)
@@ -191,7 +211,7 @@ func TestAutomatedTermChargingAndCreditRollover(t *testing.T) {
 	}
 
 	// Verify ledger entries include 'credit_applied'
-	entries, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	entries, _ = store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
 	foundCreditApplied := false
 	for _, e := range entries {
 		if e.EntryType == "credit_applied" && e.Amount == 15000 {
@@ -860,6 +880,21 @@ func TestSTKCallbackIdempotencyAndFailureHandling(t *testing.T) {
 	studentID := "student-stk-cb"
 	guardianUserID := "guardian-stk-user"
 	checkoutID := "ws_CO_TEST_IDEMPOTENCY_001"
+	checkoutFailedID := "ws_CO_TEST_CANCELLED_002"
+	store.MpesaConfigs[schoolID] = &SchoolMpesaConfig{SchoolID: schoolID, Shortcode: "174379"}
+	svc.SetDarajaClient(&mockDarajaClient{
+		queryFunc: func(_ context.Context, _ *SchoolMpesaConfig, checkoutRequestID string) (*DarajaQueryResponse, error) {
+			resultCode := "0"
+			if checkoutRequestID == checkoutFailedID || checkoutRequestID == "ws_CO_TEST_UNCONFIRMED_003" {
+				resultCode = "1032"
+			}
+			return &DarajaQueryResponse{
+				ResponseCode:      "0",
+				CheckoutRequestID: checkoutRequestID,
+				ResultCode:        resultCode,
+			}, nil
+		},
+	})
 
 	store.Students[schoolID+":"+studentID] = struct{ ID, Admission, Name, GradeID, YearID string }{
 		ID: studentID, Admission: "IKX/CB/001", Name: "Callback Student", GradeID: "g-7", YearID: "2026",
@@ -874,6 +909,7 @@ func TestSTKCallbackIdempotencyAndFailureHandling(t *testing.T) {
 		Provider:       "mpesa_stk",
 		Amount:         5000,
 		MatchedStatus:  "pending",
+		RawPayload:     `{"checkout_request_id":"ws_CO_TEST_IDEMPOTENCY_001"}`,
 	})
 
 	// 1. Unknown CheckoutRequestID returns error
@@ -940,7 +976,6 @@ func TestSTKCallbackIdempotencyAndFailureHandling(t *testing.T) {
 	}
 
 	// 4. Cancelled/Failed callback (ResultCode != 0) marks payment as failed without crediting ledger
-	checkoutFailedID := "ws_CO_TEST_CANCELLED_002"
 	_ = store.CreatePayment(ctx, &Payment{
 		SchoolID:       schoolID,
 		StudentID:      &studentID,
@@ -948,6 +983,7 @@ func TestSTKCallbackIdempotencyAndFailureHandling(t *testing.T) {
 		Provider:       "mpesa_stk",
 		Amount:         3000,
 		MatchedStatus:  "pending",
+		RawPayload:     `{"checkout_request_id":"ws_CO_TEST_CANCELLED_002"}`,
 	})
 
 	failedPayload := STKCallbackPayload{}
@@ -966,6 +1002,26 @@ func TestSTKCallbackIdempotencyAndFailureHandling(t *testing.T) {
 	entriesAfterFailed, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
 	if len(entriesAfterFailed) != 1 {
 		t.Errorf("failed callback incorrectly created ledger entry")
+	}
+
+	unconfirmedCheckoutID := "ws_CO_TEST_UNCONFIRMED_003"
+	_ = store.CreatePayment(ctx, &Payment{
+		SchoolID:       schoolID,
+		StudentID:      &studentID,
+		TransactionRef: unconfirmedCheckoutID,
+		Provider:       "mpesa_stk",
+		Amount:         3000,
+		MatchedStatus:  "pending",
+		RawPayload:     `{"checkout_request_id":"ws_CO_TEST_UNCONFIRMED_003"}`,
+	})
+	unconfirmedPayload := successPayload
+	unconfirmedPayload.Body.StkCallback.CheckoutRequestID = unconfirmedCheckoutID
+	if err := svc.HandleSTKCallback(ctx, unconfirmedPayload); err == nil {
+		t.Fatal("expected unconfirmed Daraja status to reject a successful-looking callback")
+	}
+	entriesAfterUnconfirmed, _ := store.ListLedgerEntriesForStudent(ctx, schoolID, studentID)
+	if len(entriesAfterUnconfirmed) != 1 {
+		t.Fatalf("unconfirmed callback created a ledger entry: %d entries", len(entriesAfterUnconfirmed))
 	}
 }
 

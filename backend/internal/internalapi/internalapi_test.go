@@ -240,12 +240,28 @@ func TestAIAuditActionLogging(t *testing.T) {
 		t.Fatalf("expected 201 Created for audit log, got %d", rr.Code)
 	}
 
-	if len(store.AuditLogs) != 1 {
-		t.Fatalf("expected 1 audit log saved, got %d", len(store.AuditLogs))
+	if len(store.AuditLogs) != 2 {
+		t.Fatalf("expected request and action audit logs, got %d", len(store.AuditLogs))
 	}
-	saved := store.AuditLogs[0]
-	if saved.Feature != "parent_assistant" || saved.Channel != "whatsapp" || saved.SessionID != "session-abc-123" {
-		t.Errorf("unexpected audit log values: %+v", saved)
+	foundAction := false
+	for _, saved := range store.AuditLogs {
+		if saved.Feature == "parent_assistant" && saved.Channel == "whatsapp" && saved.SessionID == "session-abc-123" {
+			foundAction = true
+		}
+	}
+	if !foundAction {
+		t.Errorf("expected explicit AI action log, got %+v", store.AuditLogs)
+	}
+}
+
+func TestMemoryStoreDoesNotInventAttendanceOrMarks(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	if _, err := store.GetAttendanceSummary(ctx, "school-1", "student-1", "term-1"); err == nil {
+		t.Fatal("expected missing attendance facts to return an error")
+	}
+	if _, err := store.GetMarksSummary(ctx, "school-1", "student-1", "term-1"); err == nil {
+		t.Fatal("expected missing marks facts to return an error")
 	}
 }
 

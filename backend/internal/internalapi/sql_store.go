@@ -130,11 +130,10 @@ func (s *SQLStore) GetAttendanceSummary(ctx context.Context, schoolID, studentID
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-
-	rate := 100.0
-	if total > 0 {
-		rate = float64(present) / float64(total) * 100.0
+	if total == 0 {
+		return nil, errors.New("attendance summary not found")
 	}
+	rate := float64(present) / float64(total) * 100.0
 
 	return &AttendanceSummary{
 		StudentID:      studentID,
@@ -193,20 +192,24 @@ func (s *SQLStore) GetMarksSummary(ctx context.Context, schoolID, studentID, ter
 			CBCLevel:    level,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(subjects) == 0 {
+		return nil, errors.New("marks summary not found")
+	}
 
 	meanGrade := ""
-	if len(subjects) > 0 {
-		avg := totalScore / float64(len(subjects))
-		switch {
-		case avg >= 80:
-			meanGrade = "EE"
-		case avg >= 50:
-			meanGrade = "ME"
-		case avg >= 30:
-			meanGrade = "AE"
-		default:
-			meanGrade = "BE"
-		}
+	avg := totalScore / float64(len(subjects))
+	switch {
+	case avg >= 80:
+		meanGrade = "EE"
+	case avg >= 50:
+		meanGrade = "ME"
+	case avg >= 30:
+		meanGrade = "AE"
+	default:
+		meanGrade = "BE"
 	}
 
 	return &StudentMarksSummary{
@@ -215,7 +218,7 @@ func (s *SQLStore) GetMarksSummary(ctx context.Context, schoolID, studentID, ter
 		Subjects:    subjects,
 		MeanGrade:   meanGrade,
 		PublishedAt: latestPub,
-	}, rows.Err()
+	}, nil
 }
 
 func (s *SQLStore) SaveAIAuditLog(ctx context.Context, entry *AIAuditLogEntry) error {
