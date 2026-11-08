@@ -2,6 +2,10 @@ package notifications
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -54,5 +58,67 @@ func TestInAppNotificationsLifecycle(t *testing.T) {
 	}
 	if len(sms.SentSMS) != 1 || sms.SentSMS[0].To != "+254712345678" {
 		t.Errorf("SMS not logged properly in sandbox client")
+	}
+}
+
+type smsRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn smsRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
+
+func TestAfricasTalkingProductionDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		status         int
+		body           string
+		transportError bool
+		wantError      bool
+	}{
+		{"accepted", 201, `{"SMSMessageData":{"Recipients":[{"number":"+254700000001","statusCode":101}]}}`, false, false},
+		{"recipient rejected", 201, `{"SMSMessageData":{"Recipients":[{"number":"+254700000001","statusCode":401}]}}`, false, true},
+		{"wrong recipient", 201, `{"SMSMessageData":{"Recipients":[{"number":"+254700000002","statusCode":101}]}}`, false, true},
+		{"empty recipients", 201, `{"SMSMessageData":{"Recipients":[]}}`, false, true},
+		{"malformed", 201, `broken`, false, true},
+		{"provider error", 401, `{"error":"provider-secret"}`, false, true},
+		{"transport error", 0, "", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewAfricasTalkingSMSClient("synthetic-app", "synthetic-key", "IKONEX")
+			client.httpClient = &http.Client{Transport: smsRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.URL.String() != "https://api.africastalking.com/version1/messaging" || r.Method != http.MethodPost || r.Header.Get("apiKey") != "synthetic-key" || r.Header.Get("Accept") != "application/json" {
+					t.Fatal("incorrect provider request")
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				if r.Form.Get("to") != "+254700000001" || r.Form.Get("message") != "Synthetic OTP 123456" || r.Form.Get("username") != "synthetic-app" || r.Form.Get("from") != "IKONEX" {
+					t.Fatal("incorrect SMS form")
+				}
+				if tc.transportError {
+					return nil, errors.New("provider-secret")
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
+			})}
+			err := client.SendTransactionalSMS(context.Background(), "+254700000001", "Synthetic OTP 123456")
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error=%v", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "provider-secret") {
+				t.Fatal("sensitive provider information exposed")
+			}
+			if len(client.SentSMS) != 0 {
+				t.Fatal("production delivery recorded in sandbox history")
+			}
+		})
+	}
+}
+
+func TestAfricasTalkingRejectsMissingConfigurationAndInput(t *testing.T) {
+	for _, tc := range []struct{ key, to, message string }{
+		{"", "+254700000001", "OTP"}, {"key", "", "OTP"}, {"key", "+254700000001", ""},
+	} {
+		client := NewAfricasTalkingSMSClient("synthetic-app", tc.key, "")
+		if err := client.SendTransactionalSMS(context.Background(), tc.to, tc.message); err == nil {
+			t.Fatal("expected validation failure")
+		}
 	}
 }

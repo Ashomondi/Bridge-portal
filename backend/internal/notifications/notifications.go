@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -62,7 +63,8 @@ type AfricasTalkingSMSClient struct {
 		Message string
 		SentAt  time.Time
 	}
-	mu sync.Mutex
+	mu         sync.Mutex
+	httpClient *http.Client
 }
 
 func NewAfricasTalkingSMSClient(username, apiKey, senderID string) *AfricasTalkingSMSClient {
@@ -70,28 +72,65 @@ func NewAfricasTalkingSMSClient(username, apiKey, senderID string) *AfricasTalki
 		username = "sandbox"
 	}
 	return &AfricasTalkingSMSClient{
-		Username: username,
-		APIKey:   apiKey,
-		SenderID: senderID,
+		Username:   username,
+		APIKey:     apiKey,
+		SenderID:   senderID,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
 func (c *AfricasTalkingSMSClient) SendTransactionalSMS(ctx context.Context, toPhoneNumber, message string) error {
+	if strings.TrimSpace(toPhoneNumber) == "" || strings.TrimSpace(message) == "" {
+		return errors.New("SMS recipient and message are required")
+	}
+	if c.Username != "sandbox" {
+		if c.APIKey == "" {
+			return errors.New("Africa's Talking API key is required")
+		}
+		form := url.Values{"username": {c.Username}, "to": {toPhoneNumber}, "message": {message}}
+		if c.SenderID != "" {
+			form.Set("from", c.SenderID)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.africastalking.com/version1/messaging", strings.NewReader(form.Encode()))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("apiKey", c.APIKey)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		response, err := c.httpClient.Do(req)
+		if err != nil {
+			return errors.New("Africa's Talking SMS request failed")
+		}
+		defer response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return fmt.Errorf("Africa's Talking SMS request returned HTTP %d", response.StatusCode)
+		}
+		var result struct {
+			SMSMessageData struct {
+				Recipients []struct {
+					Number     string `json:"number"`
+					StatusCode int    `json:"statusCode"`
+				} `json:"Recipients"`
+			} `json:"SMSMessageData"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			return errors.New("invalid Africa's Talking SMS response")
+		}
+		recipients := result.SMSMessageData.Recipients
+		if len(recipients) != 1 || recipients[0].Number != toPhoneNumber || recipients[0].StatusCode != 101 {
+			return errors.New("Africa's Talking did not accept the SMS recipient")
+		}
+		return nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	// In sandbox or testing mode, log deterministically (C12, C58)
 	c.SentSMS = append(c.SentSMS, struct {
 		To      string
 		Message string
 		SentAt  time.Time
-	}{
-		To:      toPhoneNumber,
-		Message: message,
-		SentAt:  time.Now(),
-	})
-
-	log.Printf("[Transactional SMS] Dispatched to %s: %s", toPhoneNumber, message)
+	}{toPhoneNumber, message, time.Now()})
+	log.Print("[Transactional SMS sandbox] Message recorded")
 	return nil
 }
 

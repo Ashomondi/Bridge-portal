@@ -12,8 +12,9 @@ import (
 
 // SQLStore is the PostgreSQL implementation of notifications.Store.
 type SQLStore struct {
-	db *sql.DB
-	tx *sql.Tx
+	db       *sql.DB
+	tx       *sql.Tx
+	schoolID string
 }
 
 func NewSQLStore(db *sql.DB) *SQLStore {
@@ -34,6 +35,15 @@ func (s *SQLStore) q() sqlQuerier {
 }
 
 func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store) error) error {
+	if schoolID == "" {
+		return errors.New("tenant school_id is required")
+	}
+	if s.tx != nil {
+		if schoolID != s.schoolID {
+			return errors.New("transaction belongs to another school")
+		}
+		return fn(s)
+	}
 	if s.db == nil {
 		return errors.New("notifications: SQLStore has no database connection")
 	}
@@ -41,13 +51,14 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 	if err != nil {
 		return err
 	}
-	if schoolID != "" {
+	defer tx.Rollback()
+	{
 		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.school_id', $1, true)`, schoolID); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
 	}
-	tenantStore := &SQLStore{db: s.db, tx: tx}
+	tenantStore := &SQLStore{db: s.db, tx: tx, schoolID: schoolID}
 	if err := fn(tenantStore); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -64,6 +75,9 @@ func newUUID() string {
 }
 
 func (s *SQLStore) CreateInAppNotification(ctx context.Context, n *InAppNotification) error {
+	if s.tx == nil {
+		return s.WithTx(ctx, n.SchoolID, func(store Store) error { return store.CreateInAppNotification(ctx, n) })
+	}
 	if n.ID == "" {
 		n.ID = newUUID()
 	}
@@ -95,6 +109,15 @@ func (s *SQLStore) CreateInAppNotification(ctx context.Context, n *InAppNotifica
 }
 
 func (s *SQLStore) ListInAppNotifications(ctx context.Context, schoolID, recipientUserID string, unreadOnly bool, limit int) ([]InAppNotification, error) {
+	if s.tx == nil {
+		var items []InAppNotification
+		err := s.WithTx(ctx, schoolID, func(store Store) error {
+			var err error
+			items, err = store.ListInAppNotifications(ctx, schoolID, recipientUserID, unreadOnly, limit)
+			return err
+		})
+		return items, err
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -140,6 +163,11 @@ func (s *SQLStore) ListInAppNotifications(ctx context.Context, schoolID, recipie
 }
 
 func (s *SQLStore) MarkNotificationRead(ctx context.Context, schoolID, notificationID, recipientUserID string) error {
+	if s.tx == nil {
+		return s.WithTx(ctx, schoolID, func(store Store) error {
+			return store.MarkNotificationRead(ctx, schoolID, notificationID, recipientUserID)
+		})
+	}
 	query := `
 		UPDATE in_app_notifications
 		SET is_read = TRUE, read_at = NOW()
