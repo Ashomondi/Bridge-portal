@@ -10,8 +10,10 @@ ALTER TABLE payments ADD CONSTRAINT r1_c_payment_school_id UNIQUE (school_id, id
 ALTER TABLE fee_structures ADD COLUMN boarding_status VARCHAR(20) NOT NULL DEFAULT 'all'
     CHECK (boarding_status IN ('all', 'boarder', 'day'));
 ALTER TABLE fee_ledgers ADD COLUMN credit_balance NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    ADD COLUMN credit_applied NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    ADD COLUMN credit_transferred NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     ADD COLUMN due_date DATE,
-    ADD CONSTRAINT r1_c_ledger_nonnegative CHECK (current_balance >= 0 AND credit_balance >= 0);
+    ADD CONSTRAINT r1_c_ledger_nonnegative CHECK (current_balance >= 0 AND credit_balance >= 0 AND credit_applied >= 0 AND credit_transferred >= 0);
 
 CREATE TABLE school_mpesa_configs (
     school_id UUID PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,

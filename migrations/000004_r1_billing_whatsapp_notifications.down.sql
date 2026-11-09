@@ -14,7 +14,7 @@ DROP TABLE fee_periods;
 DROP TABLE school_mpesa_configs;
 
 ALTER TABLE fee_ledgers DROP CONSTRAINT r1_c_ledger_nonnegative,
-    DROP COLUMN credit_balance, DROP COLUMN due_date;
+    DROP COLUMN credit_balance, DROP COLUMN credit_applied, DROP COLUMN credit_transferred, DROP COLUMN due_date;
 ALTER TABLE fee_structures DROP COLUMN boarding_status;
 ALTER TABLE payments DROP CONSTRAINT r1_c_payment_school_id;
 ALTER TABLE fee_structures DROP CONSTRAINT r1_c_structure_school_id;

@@ -94,6 +94,8 @@ Both migration tests passed (10.530 seconds including race instrumentation). Eac
 
 ## Integration responsibility
 
+BILL-01 passed with the temporary manifest: exact-money parsing/JSON, overflow, balance conservation, rejection of rounding/NaN, and PostgreSQL NUMERIC(12,2) round trips including ±9999999999.99. `go test -v -race ./internal/billing -run 'TestMoney|TestBalances'` used the local test database and passed in 3.501 seconds; billing vet passed. Per-term credit transfer will use separate `credit_applied`/`credit_transferred` counters, preserving actual `paid_amount` and preventing aggregate double-counting. The owned migration cycle is repeated after adding these columns.
+
 NOTIF-04/05 verification: `DEV05_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:32768/postgres?sslmode=disable' go test -modfile=/tmp/ikonex-dev05-testing.xunwQ5/testing.mod -v -race ./internal/notifications` passed (9.682 seconds), including real PostgreSQL transaction rollback, recipient/tenant isolation, HTTP pagination, and read timestamp idempotency. `go vet` with the same manifest passed. Test databases and roles were cleaned by the harness; protected files remained unchanged.
 
 Evans must add the recorded module requirements to the protected application manifest during integration. A successful test run with a temporary manifest is not evidence that the unchanged dependency-free application manifest can resolve newly imported pgx or Asynq packages. Report the exact manifest used with each result.

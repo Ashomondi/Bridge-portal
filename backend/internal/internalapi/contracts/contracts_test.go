@@ -13,6 +13,17 @@ import (
 
 const syntheticID = "10000000-0000-0000-0000-000000000001"
 
+func TestIDRequiresCanonicalNonzeroUUID(t *testing.T) {
+	for _, id := range []string{"", "00000000-0000-0000-0000-000000000000", "10000000x0000x0000x0000x000000000001", "10000000000000000000000000000001"} {
+		if ValidID(id) {
+			t.Fatalf("invalid ID accepted: %q", id)
+		}
+	}
+	if !ValidID(syntheticID) {
+		t.Fatal("canonical ID rejected")
+	}
+}
+
 func TestIdentityRejectsUntrustedOrIncompleteContext(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("X-User-ID", syntheticID)

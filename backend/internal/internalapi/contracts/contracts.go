@@ -67,6 +67,11 @@ func ValidID(id string) bool {
 	if len(id) != 36 || id == "00000000-0000-0000-0000-000000000000" {
 		return false
 	}
+	for _, index := range []int{8, 13, 18, 23} {
+		if id[index] != '-' {
+			return false
+		}
+	}
 	var value pgtype.UUID
 	return value.Scan(id) == nil && value.Valid
 }
