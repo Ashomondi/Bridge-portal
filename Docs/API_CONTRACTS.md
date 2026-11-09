@@ -60,7 +60,16 @@ be added later.
 
 ### Auth & onboarding
 - `POST /auth/otp/request`, `POST /auth/otp/verify`
-- `POST /staff-invites` (permission: `staff.invites.create`)
+- `POST /admin/schools` (Ikonex team; `X-Internal-Service-Token`). Creates the
+  school, principal user and membership, school contact profile, and the
+  default `class_teacher` / `delegated_verifier` badges; returns `school_id`
+  and `principal_user_id`.
+- `POST /schools/setup-wizard` (permission: `school.setup`; principal, deputy).
+  One transaction creates the academic year, Terms 1–3, Grade 7–12 levels,
+  classes, dormitories and the initial grading scale, then sets
+  `school_profile.wizard_completed = true`.
+- `POST /staff-invites` (permission: `staff.invites.create`; default window
+  08:00–18:00, adjustable) and `POST /staff-invites/{id}/revoke`
 - `POST /staff-applications/{id}/review` (permission:
   `staff.applications.review`; verifier checks documents in person)
 - `POST /parent-qr` (generate, valid 12 hours) and
