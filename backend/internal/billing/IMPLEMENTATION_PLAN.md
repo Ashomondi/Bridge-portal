@@ -106,6 +106,8 @@ Paths below are relative to the repository root. `B`, `N`, `W`, `I`, `J` mean `b
 
 ## Acceptance evidence tracker
 
+NOTIF-04 and NOTIF-05 completed: notification creation/rollback and HTTP ownership/pagination/read-idempotency tests passed against PostgreSQL 16.15, together with the complete SMS suite under the race detector; notification vet passed. Exact exported contracts and route shapes are documented in `../notifications/INTEGRATION.md` for Evans/Ema. The shared API documentation and server remain untouched.
+
 | Criterion | Required coverage | Evidence | Status |
 |---|---|---|---|
 | AC-BE-C01 | School routing, masked selected guardian, OTP, exact 6h expiry | WA-01–05, PostgreSQL/HTTP tests | Not implemented |

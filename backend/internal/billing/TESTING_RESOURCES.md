@@ -83,8 +83,6 @@ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c
 gopkg.in/yaml.v3 v3.0.1
 ```
 
-## Integration responsibility
-
 ## Migration verification
 
 ```sh
@@ -95,5 +93,7 @@ go vet -modfile=/tmp/ikonex-dev05-testing.xunwQ5/testing.mod ./internal/billing/
 Both migration tests passed (10.530 seconds including race instrumentation). Each test created its own randomly named synthetic database and non-superuser/NOBYPASSRLS role and removed both through test cleanup. UP/DOWN/UP, baseline schema/data preservation, RLS, cross-school reference rejection, missing-note checks and nonnegative balances were exercised. PostgreSQL/Redis versions remain separate from Go dependency versions. One initial invocation failed before testing because an alternate Bash login shell selected an inaccessible `/home/bocal/go/pkg/mod`; rerunning in the normal project shell succeeded without changing dependency versions or protected files.
 
 ## Integration responsibility
+
+NOTIF-04/05 verification: `DEV05_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:32768/postgres?sslmode=disable' go test -modfile=/tmp/ikonex-dev05-testing.xunwQ5/testing.mod -v -race ./internal/notifications` passed (9.682 seconds), including real PostgreSQL transaction rollback, recipient/tenant isolation, HTTP pagination, and read timestamp idempotency. `go vet` with the same manifest passed. Test databases and roles were cleaned by the harness; protected files remained unchanged.
 
 Evans must add the recorded module requirements to the protected application manifest during integration. A successful test run with a temporary manifest is not evidence that the unchanged dependency-free application manifest can resolve newly imported pgx or Asynq packages. Report the exact manifest used with each result.
