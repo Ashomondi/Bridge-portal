@@ -3,6 +3,7 @@ package notifications
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 )
@@ -85,4 +86,33 @@ func (m SMSMessage) normalized() (SMSMessage, error) {
 	}
 	m.To = phone
 	return m, nil
+}
+
+type sandboxSMSDispatcher struct {
+	logger *slog.Logger
+}
+
+// NewSandboxSMSDispatcher records only redacted delivery metadata, never sends
+// a network request, and never logs the message body or the full recipient.
+func NewSandboxSMSDispatcher(logger *slog.Logger) SMSDispatcher {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &sandboxSMSDispatcher{logger: logger}
+}
+
+func (d *sandboxSMSDispatcher) DispatchSMS(ctx context.Context, message SMSMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	message, err := message.normalized()
+	if err != nil {
+		return err
+	}
+	d.logger.InfoContext(ctx, "sandbox transactional SMS accepted",
+		"recipient", "***"+message.To[len(message.To)-3:],
+		"purpose", string(message.Purpose),
+		"characters", utf8.RuneCountInString(message.Body),
+	)
+	return nil
 }

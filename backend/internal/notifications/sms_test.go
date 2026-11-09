@@ -1,8 +1,12 @@
 package notifications
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -29,6 +33,67 @@ func TestNormalizePhone(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestSandboxSMSRedactsSensitiveData(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return attr
+		},
+	}))
+	dispatcher := NewSandboxSMSDispatcher(logger)
+	message := SMSMessage{To: "0712345678", Body: "Your synthetic OTP is 654321", Purpose: WhatsAppSessionOTP}
+	if err := dispatcher.DispatchSMS(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	first := output.String()
+	for _, secret := range []string{message.To, "+254712345678", message.Body, "654321"} {
+		if strings.Contains(first, secret) {
+			t.Fatal("sandbox exposed sensitive message data")
+		}
+	}
+	if !strings.Contains(first, `"recipient":"***678"`) || !strings.Contains(first, `"purpose":"whatsapp_session"`) {
+		t.Fatalf("safe dispatch metadata missing: %s", first)
+	}
+	output.Reset()
+	if err := dispatcher.DispatchSMS(context.Background(), message); err != nil || output.String() != first {
+		t.Fatalf("nondeterministic sandbox output: %v", err)
+	}
+	output.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := dispatcher.DispatchSMS(ctx, message); !errors.Is(err, context.Canceled) || output.Len() != 0 {
+		t.Fatalf("canceled dispatch: %v, %s", err, output.String())
+	}
+	message.Purpose = "absence"
+	if err := dispatcher.DispatchSMS(context.Background(), message); !errors.Is(err, ErrInvalidSMS) || output.Len() != 0 {
+		t.Fatalf("invalid dispatch: %v, %s", err, output.String())
+	}
+}
+
+func TestSandboxSMSConcurrentDispatch(t *testing.T) {
+	var output bytes.Buffer
+	dispatcher := NewSandboxSMSDispatcher(slog.New(slog.NewJSONHandler(&output, nil)))
+	var group sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			if err := dispatcher.DispatchSMS(context.Background(), SMSMessage{
+				To: "0712345678", Body: "Synthetic test", Purpose: AppLoginOTP,
+			}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	group.Wait()
+	if strings.Count(output.String(), "sandbox transactional SMS accepted") != 20 {
+		t.Fatal("sandbox lost dispatch metadata")
 	}
 }
 
