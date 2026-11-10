@@ -11,12 +11,12 @@ export type TimetablePeriod = {
   id: string;
   kind: TimetablePeriodKind;
   subject: string;
-  teacher: string;
-  room: string;
-  start: string;
-  end: string;
+  teacher: string | null;
+  room: string | null;
+  start: string | null;
+  end: string | null;
   label: string;
-  duration: string;
+  duration: string | null;
 };
 
 export type KeyDateKind = "standard" | "notice" | "general";
@@ -27,8 +27,37 @@ export type KeyDate = {
   month: string;
   day: string;
   title: string;
-  meta: string;
-  badge: string;
+  meta: string | null;
+  badge: string | null;
+};
+
+export type TimetableStudent = {
+  id: string;
+  name: string;
+  initials: string;
+};
+
+export type AcademicNotice = {
+  authority: string;
+  note: string;
+};
+
+export type ParentTimetableData = {
+  portal: {
+    name: string | null;
+  } | null;
+  session: {
+    fullName: string;
+    relationship: string;
+    initials: string;
+  } | null;
+  students: TimetableStudent[];
+  selectedStudentId: string | null;
+  weekLabel: string | null;
+  termLabel: string | null;
+  notice: AcademicNotice | null;
+  periods: TimetablePeriod[];
+  keyDates: KeyDate[];
 };
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
@@ -55,83 +84,6 @@ export function buildWeek(reference: Date): WeekDay[] {
     };
   });
 }
-
-export const PERIODS: TimetablePeriod[] = [
-  {
-    id: "period-1",
-    kind: "completed",
-    subject: "[Subject Name]",
-    teacher: "[Teacher]",
-    room: "[Room]",
-    start: "[Start]",
-    end: "[End]",
-    label: "Completed",
-    duration: "[X] min",
-  },
-  {
-    id: "break-1",
-    kind: "break",
-    subject: "",
-    teacher: "",
-    room: "",
-    start: "[Start]",
-    end: "[End]",
-    label: "[Break Label]",
-    duration: "[X] min",
-  },
-  {
-    id: "period-2",
-    kind: "active",
-    subject: "[Subject Name]",
-    teacher: "[Teacher]",
-    room: "[Room]",
-    start: "[Start]",
-    end: "[End]",
-    label: "In session",
-    duration: "[X] min",
-  },
-  {
-    id: "period-3",
-    kind: "upcoming",
-    subject: "[Subject Name]",
-    teacher: "[Teacher]",
-    room: "[Room]",
-    start: "[Start]",
-    end: "[End]",
-    label: "Next up",
-    duration: "[X] min",
-  },
-];
-
-export const KEY_DATES: KeyDate[] = [
-  {
-    id: "date-1",
-    kind: "standard",
-    month: "[Mon]",
-    day: "[DD]",
-    title: "[Event Title]",
-    meta: "[Time] · [Venue]",
-    badge: "[Category]",
-  },
-  {
-    id: "date-2",
-    kind: "notice",
-    month: "[Mon]",
-    day: "[DD]",
-    title: "[Event Title]",
-    meta: "[Explanation]",
-    badge: "NOTICE FROM DEAN",
-  },
-  {
-    id: "date-3",
-    kind: "general",
-    month: "[Mon]",
-    day: "[DD]",
-    title: "[Event Title]",
-    meta: "[Audience]",
-    badge: "[Everyone]",
-  },
-];
 
 function toDateId(date: Date) {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");

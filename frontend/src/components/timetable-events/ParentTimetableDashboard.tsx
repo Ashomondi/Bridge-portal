@@ -20,12 +20,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
-import {
-  KEY_DATES,
-  PERIODS,
-  type KeyDate,
-  type TimetablePeriod,
-  type WeekDay,
+import type {
+  KeyDate,
+  ParentTimetableData,
+  TimetablePeriod,
+  TimetableStudent,
+  WeekDay,
 } from "./timetable-events-data";
 
 type NavItem = {
@@ -37,21 +37,39 @@ type NavItem = {
 
 const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Home", icon: Home, href: "/parent" },
-  { label: "Timetable", icon: CalendarDays, href: "/parent/timetable", active: true },
+  {
+    label: "Timetable",
+    icon: CalendarDays,
+    href: "/parent/timetable",
+    active: true,
+  },
   { label: "Results", icon: Award, href: "/parent/results" },
   { label: "Attendance", icon: CalendarCheck, href: "/parent/attendance" },
   { label: "Fees", icon: Wallet, href: "#" },
 ];
 
-const STUDENTS = [
-  { id: "student-1", label: "[Student Name]", initials: "[AB]" },
-  { id: "student-2", label: "[Student]", initials: "[CD]" },
-  { id: "student-3", label: "[Student]", initials: "[EF]" },
-];
-
-export default function ParentTimetableDashboard({ week }: { week: WeekDay[] }) {
+export default function ParentTimetableDashboard({
+  data,
+  week,
+}: {
+  data: ParentTimetableData | null;
+  week: WeekDay[];
+}) {
+  const students = data?.students ?? [];
+  const session = data?.session ?? null;
+  const guardianName = session?.fullName?.trim() || "Guardian";
+  const relationship = session?.relationship?.trim() || "Parent";
+  const guardianInitials =
+    session?.initials?.trim() || initialsFromName(guardianName);
+  const portalName = data?.portal?.name?.trim() || "Parent portal";
+  const periods = data?.periods ?? [];
+  const keyDates = data?.keyDates ?? [];
+  const notice = data?.notice ?? null;
   const initialDay = week.find((day) => day.isToday) ?? week[0];
-  const [selectedStudent, setSelectedStudent] = useState(STUDENTS[0].id);
+
+  const [selectedStudentId, setSelectedStudentId] = useState(
+    data?.selectedStudentId ?? students[0]?.id ?? "",
+  );
   const [selectedDay, setSelectedDay] = useState(initialDay?.id ?? "");
   const [view, setView] = useState<"timetable" | "calendar">("timetable");
 
@@ -65,13 +83,22 @@ export default function ParentTimetableDashboard({ week }: { week: WeekDay[] }) 
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[260px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          guardianName={guardianName}
+          relationship={relationship}
+          guardianInitials={guardianInitials}
+        />
       </aside>
 
-      <MobileAppBar />
+      <MobileAppBar guardianInitials={guardianInitials} />
 
       <div className="lg:pl-[260px]">
-        <DesktopHeader />
+        <DesktopHeader
+          portalName={portalName}
+          guardianName={guardianName}
+          relationship={relationship}
+          guardianInitials={guardianInitials}
+        />
 
         <main
           id="timetable-main"
@@ -83,24 +110,31 @@ export default function ParentTimetableDashboard({ week }: { week: WeekDay[] }) 
           </h1>
 
           <StudentFilter
-            selectedStudent={selectedStudent}
-            onSelect={setSelectedStudent}
+            students={students}
+            selectedStudentId={selectedStudentId}
+            onSelect={setSelectedStudentId}
           />
 
           <ViewToggle view={view} onChange={setView} />
-          <OfficialNotice />
+          <OfficialNotice notice={notice} />
           <WeekSelector
             week={week}
+            weekLabel={data?.weekLabel?.trim() || null}
+            termLabel={data?.termLabel?.trim() || null}
             selectedDay={selectedDay}
             onSelect={setSelectedDay}
           />
 
           <div className="mt-4 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(340px,1fr)]">
             <div className="min-w-0">
-              {view === "timetable" ? <PeriodsSection /> : <CalendarEmpty />}
+              {view === "timetable" ? (
+                <PeriodsSection periods={periods} streamLabel={null} />
+              ) : (
+                <CalendarEmpty />
+              )}
             </div>
             <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
-              <KeyDatesCard dates={KEY_DATES} />
+              <KeyDatesCard dates={keyDates} />
             </div>
           </div>
         </main>
@@ -109,7 +143,15 @@ export default function ParentTimetableDashboard({ week }: { week: WeekDay[] }) 
   );
 }
 
-function SidebarContent() {
+function SidebarContent({
+  guardianName,
+  relationship,
+  guardianInitials,
+}: {
+  guardianName: string;
+  relationship: string;
+  guardianInitials: string;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -168,17 +210,17 @@ function SidebarContent() {
         <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3">
           <div className="flex items-center gap-2.5">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-              [AB]
+              {guardianInitials}
             </span>
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold text-slate-800">
-                [Guardian Name]
+                {guardianName}
               </p>
               <p className="truncate text-[10px] text-slate-400">
-                [Relationship]
+                {relationship}
               </p>
               <p className="truncate text-[9px] font-medium text-brand-600">
-                [Email / Phone]
+                Parent account
               </p>
             </div>
           </div>
@@ -195,7 +237,7 @@ function SidebarContent() {
   );
 }
 
-function MobileAppBar() {
+function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
@@ -217,20 +259,30 @@ function MobileAppBar() {
           className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           aria-label="Open user profile"
         >
-          [AB]
+          {guardianInitials}
         </button>
       </div>
     </header>
   );
 }
 
-function DesktopHeader() {
+function DesktopHeader({
+  portalName,
+  guardianName,
+  relationship,
+  guardianInitials,
+}: {
+  portalName: string;
+  guardianName: string;
+  relationship: string;
+  guardianInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
           <span className="max-w-[220px] truncate text-slate-700">
-            [Portal Name]
+            {portalName}
           </span>
           <ChevronRight className="h-3.5 w-3.5" />
           <span>Timetable &amp; Events</span>
@@ -241,13 +293,13 @@ function DesktopHeader() {
           className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
         >
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
-            [AB]
+            {guardianInitials}
           </span>
           <div className="min-w-0 text-left">
             <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
-              [Guardian Name]
+              {guardianName}
             </p>
-            <p className="text-[10px] text-slate-400">[Relationship]</p>
+            <p className="text-[10px] text-slate-400">{relationship}</p>
           </div>
           <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
         </button>
@@ -257,10 +309,12 @@ function DesktopHeader() {
 }
 
 function StudentFilter({
-  selectedStudent,
+  students,
+  selectedStudentId,
   onSelect,
 }: {
-  selectedStudent: string;
+  students: TimetableStudent[];
+  selectedStudentId: string;
   onSelect: (id: string) => void;
 }) {
   return (
@@ -269,35 +323,41 @@ function StudentFilter({
       role="tablist"
       aria-label="Student records"
     >
-      <div className="flex min-w-max gap-2">
-        {STUDENTS.map((student) => {
-          const active = student.id === selectedStudent;
+      {students.length > 0 ? (
+        <div className="flex min-w-max gap-2">
+          {students.map((student) => {
+            const active = student.id === selectedStudentId;
 
-          return (
-            <button
-              key={student.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => onSelect(student.id)}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                active
-                  ? "border-brand-600 bg-[#E8F5F3] text-brand-700 shadow-sm"
-                  : "border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
-              )}
-            >
-              <span
+            return (
+              <button
+                key={student.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onSelect(student.id)}
                 className={cn(
-                  "h-1.5 w-1.5 rounded-full",
-                  active ? "bg-brand-600" : "bg-slate-300",
+                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                  active
+                    ? "border-brand-600 bg-[#E8F5F3] text-brand-700 shadow-sm"
+                    : "border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
                 )}
-              />
-              {student.label}
-            </button>
-          );
-        })}
-      </div>
+              >
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full",
+                    active ? "bg-brand-600" : "bg-slate-300",
+                  )}
+                />
+                {student.name}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <span className="inline-flex items-center rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-500">
+          No student records available
+        </span>
+      )}
     </div>
   );
 }
@@ -347,7 +407,11 @@ function ViewToggle({
   );
 }
 
-function OfficialNotice() {
+function OfficialNotice({
+  notice,
+}: {
+  notice: ParentTimetableData["notice"];
+}) {
   return (
     <section className="mt-3 flex gap-3 rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
       <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-[#6D4FA3] shadow-sm">
@@ -355,10 +419,10 @@ function OfficialNotice() {
       </span>
       <div className="min-w-0">
         <p className="text-[8px] font-semibold uppercase tracking-[0.16em] text-[#8A6DBC]">
-          Dean of academics
+          {notice?.authority?.trim() || "Academic office"}
         </p>
         <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
-          [Update note text] [Target schedule metadata]
+          {notice?.note?.trim() || "No academic notice available."}
         </p>
       </div>
     </section>
@@ -367,10 +431,14 @@ function OfficialNotice() {
 
 function WeekSelector({
   week,
+  weekLabel,
+  termLabel,
   selectedDay,
   onSelect,
 }: {
   week: WeekDay[];
+  weekLabel: string | null;
+  termLabel: string | null;
   selectedDay: string;
   onSelect: (id: string) => void;
 }) {
@@ -378,65 +446,77 @@ function WeekSelector({
     <section className="mt-3">
       <div className="flex items-center justify-between gap-3 px-1">
         <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-          Week [X] schedule
+          {weekLabel || "Week schedule"}
         </p>
         <p className="text-[9px] font-medium text-slate-400">
-          Term [X] - [Year]
+          {termLabel || "No active term"}
         </p>
       </div>
 
-      <div className="mt-2 rounded-2xl bg-[#E8F5F3] p-2">
-        <div className="grid grid-cols-5 gap-1.5">
-          {week.map((day) => {
-            const active = day.id === selectedDay;
+      {week.length > 0 ? (
+        <div className="mt-2 rounded-2xl bg-[#E8F5F3] p-2">
+          <div className="grid grid-cols-5 gap-1.5">
+            {week.map((day) => {
+              const active = day.id === selectedDay;
 
-            return (
-              <button
-                key={day.id}
-                type="button"
-                onClick={() => onSelect(day.id)}
-                aria-pressed={active}
-                aria-label={`${day.label} ${day.date}${day.isToday ? ", today" : ""}`}
-                className={cn(
-                  "relative flex flex-col items-center rounded-xl px-1 py-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                  active
-                    ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20"
-                    : "bg-white/70 text-slate-500 hover:bg-white hover:text-brand-700",
-                )}
-              >
-                <span
+              return (
+                <button
+                  key={day.id}
+                  type="button"
+                  onClick={() => onSelect(day.id)}
+                  aria-pressed={active}
+                  aria-label={`${day.label} ${day.date}${day.isToday ? ", today" : ""}`}
                   className={cn(
-                    "mb-0.5 h-4 rounded-full px-1.5 text-[7px] font-semibold leading-4",
-                    day.isToday
-                      ? active
-                        ? "bg-white/20 text-white"
-                        : "bg-brand-50 text-brand-700"
-                      : "text-transparent",
+                    "relative flex flex-col items-center rounded-xl px-1 py-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                    active
+                      ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20"
+                      : "bg-white/70 text-slate-500 hover:bg-white hover:text-brand-700",
                   )}
                 >
-                  Today
-                </span>
-                <span
-                  className={cn(
-                    "text-[8px] font-semibold uppercase tracking-wide",
-                    active ? "text-white/70" : "text-slate-400",
-                  )}
-                >
-                  {day.label}
-                </span>
-                <span className="mt-0.5 text-sm font-bold leading-none">
-                  {day.date}
-                </span>
-              </button>
-            );
-          })}
+                  <span
+                    className={cn(
+                      "mb-0.5 h-4 rounded-full px-1.5 text-[7px] font-semibold leading-4",
+                      day.isToday
+                        ? active
+                          ? "bg-white/20 text-white"
+                          : "bg-brand-50 text-brand-700"
+                        : "text-transparent",
+                    )}
+                  >
+                    Today
+                  </span>
+                  <span
+                    className={cn(
+                      "text-[8px] font-semibold uppercase tracking-wide",
+                      active ? "text-white/70" : "text-slate-400",
+                    )}
+                  >
+                    {day.label}
+                  </span>
+                  <span className="mt-0.5 text-sm font-bold leading-none">
+                    {day.date}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="mt-2 rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-center text-[10px] text-slate-500">
+          No teaching week available.
+        </div>
+      )}
     </section>
   );
 }
 
-function PeriodsSection() {
+function PeriodsSection({
+  periods,
+  streamLabel,
+}: {
+  periods: TimetablePeriod[];
+  streamLabel: string | null;
+}) {
   return (
     <section>
       <div className="flex items-center justify-between gap-3 px-1">
@@ -444,15 +524,24 @@ function PeriodsSection() {
           Today&apos;s Periods
         </h2>
         <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          [Stream / Class]
+          {streamLabel || "No stream assigned"}
         </span>
       </div>
 
-      <div className="mt-3 space-y-2.5">
-        {PERIODS.map((period) => (
-          <PeriodCard key={period.id} period={period} />
-        ))}
-      </div>
+      {periods.length > 0 ? (
+        <div className="mt-3 space-y-2.5">
+          {periods.map((period) => (
+            <PeriodCard key={period.id} period={period} />
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={CalendarDays}
+          title="No periods scheduled"
+          body="The day's timetable will appear here when it is published."
+          className="mt-3"
+        />
+      )}
     </section>
   );
 }
@@ -466,10 +555,12 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
           {period.label}
         </span>
         <span className="text-[9px] font-medium text-slate-500">
-          {period.start} – {period.end}
-          <span className="ml-2 rounded-full bg-white px-1.5 py-0.5 text-[8px] font-semibold text-slate-400">
-            {period.duration}
-          </span>
+          {formatTimeRange(period.start, period.end)}
+          {period.duration && (
+            <span className="ml-2 rounded-full bg-white px-1.5 py-0.5 text-[8px] font-semibold text-slate-400">
+              {period.duration}
+            </span>
+          )}
         </span>
       </div>
     );
@@ -510,7 +601,8 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
           )}
         </div>
         <p className="mt-0.5 truncate text-[9px] text-slate-400">
-          {period.teacher} · {period.room}
+          {[period.teacher, period.room].filter(Boolean).join(" · ") ||
+            "Teacher and room not provided"}
         </p>
       </div>
 
@@ -521,7 +613,7 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
             active ? "text-[#6D4FA3]" : "text-slate-600",
           )}
         >
-          {period.start} – {period.end}
+          {formatTimeRange(period.start, period.end)}
         </p>
         <p
           className={cn(
@@ -544,7 +636,7 @@ function CalendarEmpty() {
           Calendar view
         </h2>
         <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          [Stream / Class]
+          No stream assigned
         </span>
       </div>
       <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center">
@@ -572,11 +664,20 @@ function KeyDatesCard({ dates }: { dates: KeyDate[] }) {
         </span>
       </div>
 
-      <div className="mt-3 space-y-2">
-        {dates.map((date) => (
-          <KeyDateItem key={date.id} date={date} />
-        ))}
-      </div>
+      {dates.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          {dates.map((date) => (
+            <KeyDateItem key={date.id} date={date} />
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={CalendarDays}
+          title="No key dates available"
+          body="Term dates and events will appear here when they are published."
+          className="mt-3"
+        />
+      )}
     </section>
   );
 }
@@ -596,13 +697,13 @@ function KeyDateItem({ date }: { date: KeyDate }) {
         <div className="min-w-0">
           <p className="inline-flex items-center gap-1 text-[7px] font-semibold uppercase tracking-[0.12em] text-brand-700">
             <Info className="h-2.5 w-2.5" />
-            {date.badge}
+            {date.badge || "Notice"}
           </p>
           <p className="mt-0.5 truncate text-[10px] font-bold text-slate-800">
             {date.title}
           </p>
           <p className="mt-0.5 text-[8px] leading-relaxed text-slate-500">
-            {date.meta}
+            {date.meta || "Details not provided"}
           </p>
         </div>
       </article>
@@ -623,11 +724,64 @@ function KeyDateItem({ date }: { date: KeyDate }) {
         <p className="truncate text-[10px] font-bold text-slate-800">
           {date.title}
         </p>
-        <p className="mt-0.5 truncate text-[8px] text-slate-400">{date.meta}</p>
+        <p className="mt-0.5 truncate text-[8px] text-slate-400">
+          {date.meta || "Details not provided"}
+        </p>
       </div>
-      <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
-        {date.badge}
-      </span>
+      {date.badge && (
+        <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
+          {date.badge}
+        </span>
+      )}
     </article>
   );
+}
+
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+  className,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-8 text-center",
+        className,
+      )}
+    >
+      <span className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-slate-50 text-slate-400">
+        <Icon className="h-4 w-4" />
+      </span>
+      <p className="mt-2.5 text-[11px] font-semibold text-slate-700">
+        {title}
+      </p>
+      <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+        {body}
+      </p>
+    </div>
+  );
+}
+
+function formatTimeRange(start: string | null, end: string | null) {
+  if (!start && !end) {
+    return "Time not provided";
+  }
+
+  return `${start || "—"} – ${end || "—"}`;
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "G";
 }
