@@ -197,7 +197,7 @@ func (s *Service) handleRequestOTP(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to generate an OTP.")
 		return
 	}
-	requestID, err := s.reserveOTP(ctx, phone, HashOTP(otp))
+	requestID, err := s.reserveOTP(ctx, phone, s.clientIP(r), HashOTP(otp))
 	if err != nil {
 		var limit *rateLimitError
 		if errors.As(err, &limit) {
@@ -345,18 +345,27 @@ func HashOTP(otp string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// reserveOTP checks the sender's rate limits and stores a new OTP in one
-// transaction. A per-phone advisory lock serialises concurrent requests so two
-// callers cannot both pass the cooldown check.
-func (s *Service) reserveOTP(ctx context.Context, phone, otpHash string) (string, error) {
+// reserveOTP checks the per-phone and per-IP rate limits and stores a new OTP
+// in one transaction. Advisory locks serialise concurrent requests so two
+// callers cannot both pass the cooldown or threshold checks.
+func (s *Service) reserveOTP(ctx context.Context, phone, requestIP, otpHash string) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
 
+	// Always take the phone lock first and the IP lock second so concurrent
+	// requests cannot deadlock each other.
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "otp:"+phone); err != nil {
 		return "", err
+	}
+	ipBlockKey := ""
+	if requestIP != "" {
+		ipBlockKey = "ip:" + requestIP
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "otp-ip:"+requestIP); err != nil {
+			return "", err
+		}
 	}
 
 	if retryAfter, blocked, err := activeBlock(ctx, tx, phone); err != nil {
@@ -368,21 +377,56 @@ func (s *Service) reserveOTP(ctx context.Context, phone, otpHash string) (string
 			Details: map[string]any{"retry_after_seconds": int(retryAfter.Seconds())},
 		}
 	}
+	if ipBlockKey != "" {
+		if retryAfter, blocked, err := activeBlock(ctx, tx, ipBlockKey); err != nil {
+			return "", err
+		} else if blocked {
+			return "", &rateLimitError{
+				Code:    "IP_BLOCKED",
+				Message: "Too many requests from this network. Try again later.",
+				Details: map[string]any{"retry_after_seconds": int(retryAfter.Seconds())},
+			}
+		}
+	}
 
-	recent, err := recentRequestCount(ctx, tx, phone)
+	recentPhone, err := recentRequestCount(ctx, tx, phone)
 	if err != nil {
 		return "", err
 	}
-	if recent >= blockThreshold {
-		if err := blockSender(ctx, tx, phone); err != nil {
+	recentIP := 0
+	if requestIP != "" {
+		recentIP, err = recentRequestCountByIP(ctx, tx, requestIP)
+		if err != nil {
 			return "", err
+		}
+	}
+
+	phoneBlocked := recentPhone >= blockThreshold
+	ipBlocked := ipBlockKey != "" && recentIP >= blockThreshold
+	if phoneBlocked || ipBlocked {
+		if phoneBlocked {
+			if err := blockSender(ctx, tx, phone); err != nil {
+				return "", err
+			}
+		}
+		if ipBlocked {
+			if err := blockSender(ctx, tx, ipBlockKey); err != nil {
+				return "", err
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return "", err
 		}
+		if phoneBlocked {
+			return "", &rateLimitError{
+				Code:    "SENDER_BLOCKED",
+				Message: "Too many requests. Try again later.",
+				Details: map[string]any{"retry_after_seconds": int(blockDuration.Seconds())},
+			}
+		}
 		return "", &rateLimitError{
-			Code:    "SENDER_BLOCKED",
-			Message: "Too many requests. Try again later.",
+			Code:    "IP_BLOCKED",
+			Message: "Too many requests from this network. Try again later.",
 			Details: map[string]any{"retry_after_seconds": int(blockDuration.Seconds())},
 		}
 	}
@@ -399,10 +443,10 @@ func (s *Service) reserveOTP(ctx context.Context, phone, otpHash string) (string
 
 	var id string
 	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, expires_at)
-		 VALUES ($1, $1, $2, $3, NOW() + INTERVAL '5 minutes')
+		`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, request_ip, expires_at)
+		 VALUES ($1, $1, $2, $3, NULLIF($4, ''), NOW() + INTERVAL '5 minutes')
 		 RETURNING id::text`,
-		phone, otpHash, otpRequestPurpose).Scan(&id); err != nil {
+		phone, otpHash, otpRequestPurpose, requestIP).Scan(&id); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
@@ -444,8 +488,18 @@ func activeBlock(ctx context.Context, q sqlQuerier, sender string) (time.Duratio
 func recentRequestCount(ctx context.Context, q sqlQuerier, sender string) (int, error) {
 	var count int
 	err := q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM otp_requests WHERE sender_identifier = $1 AND created_at >= NOW() - INTERVAL '30 minutes'`,
-		sender).Scan(&count)
+		`SELECT COUNT(*) FROM otp_requests
+		  WHERE sender_identifier = $1 AND purpose = $2 AND created_at >= NOW() - INTERVAL '30 minutes'`,
+		sender, otpRequestPurpose).Scan(&count)
+	return count, err
+}
+
+func recentRequestCountByIP(ctx context.Context, q sqlQuerier, requestIP string) (int, error) {
+	var count int
+	err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM otp_requests
+		  WHERE request_ip = $1 AND purpose = $2 AND created_at >= NOW() - INTERVAL '30 minutes'`,
+		requestIP, otpRequestPurpose).Scan(&count)
 	return count, err
 }
 

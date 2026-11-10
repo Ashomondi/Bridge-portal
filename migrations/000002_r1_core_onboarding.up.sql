@@ -46,6 +46,7 @@ CREATE TABLE otp_requests (
     otp_hash TEXT NOT NULL,
     purpose VARCHAR(30) NOT NULL
         CHECK (purpose IN ('app_login', 'whatsapp_session', 'phone_change')),
+    request_ip VARCHAR(45),
     expires_at TIMESTAMPTZ NOT NULL,
     consumed_at TIMESTAMPTZ,
     failed_attempts INT NOT NULL DEFAULT 0,
@@ -55,7 +56,9 @@ CREATE TABLE otp_requests (
 CREATE INDEX idx_otp_requests_phone_created
     ON otp_requests (phone_number, purpose, created_at DESC);
 CREATE INDEX idx_otp_requests_sender_created
-    ON otp_requests (sender_identifier, created_at DESC);
+    ON otp_requests (sender_identifier, purpose, created_at DESC);
+CREATE INDEX idx_otp_requests_ip_created
+    ON otp_requests (request_ip, purpose, created_at DESC);
 
 -- ------------------------------------------------------------------------------
 -- Sender rate blocks (C18-C20, AC-10)

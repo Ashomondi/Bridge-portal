@@ -49,7 +49,8 @@ be added later.
 
 - **OTP:** one request per minute; more than five requests in thirty minutes
   blocks the *requesting WhatsApp number* for 24 hours (not the guardian's
-  account). Applying the same limits to app login is undecided.
+  account). App login applies the same limit to the requesting phone and the
+  requesting IP address.
 - **AI-facing endpoints:** limits are on backend lookups per verified
   session (fee-balance, attendance, payment lookups), with a tighter limit on
   payment starts. Numbers are set by the team and QA. Assistant messages
