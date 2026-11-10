@@ -33,14 +33,20 @@ type InAppNotifier = notifications.InAppNotifier
 // CreateNotification is the notification payload alias for InAppNotifier.
 type CreateNotification = notifications.CreateNotification
 
+// ShortcodeResolver maps a receiving M-Pesa Paybill/BusinessShortCode to a school_id
+// so incoming Daraja callbacks and C2B webhooks can open a tenant-scoped transaction
+// without bypassing PostgreSQL RLS.
+type ShortcodeResolver func(ctx context.Context, shortcode string) (string, error)
+
 // Service handles fee structures, student ledgers, M-Pesa STK push payments, and reconciliation.
 type Service struct {
-	DB        contracts.TenantDB
-	Audit     contracts.AuditLogger
-	Notifier  InAppNotifier
-	Daraja    DarajaProvider
-	PollQueue STKPollQueue
-	Now       func() time.Time
+	DB               contracts.TenantDB
+	Audit            contracts.AuditLogger
+	Notifier         InAppNotifier
+	Daraja           DarajaProvider
+	PollQueue        STKPollQueue
+	ResolveShortcode ShortcodeResolver
+	Now              func() time.Time
 }
 
 func (s *Service) now() time.Time {
