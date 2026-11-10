@@ -836,9 +836,4 @@ type DarajaProvider interface{}
 
 type STKPollQueue interface{}
 
-func (s *Service) OnTermStartDateChanged(ctx context.Context, tx pgx.Tx, schoolID, termID string, newStartDate time.Time, actorUserID, note string) error {
-	return nil
-}
-
-func registerFeeChangeRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {}
-func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity)     {}
+func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {}
