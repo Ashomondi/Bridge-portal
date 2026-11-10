@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  BadgeCheck,
   Bell,
   CalendarDays,
   Check,
@@ -11,7 +12,6 @@ import {
   ClipboardCheck,
   ClipboardList,
   GraduationCap,
-  BadgeCheck,
   LayoutDashboard,
   LogOut,
   Megaphone,
@@ -24,21 +24,18 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
-
-type AttendanceStatus = "present" | "absent";
+import {
+  getStudentInitials,
+  type RollCallData,
+  type RollCallStatus,
+  type RollCallStudent,
+} from "./roll-call-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
   href: string;
   active?: boolean;
-};
-
-type Student = {
-  id: string;
-  initials: string;
-  name: string;
-  admission: string;
 };
 
 const SIDEBAR_ITEMS: NavItem[] = [
@@ -59,19 +56,27 @@ const BOTTOM_NAV = [
   { label: "Staff ID", icon: BadgeCheck, href: "#" },
 ];
 
-const STUDENTS: Student[] = [
-  { id: "student-1", initials: "[AB]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-2", initials: "[CD]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-3", initials: "[EF]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-4", initials: "[GH]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-5", initials: "[IJ]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-6", initials: "[KL]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-7", initials: "[MN]", name: "[Student Name]", admission: "[Admission #]" },
-  { id: "student-8", initials: "[OP]", name: "[Student Name]", admission: "[Admission #]" },
-];
+export default function RollCallDashboard({
+  data,
+}: {
+  data: RollCallData | null;
+}) {
+  const students = data?.students ?? [];
+  const session = data?.session ?? null;
+  const teacherName = session?.fullName?.trim() || "Teacher";
+  const teacherRole = session?.role?.trim() || "Staff";
+  const teacherSubject = session?.subject?.trim() || "No subject assigned";
+  const teacherInitials =
+    session?.initials?.trim() || initialsFromName(teacherName);
+  const portalName = data?.portal?.name?.trim() || "School portal";
+  const context = data?.context ?? {
+    streamName: null,
+    dateLabel: null,
+    termLabel: null,
+    registryRef: null,
+  };
 
-export default function RollCallDashboard() {
-  const [statuses, setStatuses] = useState<Record<string, AttendanceStatus>>({});
+  const [statuses, setStatuses] = useState<Record<string, RollCallStatus>>({});
   const [menuOpen, setMenuOpen] = useState(false);
   const markedCount = Object.keys(statuses).length;
   const presentCount = useMemo(
@@ -79,8 +84,8 @@ export default function RollCallDashboard() {
     [statuses],
   );
   const absentCount = markedCount - presentCount;
-  const progress = STUDENTS.length
-    ? Math.round((markedCount / STUDENTS.length) * 100)
+  const progress = students.length
+    ? Math.round((markedCount / students.length) * 100)
     : 0;
 
   useEffect(() => {
@@ -95,7 +100,7 @@ export default function RollCallDashboard() {
     };
   }, [menuOpen]);
 
-  function toggleStatus(id: string, status: AttendanceStatus) {
+  function toggleStatus(id: string, status: RollCallStatus) {
     setStatuses((current) => {
       const next = { ...current };
 
@@ -111,9 +116,9 @@ export default function RollCallDashboard() {
 
   function markAllPresent() {
     setStatuses(
-      Object.fromEntries(STUDENTS.map((student) => [student.id, "present"])) as Record<
+      Object.fromEntries(students.map((student) => [student.id, "present"])) as Record<
         string,
-        AttendanceStatus
+        RollCallStatus
       >,
     );
   }
@@ -128,42 +133,86 @@ export default function RollCallDashboard() {
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[272px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          teacherName={teacherName}
+          teacherRole={teacherRole}
+          teacherSubject={teacherSubject}
+          teacherInitials={teacherInitials}
+        />
       </aside>
 
-      <MobileAppBar menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} />
+      <MobileAppBar
+        portalName={portalName}
+        teacherInitials={teacherInitials}
+        menuOpen={menuOpen}
+        onOpenMenu={() => setMenuOpen(true)}
+      />
 
       <div className="lg:pl-[272px]">
-        <DesktopHeader />
+        <DesktopHeader
+          portalName={portalName}
+          teacherName={teacherName}
+          teacherRole={teacherRole}
+          teacherInitials={teacherInitials}
+        />
 
         <main
           id="roll-call-main"
           tabIndex={-1}
           className="mx-auto w-full max-w-[1100px] px-4 pb-[260px] pt-20 sm:px-6 lg:px-8 lg:pt-7"
         >
-          <PageHeader />
+          <PageHeader context={context} />
           <ProgressCard
             marked={markedCount}
-            total={STUDENTS.length}
+            total={students.length}
             present={presentCount}
             absent={absentCount}
             progress={progress}
             onMarkAllPresent={markAllPresent}
           />
-          <StudentList statuses={statuses} onToggle={toggleStatus} />
+          <StudentList
+            students={students}
+            statuses={statuses}
+            onToggle={toggleStatus}
+          />
           <GuardianDispatchNotice />
         </main>
       </div>
 
-      <SubmissionCard marked={markedCount} total={STUDENTS.length} />
+      <SubmissionCard
+        marked={markedCount}
+        total={students.length}
+        registryRef={context.registryRef}
+        termLabel={context.termLabel}
+      />
       <BottomNav />
 
-      {menuOpen && <MobileDrawer onClose={() => setMenuOpen(false)} />}
+      {menuOpen && (
+        <MobileDrawer
+          teacherName={teacherName}
+          teacherRole={teacherRole}
+          teacherSubject={teacherSubject}
+          teacherInitials={teacherInitials}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  teacherName,
+  teacherRole,
+  teacherSubject,
+  teacherInitials,
+  onNavigate,
+}: {
+  teacherName: string;
+  teacherRole: string;
+  teacherSubject: string;
+  teacherInitials: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -223,17 +272,17 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3">
           <div className="flex items-center gap-2.5">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-              [AB]
+              {teacherInitials}
             </span>
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold text-slate-800">
-                [Teacher Name]
+                {teacherName}
               </p>
               <p className="truncate text-[10px] text-slate-400">
-                [Role Title]
+                {teacherRole}
               </p>
               <p className="truncate text-[9px] font-medium text-brand-600">
-                [Subject Assignment]
+                {teacherSubject}
               </p>
             </div>
           </div>
@@ -251,9 +300,13 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function MobileAppBar({
+  portalName,
+  teacherInitials,
   menuOpen,
   onOpenMenu,
 }: {
+  portalName: string;
+  teacherInitials: string;
   menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
@@ -273,7 +326,7 @@ function MobileAppBar({
 
         <div className="min-w-0 flex-1 text-center">
           <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-            [Organization Name]
+            {portalName}
           </p>
           <p className="truncate text-sm font-bold tracking-tight text-slate-900">
             Classes
@@ -294,7 +347,7 @@ function MobileAppBar({
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {teacherInitials}
           </button>
         </div>
       </div>
@@ -302,13 +355,23 @@ function MobileAppBar({
   );
 }
 
-function DesktopHeader() {
+function DesktopHeader({
+  portalName,
+  teacherName,
+  teacherRole,
+  teacherInitials,
+}: {
+  portalName: string;
+  teacherName: string;
+  teacherRole: string;
+  teacherInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1100px] items-center justify-between gap-6 px-8">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
           <span className="max-w-[220px] truncate text-slate-700">
-            [Portal Name]
+            {portalName}
           </span>
           <ChevronRight className="h-3.5 w-3.5" />
           <span>Classes</span>
@@ -331,13 +394,13 @@ function DesktopHeader() {
             className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
-              [AB]
+              {teacherInitials}
             </span>
             <div className="min-w-0 text-left">
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
-                [Teacher Name]
+                {teacherName}
               </p>
-              <p className="text-[10px] text-slate-400">[Role Title]</p>
+              <p className="text-[10px] text-slate-400">{teacherRole}</p>
             </div>
             <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
           </button>
@@ -347,19 +410,32 @@ function DesktopHeader() {
   );
 }
 
-function PageHeader() {
+function PageHeader({ context }: { context: RollCallData["context"] }) {
+  const metadata = [
+    context.streamName,
+    context.dateLabel,
+    context.termLabel,
+  ].filter((value): value is string => Boolean(value?.trim()));
+
   return (
     <div>
       <h1 className="text-2xl font-bold tracking-tight text-slate-900">
         Roll-call
       </h1>
-      <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-500">
-        <span>[Stream Name]</span>
-        <span className="text-slate-300">•</span>
-        <span>[Date]</span>
-        <span className="text-slate-300">•</span>
-        <span>[Academic Term]</span>
-      </p>
+      {metadata.length > 0 ? (
+        <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-500">
+          {metadata.map((value, index) => (
+            <span key={`${value}-${index}`} className="flex items-center gap-2">
+              {index > 0 && <span className="text-slate-300">•</span>}
+              {value}
+            </span>
+          ))}
+        </p>
+      ) : (
+        <p className="mt-1 text-[10px] text-slate-500">
+          Roll-call context is not available yet.
+        </p>
+      )}
     </div>
   );
 }
@@ -411,13 +487,14 @@ function ProgressCard({
 
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-[9px] leading-relaxed text-slate-400">
-          [Compliance disclaimer] Attendance records are retained and visible to
-          authorized staff and guardians.
+          Attendance records are retained and visible to authorized staff and
+          guardians.
         </p>
         <button
           type="button"
           onClick={onMarkAllPresent}
-          className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-brand-100 bg-[#E8F5F3] px-2.5 text-[9px] font-semibold text-brand-700 transition hover:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled={total === 0}
+          className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-brand-100 bg-[#E8F5F3] px-2.5 text-[9px] font-semibold text-brand-700 transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
         >
           <CheckCheck className="h-3 w-3" />
           Mark all present
@@ -428,80 +505,96 @@ function ProgressCard({
 }
 
 function StudentList({
+  students,
   statuses,
   onToggle,
 }: {
-  statuses: Record<string, AttendanceStatus>;
-  onToggle: (id: string, status: AttendanceStatus) => void;
+  students: RollCallStudent[];
+  statuses: Record<string, RollCallStatus>;
+  onToggle: (id: string, status: RollCallStatus) => void;
 }) {
   return (
     <section className="mt-5">
       <div className="flex items-center justify-between gap-3 px-1">
         <h2 className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-          Enrolled students ({STUDENTS.length})
+          Enrolled students ({students.length})
         </h2>
         <p className="text-[9px] font-medium text-slate-400">
           Tap P or A to log
         </p>
       </div>
 
-      <div className="mt-2.5 space-y-2">
-        {STUDENTS.map((student) => {
-          const status = statuses[student.id];
+      {students.length > 0 ? (
+        <div className="mt-2.5 space-y-2">
+          {students.map((student) => {
+            const status = statuses[student.id];
 
-          return (
-            <article
-              key={student.id}
-              className="flex items-center gap-3 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card"
-            >
-              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#F0EBF9] text-[9px] font-bold text-[#6D4FA3] ring-1 ring-white">
-                {student.initials}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[11px] font-bold text-slate-800">
-                  {student.name}
-                </p>
-                <p className="text-[9px] text-slate-400">{student.admission}</p>
-              </div>
-
-              <div
-                className="flex shrink-0 items-center gap-0.5 rounded-full bg-slate-50 p-0.5 ring-1 ring-slate-200/80"
-                role="group"
-                aria-label={`Attendance for ${student.name}`}
+            return (
+              <article
+                key={student.id}
+                className="flex items-center gap-3 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card"
               >
-                <button
-                  type="button"
-                  aria-pressed={status === "present"}
-                  onClick={() => onToggle(student.id, "present")}
-                  className={cn(
-                    "inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-[9px] font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
-                    status === "present"
-                      ? "bg-[#F0EBF9] text-[#6D4FA3] shadow-sm"
-                      : "text-slate-400 hover:bg-white",
-                  )}
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#F0EBF9] text-[9px] font-bold text-[#6D4FA3] ring-1 ring-white">
+                  {getStudentInitials(student)}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[11px] font-bold text-slate-800">
+                    {student.name}
+                  </p>
+                  <p className="text-[9px] text-slate-400">
+                    {student.admissionNumber}
+                  </p>
+                </div>
+
+                <div
+                  className="flex shrink-0 items-center gap-0.5 rounded-full bg-slate-50 p-0.5 ring-1 ring-slate-200/80"
+                  role="group"
+                  aria-label={`Attendance for ${student.name}`}
                 >
-                  <Check className="h-3 w-3" />
-                  P
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={status === "absent"}
-                  onClick={() => onToggle(student.id, "absent")}
-                  className={cn(
-                    "inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-[9px] font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
-                    status === "absent"
-                      ? "bg-[#FEF3D6] text-[#8A6A25] shadow-sm"
-                      : "text-slate-400 hover:bg-white",
-                  )}
-                >
-                  <AlertTriangle className="h-3 w-3" />
-                  A
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
+                  <button
+                    type="button"
+                    aria-pressed={status === "present"}
+                    onClick={() => onToggle(student.id, "present")}
+                    className={cn(
+                      "inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-[9px] font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                      status === "present"
+                        ? "bg-[#F0EBF9] text-[#6D4FA3] shadow-sm"
+                        : "text-slate-400 hover:bg-white",
+                    )}
+                  >
+                    <Check className="h-3 w-3" />
+                    P
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={status === "absent"}
+                    onClick={() => onToggle(student.id, "absent")}
+                    className={cn(
+                      "inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-[9px] font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                      status === "absent"
+                        ? "bg-[#FEF3D6] text-[#8A6A25] shadow-sm"
+                        : "text-slate-400 hover:bg-white",
+                    )}
+                  >
+                    <AlertTriangle className="h-3 w-3" />
+                    A
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="mt-2.5 rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center">
+          <UsersRound className="mx-auto h-5 w-5 text-slate-400" />
+          <p className="mt-2 text-[11px] font-semibold text-slate-700">
+            No students available
+          </p>
+          <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+            The class roster will appear here when it is available.
+          </p>
+        </div>
+      )}
     </section>
   );
 }
@@ -517,8 +610,8 @@ function GuardianDispatchNotice() {
           Guardian App Dispatch
         </p>
         <p className="mt-1 text-[9px] leading-relaxed text-slate-500">
-          [Notification note] Guardians receive an in-app update after this
-          roll-call is submitted. Health and clinical details are never shown.
+          Guardians receive an in-app update after this roll-call is submitted.
+          Health and clinical details are never shown.
         </p>
       </div>
     </section>
@@ -528,19 +621,31 @@ function GuardianDispatchNotice() {
 function SubmissionCard({
   marked,
   total,
+  registryRef,
+  termLabel,
 }: {
   marked: number;
   total: number;
+  registryRef: string | null;
+  termLabel: string | null;
 }) {
-  const ready = marked === total;
+  const ready = total > 0 && marked === total;
   const complete = marked > 0;
+  const status = total === 0
+    ? "No students to mark"
+    : ready
+      ? "Ready to commit"
+      : complete
+        ? "In progress"
+        : "Not started";
 
   return (
     <div className="fixed inset-x-3 bottom-20 z-30 lg:inset-x-auto lg:bottom-6 lg:left-[296px] lg:right-6">
       <div className="mx-auto w-full max-w-[1100px] rounded-2xl border border-slate-200/80 bg-white p-3 shadow-2xl sm:p-4">
         <div className="flex items-center justify-between gap-3">
           <p className="text-[8px] font-medium text-slate-400">
-            [Registry Ref] · [Academic Term]
+            {registryRef || "No registry reference"} ·{" "}
+            {termLabel || "No active term"}
           </p>
           <span
             className={cn(
@@ -562,7 +667,7 @@ function SubmissionCard({
                     : "bg-slate-400",
               )}
             />
-            {ready ? "Ready to commit" : complete ? "In progress" : "Not started"}
+            {status}
           </span>
         </div>
 
@@ -614,7 +719,19 @@ function BottomNav() {
   );
 }
 
-function MobileDrawer({ onClose }: { onClose: () => void }) {
+function MobileDrawer({
+  teacherName,
+  teacherRole,
+  teacherSubject,
+  teacherInitials,
+  onClose,
+}: {
+  teacherName: string;
+  teacherRole: string;
+  teacherSubject: string;
+  teacherInitials: string;
+  onClose: () => void;
+}) {
   const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
@@ -653,9 +770,25 @@ function MobileDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <SidebarContent onNavigate={onClose} />
+          <SidebarContent
+            teacherName={teacherName}
+            teacherRole={teacherRole}
+            teacherSubject={teacherSubject}
+            teacherInitials={teacherInitials}
+            onNavigate={onClose}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "T";
 }
