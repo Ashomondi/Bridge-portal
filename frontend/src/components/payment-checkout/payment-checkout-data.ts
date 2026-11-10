@@ -1,37 +1,52 @@
 export type PaymentOption = {
   id: string;
   label: string;
-  amount: string;
+  amount: number | null;
+  currency: string;
   recommended: boolean;
   custom: boolean;
 };
 
-/**
- * Structural checkout choices. Replace these with the amount options returned
- * by the fee ledger once the payment API is connected.
- */
-export const PAYMENT_OPTIONS: PaymentOption[] = [
-  {
-    id: "option-full",
-    label: "[Option]",
-    amount: "[Amount]",
-    recommended: false,
-    custom: false,
-  },
-  {
-    id: "option-recommended",
-    label: "[Option]",
-    amount: "[Amount]",
-    recommended: true,
-    custom: false,
-  },
-  {
-    id: "option-custom",
-    label: "[Custom Amount]",
-    amount: "",
-    recommended: false,
-    custom: true,
-  },
-];
+export type PaymentPhone = {
+  countryCode: string;
+  number: string;
+  verified: boolean;
+};
 
-export const DEFAULT_PAYMENT_OPTION = "option-recommended";
+export type PaymentCheckoutData = {
+  portal: {
+    name: string | null;
+  } | null;
+  session: {
+    fullName: string;
+    relationship: string;
+    initials: string;
+  } | null;
+  student: {
+    name: string;
+    admissionNumber: string;
+  } | null;
+  options: PaymentOption[];
+  defaultOptionId: string | null;
+  phone: PaymentPhone | null;
+  overpaymentNote: string | null;
+};
+
+export function formatAmount(
+  amount: number | null,
+  currency: string | null | undefined,
+) {
+  if (amount === null || amount === undefined) {
+    return "—";
+  }
+
+  try {
+    return new Intl.NumberFormat("en-GB", {
+      style: "currency",
+      currency: currency || "KES",
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return amount.toLocaleString("en-GB");
+  }
+}
