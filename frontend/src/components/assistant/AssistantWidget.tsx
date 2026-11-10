@@ -58,9 +58,14 @@ export default function AssistantWidget() {
           aria-label="Open assistant chat"
           aria-expanded={open}
           aria-controls="assistant-panel"
-          className="fixed bottom-20 right-4 z-50 grid h-14 w-14 place-items-center rounded-full bg-brand-500 text-white shadow-xl shadow-brand-900/25 transition hover:scale-105 hover:bg-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 focus-visible:ring-offset-2 motion-reduce:transition-none lg:bottom-6 lg:right-6 print:hidden"
+          className="fixed bottom-20 right-4 z-50 grid h-14 w-14 place-items-center rounded-full bg-brand-500 text-white shadow-xl shadow-brand-900/25 transition hover:bg-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50 focus-visible:ring-offset-2 animate-assistant-attention motion-reduce:animate-none lg:bottom-6 lg:right-6 print:hidden"
         >
-          <Bot className="h-6 w-6" aria-hidden="true" />
+          <span
+            className="animate-assistant-logo text-[15px] font-black tracking-tight motion-reduce:animate-none"
+            aria-hidden="true"
+          >
+            AI
+          </span>
           <span className="absolute -right-0.5 -top-0.5 grid h-5 w-5 place-items-center rounded-full bg-white text-brand-600 shadow-sm">
             <Sparkles className="h-3 w-3" aria-hidden="true" />
           </span>
@@ -79,8 +84,8 @@ export default function AssistantWidget() {
         >
           <header className="flex items-center justify-between gap-3 bg-gradient-to-br from-[#005E5D] to-[#007A78] px-4 py-3 text-white">
             <div className="flex min-w-0 items-center gap-2.5">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white/15">
-                <Bot className="h-4 w-4" aria-hidden="true" />
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white/15 text-[13px] font-black tracking-tight">
+                AI
               </span>
               <div className="min-w-0">
                 <h2
