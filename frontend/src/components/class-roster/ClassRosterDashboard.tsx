@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Award,
   BarChart3,
@@ -34,9 +34,12 @@ import {
 import { cn } from "@/utils/cn";
 import {
   AVATAR_TONE_CLASSES,
-  CLASS_PORTAL,
   ROSTER_PAGE_SIZE,
-  ROSTER_STUDENTS,
+  formatCount,
+  formatPercent,
+  getPrimaryGuardian,
+  getStudentInitials,
+  type ClassRosterData,
   type GuardianStatus,
   type RosterStudent,
 } from "./class-roster-data";
@@ -77,9 +80,27 @@ const BOTTOM_NAV = [
   { label: "More", icon: MoreHorizontal },
 ];
 
+export default function ClassRosterDashboard({
+  roster,
+}: {
+  roster: ClassRosterData | null;
+}) {
+  const students = roster?.students ?? [];
+  const portalName = roster?.portal?.name?.trim() || "Teacher portal";
+  const academicTerm =
+    roster?.portal?.academicTerm?.trim() || "No active term";
+  const classInfo = roster?.class ?? null;
+  const className = classInfo?.name?.trim() || "My Class Roster";
+  const classTeacher = classInfo?.classTeacherName?.trim() || "Not assigned";
+  const enrolledCount = classInfo?.enrolledCount ?? students.length;
+  const cycleLabel = classInfo?.cycleLabel?.trim() || "No cycle set";
+  const session = roster?.session ?? null;
+  const userFullName = session?.userFullName?.trim() || "Teacher";
+  const userRole = session?.userRole?.trim() || "Staff";
+  const userSubject = session?.userSubject?.trim() || "No subject assigned";
+  const userInitials = session?.initials?.trim() || initialsFromName(userFullName);
 
-export default function ClassRosterDashboard() {
-  const [selectedId, setSelectedId] = useState(ROSTER_STUDENTS[0]?.id ?? "");
+  const [selectedId, setSelectedId] = useState(students[0]?.id ?? "");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [guardianFilter, setGuardianFilter] = useState("all");
@@ -90,19 +111,33 @@ export default function ClassRosterDashboard() {
   const filteredStudents = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
-    return ROSTER_STUDENTS.filter((student) => {
+    return students.filter((student) => {
       const matchesQuery =
         normalizedQuery.length === 0 ||
-        [student.name, student.admissionNumber, student.house]
+        [
+          student.name,
+          student.admissionNumber,
+          student.house ?? "",
+          student.gradeSection ?? "",
+        ]
           .join(" ")
           .toLowerCase()
           .includes(normalizedQuery);
       const matchesGuardian =
         guardianFilter === "all" || student.guardianStatus === guardianFilter;
+      const percentage = student.attendance.overallPercent;
+      const matchesAttendance =
+        attendanceFilter === "all" ||
+        (attendanceFilter === "above" &&
+          percentage !== null &&
+          percentage >= 90) ||
+        (attendanceFilter === "below" &&
+          percentage !== null &&
+          percentage < 90);
 
-      return matchesQuery && matchesGuardian;
+      return matchesQuery && matchesGuardian && matchesAttendance;
     });
-  }, [guardianFilter, query]);
+  }, [attendanceFilter, guardianFilter, query, students]);
 
   const totalPages = Math.max(
     1,
@@ -115,13 +150,18 @@ export default function ClassRosterDashboard() {
     startIndex + ROSTER_PAGE_SIZE,
   );
   const selectedStudent =
-    ROSTER_STUDENTS.find((student) => student.id === selectedId) ??
-    ROSTER_STUDENTS[0];
+    filteredStudents.find((student) => student.id === selectedId) ??
+    pageRows[0] ??
+    null;
   const firstVisible = filteredStudents.length === 0 ? 0 : startIndex + 1;
   const lastVisible = Math.min(
     startIndex + ROSTER_PAGE_SIZE,
     filteredStudents.length,
   );
+  const filtersApplied =
+    query.trim().length > 0 ||
+    guardianFilter !== "all" ||
+    attendanceFilter !== "all";
 
   function selectStudent(student: RosterStudent) {
     setSelectedId(student.id);
@@ -140,22 +180,60 @@ export default function ClassRosterDashboard() {
   }
 
   function goToPage(nextPage: number) {
-    setPage(Math.min(Math.max(nextPage, 1), totalPages));
+    const target = Math.min(Math.max(nextPage, 1), totalPages);
+    setPage(target);
+    const firstOnPage = filteredStudents[(target - 1) * ROSTER_PAGE_SIZE];
+
+    if (firstOnPage) {
+      setSelectedId(firstOnPage.id);
+    }
+  }
+
+  function changeGuardianFilter(value: string) {
+    setGuardianFilter(value);
+    setPage(1);
+  }
+
+  function changeAttendanceFilter(value: string) {
+    setAttendanceFilter(value);
+    setPage(1);
   }
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[272px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          portalName={portalName}
+          userFullName={userFullName}
+          userRole={userRole}
+          userSubject={userSubject}
+          userInitials={userInitials}
+        />
       </aside>
 
-      <MobileAppBar onOpenMenu={() => setMenuOpen(true)} />
+      <MobileAppBar
+        className={className}
+        userInitials={userInitials}
+        onOpenMenu={() => setMenuOpen(true)}
+      />
 
       <div className="lg:pl-[272px]">
-        <DesktopHeader />
+        <DesktopHeader
+          portalName={portalName}
+          academicTerm={academicTerm}
+          userFullName={userFullName}
+          userRole={userRole}
+          userInitials={userInitials}
+        />
 
         <main className="mx-auto w-full max-w-[1440px] px-4 pb-28 pt-20 sm:px-6 lg:px-8 lg:pb-10 lg:pt-7">
-          <PageHeader />
+          <PageHeader
+            className={className}
+            classTeacher={classTeacher}
+            enrolledCount={enrolledCount}
+            cycleLabel={cycleLabel}
+            hasClass={Boolean(classInfo)}
+          />
 
           <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(340px,1fr)]">
             <div className="min-w-0">
@@ -167,11 +245,8 @@ export default function ClassRosterDashboard() {
                   setQuery(value);
                   setPage(1);
                 }}
-                onGuardianChange={(value) => {
-                  setGuardianFilter(value);
-                  setPage(1);
-                }}
-                onAttendanceChange={setAttendanceFilter}
+                onGuardianChange={changeGuardianFilter}
+                onAttendanceChange={changeAttendanceFilter}
               />
 
               <RosterTable
@@ -182,6 +257,9 @@ export default function ClassRosterDashboard() {
                 totalPages={totalPages}
                 firstVisible={firstVisible}
                 lastVisible={lastVisible}
+                totalVisible={filteredStudents.length}
+                filtersApplied={filtersApplied}
+                hasRosterStudents={students.length > 0}
                 onPageChange={goToPage}
               />
             </div>
@@ -193,15 +271,7 @@ export default function ClassRosterDashboard() {
               {selectedStudent ? (
                 <StudentDetail student={selectedStudent} />
               ) : (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-center shadow-card">
-                  <UsersRound className="mx-auto h-5 w-5 text-slate-400" />
-                  <p className="mt-2 text-sm font-semibold text-slate-700">
-                    No learner selected
-                  </p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Select a row to view guardian and attendance details.
-                  </p>
-                </div>
+                <EmptyStudentDetail />
               )}
             </aside>
           </div>
@@ -210,12 +280,35 @@ export default function ClassRosterDashboard() {
 
       <MobileBottomNav />
 
-      {menuOpen && <MobileDrawer onClose={() => setMenuOpen(false)} />}
+      {menuOpen && (
+        <MobileDrawer
+          portalName={portalName}
+          userFullName={userFullName}
+          userRole={userRole}
+          userSubject={userSubject}
+          userInitials={userInitials}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  portalName,
+  userFullName,
+  userRole,
+  userSubject,
+  userInitials,
+  onNavigate,
+}: {
+  portalName: string;
+  userFullName: string;
+  userRole: string;
+  userSubject: string;
+  userInitials: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-start justify-between gap-3 px-1">
@@ -228,8 +321,8 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
               Ikonex <span className="text-brand-600">Academy</span>
             </p>
             <div className="mt-0.5 flex items-center gap-1.5">
-              <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                Teacher portal
+              <p className="max-w-[112px] truncate text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                {portalName}
               </p>
               <span className="rounded-full bg-brand-50 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wide text-brand-700 ring-1 ring-brand-100">
                 Staff
@@ -282,17 +375,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3">
           <div className="flex items-center gap-2.5">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-              [AB]
+              {userInitials}
             </span>
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold text-slate-800">
-                {CLASS_PORTAL.userFullName}
+                {userFullName}
               </p>
-              <p className="truncate text-[10px] text-slate-400">
-                {CLASS_PORTAL.userRole}
-              </p>
+              <p className="truncate text-[10px] text-slate-400">{userRole}</p>
               <p className="truncate text-[9px] font-medium text-brand-600">
-                {CLASS_PORTAL.userSubject}
+                {userSubject}
               </p>
             </div>
           </div>
@@ -309,14 +400,28 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function DesktopHeader() {
+function DesktopHeader({
+  portalName,
+  academicTerm,
+  userFullName,
+  userRole,
+  userInitials,
+}: {
+  portalName: string;
+  academicTerm: string;
+  userFullName: string;
+  userRole: string;
+  userInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
-          <span className="text-slate-700">{CLASS_PORTAL.portalName}</span>
+          <span className="max-w-[220px] truncate text-slate-700">
+            {portalName}
+          </span>
           <ChevronRight className="h-3.5 w-3.5" />
-          <span>{CLASS_PORTAL.academicTerm}</span>
+          <span className="max-w-[220px] truncate">{academicTerm}</span>
         </div>
 
         <div className="flex items-center gap-2.5">
@@ -334,15 +439,13 @@ function DesktopHeader() {
             className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
-              [AB]
+              {userInitials}
             </span>
             <div className="min-w-0 text-left">
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
-                {CLASS_PORTAL.userFullName}
+                {userFullName}
               </p>
-              <p className="text-[10px] text-slate-400">
-                {CLASS_PORTAL.userRole}
-              </p>
+              <p className="text-[10px] text-slate-400">{userRole}</p>
             </div>
             <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
           </button>
@@ -352,7 +455,15 @@ function DesktopHeader() {
   );
 }
 
-function MobileAppBar({ onOpenMenu }: { onOpenMenu: () => void }) {
+function MobileAppBar({
+  className,
+  userInitials,
+  onOpenMenu,
+}: {
+  className: string;
+  userInitials: string;
+  onOpenMenu: () => void;
+}) {
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
@@ -367,7 +478,7 @@ function MobileAppBar({ onOpenMenu }: { onOpenMenu: () => void }) {
 
         <div className="min-w-0 flex-1 text-center">
           <p className="truncate text-sm font-bold tracking-tight text-slate-900">
-            {CLASS_PORTAL.className}
+            {className}
           </p>
           <p className="truncate text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
             My class roster
@@ -388,7 +499,7 @@ function MobileAppBar({ onOpenMenu }: { onOpenMenu: () => void }) {
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
             aria-label="Open user profile"
           >
-            [AB]
+            {userInitials || <UsersRound className="h-4 w-4" />}
           </button>
         </div>
       </div>
@@ -396,7 +507,19 @@ function MobileAppBar({ onOpenMenu }: { onOpenMenu: () => void }) {
   );
 }
 
-function PageHeader() {
+function PageHeader({
+  className,
+  classTeacher,
+  enrolledCount,
+  cycleLabel,
+  hasClass,
+}: {
+  className: string;
+  classTeacher: string;
+  enrolledCount: number;
+  cycleLabel: string;
+  hasClass: boolean;
+}) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
@@ -407,38 +530,38 @@ function PageHeader() {
           </p>
         </div>
         <h1 className="mt-2 text-[26px] font-bold tracking-tight text-slate-900 sm:text-3xl">
-          {CLASS_PORTAL.className}
+          {className}
         </h1>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
           <span>
             Class teacher:{" "}
-            <span className="font-semibold text-slate-700">
-              {CLASS_PORTAL.classTeacher}
-            </span>
+            <span className="font-semibold text-slate-700">{classTeacher}</span>
           </span>
           <span className="text-slate-300">•</span>
           <span>
             <span className="font-semibold text-slate-700">
-              {CLASS_PORTAL.enrolledCount}
+              {enrolledCount.toLocaleString("en-GB")}
             </span>{" "}
             students enrolled
           </span>
           <span className="text-slate-300">•</span>
-          <span>{CLASS_PORTAL.cycle}</span>
+          <span>{cycleLabel}</span>
         </div>
       </div>
 
       <div className="flex w-full gap-2 sm:w-auto">
         <button
           type="button"
-          className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-xs font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 sm:flex-none"
+          disabled={!hasClass}
+          className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-xs font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
         >
           <UserPlus className="h-4 w-4" />
           Add students
         </button>
         <button
           type="button"
-          className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-brand-500 px-3 text-xs font-semibold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-600 sm:flex-none"
+          disabled={!hasClass || enrolledCount === 0}
+          className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-brand-500 px-3 text-xs font-semibold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
         >
           <ClipboardCheck className="h-4 w-4" />
           Take roll-call
@@ -540,6 +663,9 @@ function RosterTable({
   totalPages,
   firstVisible,
   lastVisible,
+  totalVisible,
+  filtersApplied,
+  hasRosterStudents,
   onPageChange,
 }: {
   students: RosterStudent[];
@@ -549,8 +675,18 @@ function RosterTable({
   totalPages: number;
   firstVisible: number;
   lastVisible: number;
+  totalVisible: number;
+  filtersApplied: boolean;
+  hasRosterStudents: boolean;
   onPageChange: (page: number) => void;
 }) {
+  const emptyTitle = hasRosterStudents
+    ? "No learners match these filters"
+    : "No learners available";
+  const emptyBody = hasRosterStudents
+    ? "Clear the search or choose a different guardian or attendance filter."
+    : "The class roster will appear here once the school provides it.";
+
   return (
     <section className="mt-4 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card">
       <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-4 sm:px-5">
@@ -563,160 +699,176 @@ function RosterTable({
           </h2>
         </div>
         <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          {CLASS_PORTAL.enrolledCount} students
+          {totalVisible.toLocaleString("en-GB")} students
         </span>
       </div>
 
-      {students.length === 0 ? (
-        <div className="px-6 py-12 text-center">
-          <Search className="mx-auto h-5 w-5 text-slate-400" />
-          <p className="mt-2 text-sm font-semibold text-slate-700">
-            No learners match these filters
-          </p>
-          <p className="mt-1 text-xs text-slate-500">
-            Clear the search or choose a different guardian filter.
-          </p>
-        </div>
-      ) : (
-        <>
-          <div className="hidden md:block">
-            <table className="w-full border-collapse text-left">
-              <thead>
-                <tr className="border-b border-slate-100 bg-slate-50/60">
-                  <TableHeading>Admission #</TableHeading>
-                  <TableHeading>Student name</TableHeading>
-                  <TableHeading>Dormitory / House</TableHeading>
-                  <TableHeading>Linked guardians</TableHeading>
-                  <TableHeading>Term attendance</TableHeading>
-                </tr>
-              </thead>
-              <tbody>
-                {students.map((student) => {
-                  const active = student.id === selectedId;
+      <div className="hidden md:block">
+        <table className="w-full border-collapse text-left">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/60">
+              <TableHeading>Admission #</TableHeading>
+              <TableHeading>Student name</TableHeading>
+              <TableHeading>Dormitory / House</TableHeading>
+              <TableHeading>Linked guardians</TableHeading>
+              <TableHeading>Term attendance</TableHeading>
+            </tr>
+          </thead>
+          <tbody>
+            {students.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-5 py-12">
+                  <EmptyTableState title={emptyTitle} body={emptyBody} />
+                </td>
+              </tr>
+            ) : (
+              students.map((student, index) => {
+                const active = student.id === selectedId;
 
-                  return (
-                    <tr
-                      key={student.id}
-                      tabIndex={0}
-                      aria-selected={active}
-                      onClick={() => onSelect(student)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
+                return (
+                  <tr
+                    key={student.id}
+                    tabIndex={0}
+                    aria-selected={active}
+                    onClick={() => onSelect(student)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onSelect(student);
+                      }
+                    }}
+                    className={cn(
+                      "cursor-pointer border-b border-slate-100 transition last:border-0 focus-visible:outline-none",
+                      active
+                        ? "bg-[#F1FAF8]"
+                        : "hover:bg-slate-50/70 focus-visible:bg-slate-50",
+                    )}
+                  >
+                    <td className="px-4 py-3.5 sm:px-5">
+                      <button
+                        type="button"
+                        className="text-xs font-semibold text-brand-600 hover:underline"
+                        onClick={(event) => {
+                          event.stopPropagation();
                           onSelect(student);
-                        }
-                      }}
-                      className={cn(
-                        "cursor-pointer border-b border-slate-100 transition last:border-0 focus-visible:outline-none",
-                        active
-                          ? "bg-[#F1FAF8]"
-                          : "hover:bg-slate-50/70 focus-visible:bg-slate-50",
-                      )}
-                    >
-                      <td className="px-4 py-3.5 sm:px-5">
-                        <button
-                          type="button"
-                          className="text-xs font-semibold text-brand-600 hover:underline"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onSelect(student);
-                          }}
-                        >
-                          {student.admissionNumber}
-                        </button>
-                      </td>
-                      <td className="px-4 py-3.5 sm:px-5">
-                        <div className="flex items-center gap-2.5">
-                          <Avatar student={student} size="sm" />
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-semibold text-slate-800">
-                              {student.name}
-                            </p>
-                            <p className="text-[10px] text-slate-400">
-                              {student.gradeSection}
-                            </p>
-                          </div>
+                        }}
+                      >
+                        {student.admissionNumber}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3.5 sm:px-5">
+                      <div className="flex items-center gap-2.5">
+                        <Avatar student={student} toneIndex={index} size="sm" />
+                        <div className="min-w-0">
+                          <p className="truncate text-xs font-semibold text-slate-800">
+                            {student.name}
+                          </p>
+                          <p className="text-[10px] text-slate-400">
+                            {student.gradeSection || "Not provided"}
+                          </p>
                         </div>
-                      </td>
-                      <td className="px-4 py-3.5 text-[11px] text-slate-500 sm:px-5">
-                        {student.house}
-                      </td>
-                      <td className="px-4 py-3.5 sm:px-5">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] text-slate-500">
-                            {student.linkedGuardians} linked
-                          </span>
-                          <GuardianBadge status={student.guardianStatus} />
-                        </div>
-                      </td>
-                      <td className="px-4 py-3.5 sm:px-5">
-                        <span className="inline-flex rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">
-                          {student.overallAttendance}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="divide-y divide-slate-100 md:hidden">
-            {students.map((student) => {
-              const active = student.id === selectedId;
-
-              return (
-                <button
-                  key={student.id}
-                  type="button"
-                  onClick={() => onSelect(student)}
-                  className={cn(
-                    "w-full px-4 py-3.5 text-left transition",
-                    active
-                      ? "border-l-2 border-brand-500 bg-[#F1FAF8]"
-                      : "border-l-2 border-transparent hover:bg-slate-50",
-                  )}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex min-w-0 items-center gap-2.5">
-                      <Avatar student={student} size="md" />
-                      <div className="min-w-0">
-                        <p className="truncate text-xs font-semibold text-slate-800">
-                          {student.name}
-                        </p>
-                        <p className="text-[10px] text-brand-600">
-                          {student.admissionNumber}
-                        </p>
-                        <p className="truncate text-[10px] text-slate-400">
-                          {student.house} · {student.gradeSection}
-                        </p>
                       </div>
-                    </div>
-                    <span className="shrink-0 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">
-                      {student.overallAttendance}
-                    </span>
-                  </div>
-                  <div className="mt-3 flex items-center justify-between gap-2">
-                    <span className="text-[10px] text-slate-500">
-                      {student.linkedGuardians} linked guardians
-                    </span>
-                    <GuardianBadge status={student.guardianStatus} />
-                  </div>
-                </button>
-              );
-            })}
+                    </td>
+                    <td className="px-4 py-3.5 text-[11px] text-slate-500 sm:px-5">
+                      {student.house || "Not assigned"}
+                    </td>
+                    <td className="px-4 py-3.5 sm:px-5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-slate-500">
+                          {student.linkedGuardians > 0
+                            ? `${student.linkedGuardians} linked`
+                            : "None linked"}
+                        </span>
+                        <GuardianBadge status={student.guardianStatus} />
+                      </div>
+                    </td>
+                    <td className="px-4 py-3.5 sm:px-5">
+                      <span className="inline-flex rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">
+                        {formatPercent(student.attendance.overallPercent)}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="divide-y divide-slate-100 md:hidden">
+        {students.length === 0 ? (
+          <div className="px-4 py-10">
+            <EmptyTableState title={emptyTitle} body={emptyBody} />
           </div>
-        </>
-      )}
+        ) : (
+          students.map((student, index) => {
+            const active = student.id === selectedId;
+
+            return (
+              <button
+                key={student.id}
+                type="button"
+                onClick={() => onSelect(student)}
+                className={cn(
+                  "w-full px-4 py-3.5 text-left transition",
+                  active
+                    ? "border-l-2 border-brand-500 bg-[#F1FAF8]"
+                    : "border-l-2 border-transparent hover:bg-slate-50",
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <Avatar student={student} toneIndex={index} size="md" />
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-semibold text-slate-800">
+                        {student.name}
+                      </p>
+                      <p className="text-[10px] text-brand-600">
+                        {student.admissionNumber}
+                      </p>
+                      <p className="truncate text-[10px] text-slate-400">
+                        {student.house || "Not assigned"} ·{" "}
+                        {student.gradeSection || "Not provided"}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">
+                    {formatPercent(student.attendance.overallPercent)}
+                  </span>
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-slate-500">
+                    {student.linkedGuardians > 0
+                      ? `${student.linkedGuardians} linked guardians`
+                      : "No guardians linked"}
+                  </span>
+                  <GuardianBadge status={student.guardianStatus} />
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
 
       <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-[10px] text-slate-500">
-          Showing{" "}
-          <span className="font-semibold text-slate-700">
-            {firstVisible}–{lastVisible}
-          </span>{" "}
-          of <span className="font-semibold text-slate-700">{CLASS_PORTAL.totalRecords}</span>{" "}
-          enrolled learners
+          {totalVisible === 0 ? (
+            <>
+              Showing 0 {filtersApplied ? "matching" : "enrolled"} learners
+            </>
+          ) : (
+            <>
+              Showing{" "}
+              <span className="font-semibold text-slate-700">
+                {firstVisible}–{lastVisible}
+              </span>{" "}
+              of{" "}
+              <span className="font-semibold text-slate-700">
+                {totalVisible.toLocaleString("en-GB")}
+              </span>{" "}
+              {filtersApplied ? "matching" : "enrolled"} learners
+            </>
+          )}
         </p>
 
         <div className="flex items-center gap-1">
@@ -764,9 +916,21 @@ function RosterTable({
   );
 }
 
-function TableHeading({ children }: { children: React.ReactNode }) {
+function EmptyTableState({ title, body }: { title: string; body: string }) {
   return (
-    <th className="whitespace-nowrap px-4 py-2.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-400 sm:px-5">
+    <div className="mx-auto max-w-sm text-center">
+      <span className="mx-auto grid h-11 w-11 place-items-center rounded-2xl bg-slate-50 text-slate-400">
+        <UsersRound className="h-5 w-5" />
+      </span>
+      <p className="mt-3 text-sm font-semibold text-slate-700">{title}</p>
+      <p className="mt-1 text-xs leading-relaxed text-slate-500">{body}</p>
+    </div>
+  );
+}
+
+function TableHeading({ children }: { children: ReactNode }) {
+  return (
+    <th className="px-4 py-2.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-400 sm:px-5">
       {children}
     </th>
   );
@@ -774,22 +938,29 @@ function TableHeading({ children }: { children: React.ReactNode }) {
 
 function Avatar({
   student,
+  toneIndex,
   size = "md",
 }: {
   student: RosterStudent;
+  toneIndex?: number;
   size?: "sm" | "md" | "lg";
 }) {
+  const tone =
+    AVATAR_TONE_CLASSES[
+      (student.avatarTone ?? toneIndex ?? 0) % AVATAR_TONE_CLASSES.length
+    ];
+
   return (
     <span
       className={cn(
         "grid shrink-0 place-items-center rounded-full font-bold ring-1 ring-white",
-        AVATAR_TONE_CLASSES[student.avatarTone],
+        tone,
         size === "sm" && "h-8 w-8 text-[9px]",
         size === "md" && "h-9 w-9 text-[10px]",
         size === "lg" && "h-12 w-12 text-xs",
       )}
     >
-      {student.initials}
+      {getStudentInitials(student)}
     </span>
   );
 }
@@ -817,6 +988,10 @@ function GuardianBadge({ status }: { status: GuardianStatus }) {
 }
 
 function StudentDetail({ student }: { student: RosterStudent }) {
+  const primaryGuardian = getPrimaryGuardian(student);
+  const attendance = student.attendance;
+  const guardianStatus = primaryGuardian?.status ?? student.guardianStatus;
+
   return (
     <>
       <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-card">
@@ -836,12 +1011,13 @@ function StudentDetail({ student }: { student: RosterStudent }) {
             </div>
           </div>
           <span className="shrink-0 rounded-full bg-[#F0EBF9] px-2.5 py-1 text-[9px] font-semibold text-[#6D4FA3] ring-1 ring-[#E4DBF5]">
-            {student.house}
+            {student.house || "Not assigned"}
           </span>
         </div>
 
         <p className="mt-3 text-[11px] text-slate-500">
-          {student.gradeSection} · {student.enrollmentType}
+          {student.gradeSection || "Grade / section not provided"} ·{" "}
+          {student.enrollmentType || "Enrollment type not provided"}
         </p>
 
         <div className="mt-5 border-t border-slate-100 pt-5">
@@ -856,30 +1032,42 @@ function StudentDetail({ student }: { student: RosterStudent }) {
           <div className="mt-3 rounded-xl bg-[#F8FAF9] p-3.5 ring-1 ring-slate-100">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs font-semibold text-slate-800">
-                {student.guardianRelationship}
+                {primaryGuardian?.relationship || "No guardian linked"}
               </p>
-              <span className="rounded-full bg-white px-2 py-0.5 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-                Primary
-              </span>
+              {primaryGuardian?.isPrimary && (
+                <span className="rounded-full bg-white px-2 py-0.5 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
+                  Primary
+                </span>
+              )}
             </div>
             <p className="mt-1 text-[11px] text-slate-500">
-              {student.guardianPhone}
+              {primaryGuardian?.phoneMasked || "No contact recorded"}
             </p>
-            <p
-              className={cn(
-                "mt-2 inline-flex items-center gap-1 text-[9px] font-medium",
-                student.guardianStatus === "verified"
-                  ? "text-brand-700"
-                  : "text-[#8A6A25]",
-              )}
-            >
-              {student.guardianStatus === "verified" ? (
-                <ShieldCheck className="h-3 w-3" />
-              ) : (
-                <Clock3 className="h-3 w-3" />
-              )}
-              {student.guardianVerificationNote}
-            </p>
+            {primaryGuardian ? (
+              <p
+                className={cn(
+                  "mt-2 inline-flex items-center gap-1 text-[9px] font-medium",
+                  guardianStatus === "verified"
+                    ? "text-brand-700"
+                    : "text-[#8A6A25]",
+                )}
+              >
+                {guardianStatus === "verified" ? (
+                  <ShieldCheck className="h-3 w-3" />
+                ) : (
+                  <Clock3 className="h-3 w-3" />
+                )}
+                {primaryGuardian.verificationNote ||
+                  (guardianStatus === "verified"
+                    ? "Verification record available"
+                    : "Verification pending")}
+              </p>
+            ) : (
+              <p className="mt-2 inline-flex items-center gap-1 text-[9px] font-medium text-slate-400">
+                <Info className="h-3 w-3" />
+                No verification record
+              </p>
+            )}
           </div>
         </div>
 
@@ -889,26 +1077,26 @@ function StudentDetail({ student }: { student: RosterStudent }) {
               Attendance summary
             </h3>
             <span className="rounded-full bg-brand-50 px-2 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-              {student.overallAttendance}
+              {formatPercent(attendance.overallPercent)}
             </span>
           </div>
 
           <div className="mt-3 grid grid-cols-3 gap-2">
             <MetricCard
               label="Total days"
-              value={student.totalDays}
+              value={formatCount(attendance.totalDays)}
               icon={CalendarDays}
               tone="teal"
             />
             <MetricCard
               label="Present"
-              value={student.daysPresent}
+              value={formatCount(attendance.daysPresent)}
               icon={CalendarCheck}
               tone="green"
             />
             <MetricCard
               label="Absent"
-              value={student.daysAbsent}
+              value={formatCount(attendance.daysAbsent)}
               icon={CalendarX}
               tone="gold"
             />
@@ -919,7 +1107,7 @@ function StudentDetail({ student }: { student: RosterStudent }) {
             <p className="min-w-0 flex-1 truncate text-[10px] text-slate-500">
               Absence note status:{" "}
               <span className="font-semibold text-slate-700">
-                {student.absenceNoteStatus}
+                {attendance.absenceNoteStatus || "Not recorded"}
               </span>
             </p>
             <button
@@ -932,9 +1120,107 @@ function StudentDetail({ student }: { student: RosterStudent }) {
         </div>
       </section>
 
+      <ActionAndPolicyCards />
+    </>
+  );
+}
+
+function EmptyStudentDetail() {
+  return (
+    <>
+      <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-card">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-400 ring-1 ring-white">
+              <UsersRound className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <h2 className="truncate text-base font-bold tracking-tight text-slate-900">
+                No learner selected
+              </h2>
+              <p className="mt-0.5 text-[11px] font-semibold text-slate-400">—</p>
+            </div>
+          </div>
+          <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-[9px] font-semibold text-slate-500">
+            Not assigned
+          </span>
+        </div>
+
+        <p className="mt-3 text-[11px] text-slate-500">
+          Select a learner from the roster to view guardian and attendance
+          details.
+        </p>
+
+        <div className="mt-5 border-t border-slate-100 pt-5">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold text-slate-800">Guardians</h3>
+            <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-brand-700">
+              <Lock className="h-3 w-3" />
+              Data encrypted
+            </span>
+          </div>
+          <div className="mt-3 rounded-xl bg-[#F8FAF9] p-3.5 text-center ring-1 ring-slate-100">
+            <p className="text-[11px] font-medium text-slate-500">
+              No guardian data available
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 border-t border-slate-100 pt-5">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold text-slate-800">
+              Attendance summary
+            </h3>
+            <span className="rounded-full bg-slate-100 px-2 py-1 text-[9px] font-semibold text-slate-500">
+              Not recorded
+            </span>
+          </div>
+
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <MetricCard
+              label="Total days"
+              value="—"
+              icon={CalendarDays}
+              tone="teal"
+            />
+            <MetricCard
+              label="Present"
+              value="—"
+              icon={CalendarCheck}
+              tone="green"
+            />
+            <MetricCard
+              label="Absent"
+              value="—"
+              icon={CalendarX}
+              tone="gold"
+            />
+          </div>
+
+          <div className="mt-3 flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
+            <Info className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+            <p className="text-[10px] text-slate-500">
+              Absence note status:{" "}
+              <span className="font-semibold text-slate-700">
+                Not recorded
+              </span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <ActionAndPolicyCards disabled />
+    </>
+  );
+}
+
+function ActionAndPolicyCards({ disabled = false }: { disabled?: boolean }) {
+  return (
+    <>
       <button
         type="button"
-        className="flex w-full items-center justify-between gap-3 rounded-2xl border border-brand-100 bg-[#E8F5F3] px-4 py-3.5 text-left text-[11px] font-semibold text-brand-800 shadow-sm transition hover:bg-brand-50"
+        disabled={disabled}
+        className="flex w-full items-center justify-between gap-3 rounded-2xl border border-brand-100 bg-[#E8F5F3] px-4 py-3.5 text-left text-[11px] font-semibold text-brand-800 shadow-sm transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span className="inline-flex items-center gap-2">
           <LayoutDashboard className="h-4 w-4 text-brand-600" />
@@ -1029,7 +1315,21 @@ function MobileBottomNav() {
   );
 }
 
-function MobileDrawer({ onClose }: { onClose: () => void }) {
+function MobileDrawer({
+  portalName,
+  userFullName,
+  userRole,
+  userSubject,
+  userInitials,
+  onClose,
+}: {
+  portalName: string;
+  userFullName: string;
+  userRole: string;
+  userSubject: string;
+  userInitials: string;
+  onClose: () => void;
+}) {
   return (
     <div className="fixed inset-0 z-50 lg:hidden print:hidden">
       <button
@@ -1053,9 +1353,26 @@ function MobileDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <SidebarContent onNavigate={onClose} />
+          <SidebarContent
+            portalName={portalName}
+            userFullName={userFullName}
+            userRole={userRole}
+            userSubject={userSubject}
+            userInitials={userInitials}
+            onNavigate={onClose}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "T";
 }

@@ -1,78 +1,97 @@
 export type GuardianStatus = "verified" | "pending";
 
+export type Guardian = {
+  id: string;
+  relationship: string;
+  phoneMasked: string;
+  status: GuardianStatus;
+  verificationNote: string;
+  isPrimary: boolean;
+};
+
+export type RosterAttendance = {
+  overallPercent: number | null;
+  totalDays: number | null;
+  daysPresent: number | null;
+  daysAbsent: number | null;
+  absenceNoteStatus: string | null;
+};
+
 export type RosterStudent = {
   id: string;
   admissionNumber: string;
   name: string;
-  initials: string;
-  house: string;
-  linkedGuardians: string;
+  initials?: string;
+  house: string | null;
+  gradeSection: string | null;
+  linkedGuardians: number;
   guardianStatus: GuardianStatus;
-  guardianRelationship: string;
-  guardianPhone: string;
-  guardianVerificationNote: string;
-  gradeSection: string;
-  enrollmentType: string;
-  overallAttendance: string;
-  totalDays: string;
-  daysPresent: string;
-  daysAbsent: string;
-  absenceNoteStatus: string;
-  avatarTone: number;
+  guardians: Guardian[];
+  attendance: RosterAttendance;
+  enrollmentType: string | null;
+  avatarTone?: number;
 };
 
-const AVATAR_TONES = [
+export type ClassRosterData = {
+  portal: {
+    name: string;
+    academicTerm: string;
+  } | null;
+  class: {
+    id: string;
+    name: string;
+    gradeSection: string;
+    classTeacherName: string | null;
+    enrolledCount: number;
+    cycleLabel: string | null;
+  } | null;
+  session: {
+    userFullName: string;
+    userRole: string;
+    userSubject: string | null;
+    initials: string;
+  } | null;
+  students: RosterStudent[];
+  totalCount: number;
+};
+
+export const ROSTER_PAGE_SIZE = 5;
+
+export const AVATAR_TONE_CLASSES = [
   "bg-[#E8F5F3] text-brand-700",
   "bg-[#F0EBF9] text-[#6D4FA3]",
   "bg-[#FFF6E5] text-[#9A6A10]",
   "bg-[#EAF2FB] text-[#356C9B]",
-];
+] as const;
 
-/**
- * Structural roster rows. Replace this collection with the authenticated
- * class roster response: admission number, learner name, house, guardian
- * summary, attendance totals and the selected learner's detail payload.
- */
-export const ROSTER_STUDENTS: RosterStudent[] = Array.from(
-  { length: 12 },
-  (_, index) => ({
-    id: `roster-row-${index + 1}`,
-    admissionNumber: "[ID]",
-    name: "[Name]",
-    initials: "[AB]",
-    house: "[Dormitory / House]",
-    linkedGuardians: "[Count]",
-    guardianStatus: index % 3 === 1 ? "pending" : "verified",
-    guardianRelationship: "[Relationship]",
-    guardianPhone: "[Masked Phone]",
-    guardianVerificationNote:
-      index % 3 === 1
-        ? "Pending verification · [Timestamp]"
-        : "Verified · [Timestamp]",
-    gradeSection: "[Grade / Section]",
-    enrollmentType: "[Enrollment Type]",
-    overallAttendance: "[Overall %]",
-    totalDays: "[Count]",
-    daysPresent: "[Count]",
-    daysAbsent: "[Count]",
-    absenceNoteStatus: "[Status]",
-    avatarTone: index % AVATAR_TONES.length,
-  }),
-);
+export function getStudentInitials(student: RosterStudent) {
+  if (student.initials?.trim()) {
+    return student.initials.trim();
+  }
 
-export const AVATAR_TONE_CLASSES = AVATAR_TONES;
+  const parts = student.name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
 
-export const CLASS_PORTAL = {
-  portalName: "[Portal Name]",
-  academicTerm: "[Academic Term / Year]",
-  className: "[Class Name / Grade]",
-  classTeacher: "[Name]",
-  enrolledCount: "[Count]",
-  cycle: "[Cycle / Term]",
-  totalRecords: "[Count]",
-  userFullName: "[Full Name]",
-  userRole: "[Role Title]",
-  userSubject: "[Subject Assignment]",
-};
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "—";
+}
 
-export const ROSTER_PAGE_SIZE = 5;
+export function formatCount(value: number | null) {
+  return value === null || value === undefined
+    ? "—"
+    : value.toLocaleString("en-GB");
+}
+
+export function formatPercent(value: number | null) {
+  return value === null || value === undefined ? "Not recorded" : `${value}%`;
+}
+
+export function getPrimaryGuardian(student: RosterStudent) {
+  return (
+    student.guardians.find((guardian) => guardian.isPrimary) ??
+    student.guardians[0] ??
+    null
+  );
+}
