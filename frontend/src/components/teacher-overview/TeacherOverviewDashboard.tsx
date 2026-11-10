@@ -29,6 +29,15 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import {
+  ANNOUNCEMENT_TONE_BY_KIND,
+  TODO_TONE_BY_KIND,
+  type Announcement,
+  type NextLesson,
+  type TeacherOverviewData,
+  type TimetableRow,
+  type TodoItem,
+} from "./teacher-overview-data";
 
 type NavItem = {
   label: string;
@@ -59,71 +68,43 @@ const BOTTOM_NAV = [
   { label: "More", icon: MoreHorizontal },
 ];
 
-const TODO_ITEMS = [
-  {
-    id: "todo-not-marked",
-    tone: "gold" as const,
-    icon: AlertTriangle,
-    title: "[Task Title]",
-    meta: "",
-    status: "Not yet marked",
-    statusTone: "gold" as const,
-  },
-  {
-    id: "todo-pending",
-    tone: "lavender" as const,
-    icon: BookOpen,
-    title: "[Task Title]",
-    meta: "[Metadata]",
-    status: "[X] pending",
-    statusTone: "lavender" as const,
-  },
-  {
-    id: "todo-progress",
-    tone: "slate" as const,
-    icon: ClipboardList,
-    title: "[Task Title]",
-    meta: "[Metadata]",
-    status: "[X] of [Y] waiting",
-    statusTone: "slate" as const,
-  },
-  {
-    id: "todo-done",
-    tone: "mint" as const,
-    icon: CheckCircle2,
-    title: "[Task Title]",
-    meta: "[Metadata]",
-    status: "[X] of [Y] done",
-    statusTone: "mint" as const,
-  },
-];
+const TODO_ICON: Record<TodoItem["kind"], LucideIcon> = {
+  warning: AlertTriangle,
+  task: BookOpen,
+  progress: ClipboardList,
+  done: CheckCircle2,
+};
 
-const ANNOUNCEMENTS = [
-  {
-    id: "announcement-1",
-    icon: Check,
-    tone: "mint" as const,
-    title: "[Announcement Title]",
-    body: "[Announcement description]",
-  },
-  {
-    id: "announcement-2",
-    icon: Pencil,
-    tone: "lavender" as const,
-    title: "[Announcement Title]",
-    body: "[Announcement description]",
-  },
-  {
-    id: "announcement-3",
-    icon: CalendarDays,
-    tone: "slate" as const,
-    title: "[Announcement Title]",
-    body: "[Announcement description]",
-  },
-];
+const ANNOUNCEMENT_ICON: Record<Announcement["kind"], LucideIcon> = {
+  check: Check,
+  edit: Pencil,
+  calendar: CalendarDays,
+};
 
-export default function TeacherOverviewDashboard() {
+export default function TeacherOverviewDashboard({
+  overview,
+}: {
+  overview: TeacherOverviewData | null;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const organizationName =
+    overview?.portal?.organizationName?.trim() || "Staff workspace";
+  const dateLabel = overview?.portal?.dateLabel?.trim() || null;
+  const academicTerm = overview?.portal?.academicTerm?.trim() || null;
+  const weekLabel = overview?.portal?.weekLabel?.trim() || null;
+  const teacherName = overview?.teacher?.name?.trim() || null;
+  const greeting =
+    overview?.teacher?.greeting?.trim() ||
+    (teacherName ? `Good morning, ${teacherName}` : "Teacher Overview");
+  const session = overview?.session ?? null;
+  const userFullName = session?.fullName?.trim() || "Teacher";
+  const userRole = session?.role?.trim() || "Staff";
+  const userSubject = session?.subject?.trim() || "No subject assigned";
+  const userInitials = session?.initials?.trim() || initialsFromName(userFullName);
+  const nextLesson = overview?.nextLesson ?? null;
+  const todo = overview?.todo ?? { pendingCount: null, items: [] };
+  const timetable = overview?.timetable ?? { dayLabel: null, rows: [] };
+  const announcements = overview?.announcements ?? [];
 
   useEffect(() => {
     if (!menuOpen) {
@@ -147,39 +128,56 @@ export default function TeacherOverviewDashboard() {
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[260px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          userFullName={userFullName}
+          userRole={userRole}
+          userSubject={userSubject}
+          userInitials={userInitials}
+        />
       </aside>
 
       <MobileAppBar
+        organizationName={organizationName}
+        userInitials={userInitials}
         menuOpen={menuOpen}
         onOpenMenu={() => setMenuOpen(true)}
       />
 
       <div className="lg:pl-[260px]">
-        <DesktopHeader />
+        <DesktopHeader
+          organizationName={organizationName}
+          userFullName={userFullName}
+          userRole={userRole}
+          userInitials={userInitials}
+        />
 
         <main
           id="overview-main"
           tabIndex={-1}
           className="mx-auto w-full max-w-[1440px] px-4 pb-28 pt-20 sm:px-6 lg:px-8 lg:pb-10 lg:pt-7"
         >
-          <Greeting />
+          <Greeting
+            greeting={greeting}
+            dateLabel={dateLabel}
+            academicTerm={academicTerm}
+            weekLabel={weekLabel}
+          />
 
           <div className="mt-5">
-            <NextLessonCard />
+            <NextLessonCard lesson={nextLesson} />
           </div>
 
           <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]">
             <div className="order-1 min-w-0 xl:col-start-1 xl:row-start-1">
-              <TodoSection />
+              <TodoSection todo={todo} />
             </div>
 
             <div className="order-2 min-w-0 xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:sticky xl:top-[84px] xl:self-start">
-              <TimetableWidget />
+              <TimetableWidget timetable={timetable} />
             </div>
 
             <div className="order-3 min-w-0 xl:col-start-1 xl:row-start-2">
-              <AnnouncementsCard />
+              <AnnouncementsCard announcements={announcements} />
             </div>
           </div>
         </main>
@@ -187,12 +185,32 @@ export default function TeacherOverviewDashboard() {
 
       <BottomNav />
 
-      {menuOpen && <MobileDrawer onClose={() => setMenuOpen(false)} />}
+      {menuOpen && (
+        <MobileDrawer
+          userFullName={userFullName}
+          userRole={userRole}
+          userSubject={userSubject}
+          userInitials={userInitials}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  userFullName,
+  userRole,
+  userSubject,
+  userInitials,
+  onNavigate,
+}: {
+  userFullName: string;
+  userRole: string;
+  userSubject: string;
+  userInitials: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -261,15 +279,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
         <div className="flex items-center gap-2.5 border-t border-slate-100 pt-4">
           <span className="grid h-9 w-9 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-            [AB]
+            {userInitials}
           </span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-semibold text-slate-800">
-              [Full Name]
+              {userFullName}
             </p>
-            <p className="text-[10px] text-slate-400">[Role Title]</p>
+            <p className="text-[10px] text-slate-400">{userRole}</p>
             <p className="truncate text-[9px] font-medium text-brand-600">
-              [Subject Assignment]
+              {userSubject}
             </p>
           </div>
         </div>
@@ -279,9 +297,13 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function MobileAppBar({
+  organizationName,
+  userInitials,
   menuOpen,
   onOpenMenu,
 }: {
+  organizationName: string;
+  userInitials: string;
   menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
@@ -301,7 +323,7 @@ function MobileAppBar({
 
         <div className="min-w-0 flex-1 text-center">
           <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-            [Organization Name]
+            {organizationName}
           </p>
           <p className="truncate text-sm font-bold tracking-tight text-slate-900">
             Teacher Portal
@@ -322,7 +344,7 @@ function MobileAppBar({
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {userInitials}
           </button>
         </div>
       </div>
@@ -330,13 +352,23 @@ function MobileAppBar({
   );
 }
 
-function DesktopHeader() {
+function DesktopHeader({
+  organizationName,
+  userFullName,
+  userRole,
+  userInitials,
+}: {
+  organizationName: string;
+  userFullName: string;
+  userRole: string;
+  userInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
           <span className="max-w-[220px] truncate text-slate-700">
-            [Organization Name]
+            {organizationName}
           </span>
           <ChevronRight className="h-3.5 w-3.5" />
           <span>Overview</span>
@@ -357,13 +389,13 @@ function DesktopHeader() {
             className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
-              [AB]
+              {userInitials}
             </span>
             <div className="min-w-0 text-left">
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
-                [Full Name]
+                {userFullName}
               </p>
-              <p className="text-[10px] text-slate-400">[Role Title]</p>
+              <p className="text-[10px] text-slate-400">{userRole}</p>
             </div>
             <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
           </button>
@@ -373,7 +405,21 @@ function DesktopHeader() {
   );
 }
 
-function Greeting() {
+function Greeting({
+  greeting,
+  dateLabel,
+  academicTerm,
+  weekLabel,
+}: {
+  greeting: string;
+  dateLabel: string | null;
+  academicTerm: string | null;
+  weekLabel: string | null;
+}) {
+  const metadata = [dateLabel, academicTerm, weekLabel].filter(
+    (value): value is string => Boolean(value),
+  );
+
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="min-w-0">
@@ -384,18 +430,25 @@ function Greeting() {
           </p>
         </div>
         <h1 className="mt-2 text-[26px] font-bold leading-tight tracking-tight text-slate-900 sm:text-3xl">
-          Good morning, [Teacher Name]
+          {greeting}
         </h1>
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
-          <span className="inline-flex items-center gap-1.5">
-            <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
-            [Date]
-          </span>
-          <span className="text-slate-300">•</span>
-          <span>[Academic Term]</span>
-          <span className="text-slate-300">•</span>
-          <span>[Week]</span>
-        </div>
+        {metadata.length > 0 ? (
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+            {metadata.map((value, index) => (
+              <span key={`${value}-${index}`} className="flex items-center gap-2">
+                {index > 0 && <span className="text-slate-300">•</span>}
+                {index === 0 && (
+                  <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
+                )}
+                {value}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-slate-500">
+            Date and academic period will appear here when available.
+          </p>
+        )}
       </div>
 
       <button
@@ -409,59 +462,85 @@ function Greeting() {
   );
 }
 
-function NextLessonCard() {
+function NextLessonCard({ lesson }: { lesson: NextLesson | null }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-card sm:p-6">
       <div className="flex items-center justify-between gap-3">
         <p className="text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-400">
           Next lesson
         </p>
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400 opacity-70 motion-reduce:animate-none" />
-            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-brand-500" />
+        {lesson && lesson.countdownMinutes !== null && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400 opacity-70 motion-reduce:animate-none" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-brand-500" />
+            </span>
+            in {lesson.countdownMinutes} min
           </span>
-          in [X] min
-        </span>
+        )}
       </div>
 
-      <h2 className="mt-3 text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
-        [Lesson Title]
-      </h2>
+      {lesson ? (
+        <>
+          <h2 className="mt-3 text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+            {lesson.title}
+          </h2>
 
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-slate-500">
-        <span className="inline-flex items-center gap-1.5">
-          <UsersRound className="h-3.5 w-3.5 text-slate-400" />
-          [Group / Grade]
-        </span>
-        <span className="inline-flex items-center gap-1.5">
-          <Clock3 className="h-3.5 w-3.5 text-slate-400" />
-          [Start Time]
-        </span>
-      </div>
+          {(lesson.group || lesson.startTime) && (
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-slate-500">
+              {lesson.group && (
+                <span className="inline-flex items-center gap-1.5">
+                  <UsersRound className="h-3.5 w-3.5 text-slate-400" />
+                  {lesson.group}
+                </span>
+              )}
+              {lesson.startTime && (
+                <span className="inline-flex items-center gap-1.5">
+                  <Clock3 className="h-3.5 w-3.5 text-slate-400" />
+                  {lesson.startTime}
+                </span>
+              )}
+            </div>
+          )}
 
-      <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-[#E8F5F3] px-3.5 py-3">
-        <div className="min-w-0">
-          <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-brand-600">
-            Unit / topic
-          </p>
-          <p className="mt-0.5 truncate text-xs font-semibold text-slate-800">
-            [Unit / Topic]
-          </p>
-        </div>
-        <a
-          href="#"
-          className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold text-brand-700 transition hover:bg-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-        >
-          Plan
-          <ArrowRight className="h-3.5 w-3.5" />
-        </a>
-      </div>
+          {(lesson.unitTopic || lesson.planHref) && (
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-[#E8F5F3] px-3.5 py-3">
+              <div className="min-w-0">
+                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-brand-600">
+                  Unit / topic
+                </p>
+                <p className="mt-0.5 truncate text-xs font-semibold text-slate-800">
+                  {lesson.unitTopic || "Not provided"}
+                </p>
+              </div>
+              {lesson.planHref && (
+                <a
+                  href={lesson.planHref}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold text-brand-700 transition hover:bg-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+                >
+                  Plan
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </a>
+              )}
+            </div>
+          )}
+        </>
+      ) : (
+        <EmptyState
+          icon={Clock3}
+          title="No upcoming lesson"
+          body="Your next lesson will appear here when the timetable is available."
+        />
+      )}
     </section>
   );
 }
 
-function TodoSection() {
+function TodoSection({
+  todo,
+}: {
+  todo: TeacherOverviewData["todo"];
+}) {
   return (
     <section>
       <div className="flex items-center justify-between gap-3">
@@ -469,21 +548,33 @@ function TodoSection() {
           To do
         </h2>
         <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600 shadow-sm ring-1 ring-slate-200/80">
-          [X] pending
+          {todo.pendingCount === null
+            ? "Pending"
+            : `${todo.pendingCount} pending`}
         </span>
       </div>
 
-      <div className="mt-3 space-y-2.5">
-        {TODO_ITEMS.map((item) => (
-          <TodoCard key={item.id} item={item} />
-        ))}
-      </div>
+      {todo.items.length > 0 ? (
+        <div className="mt-3 space-y-2.5">
+          {todo.items.map((item) => (
+            <TodoCard key={item.id} item={item} />
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={CheckCircle2}
+          title="No tasks available"
+          body="Pending tasks will appear here when they are assigned."
+          className="mt-3"
+        />
+      )}
     </section>
   );
 }
 
-function TodoCard({ item }: { item: (typeof TODO_ITEMS)[number] }) {
-  const Icon = item.icon;
+function TodoCard({ item }: { item: TodoItem }) {
+  const Icon = TODO_ICON[item.kind];
+  const tone = TODO_TONE_BY_KIND[item.kind];
 
   return (
     <a
@@ -493,10 +584,10 @@ function TodoCard({ item }: { item: (typeof TODO_ITEMS)[number] }) {
       <span
         className={cn(
           "grid h-10 w-10 shrink-0 place-items-center rounded-xl",
-          item.tone === "gold" && "bg-[#FEF3D6] text-[#9A6A10]",
-          item.tone === "lavender" && "bg-[#F0EBF9] text-[#6D4FA3]",
-          item.tone === "slate" && "bg-slate-100 text-slate-600",
-          item.tone === "mint" && "bg-[#E2F0ED] text-brand-700",
+          tone === "gold" && "bg-[#FEF3D6] text-[#9A6A10]",
+          tone === "lavender" && "bg-[#F0EBF9] text-[#6D4FA3]",
+          tone === "slate" && "bg-slate-100 text-slate-600",
+          tone === "mint" && "bg-[#E2F0ED] text-brand-700",
         )}
       >
         <Icon className="h-4 w-4" />
@@ -514,22 +605,16 @@ function TodoCard({ item }: { item: (typeof TODO_ITEMS)[number] }) {
         <span
           className={cn(
             "mt-1.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-semibold ring-1",
-            item.statusTone === "gold" &&
+            tone === "gold" &&
               "bg-[#FEF3D6] text-[#8A6A25] ring-[#EBD7A5]",
-            item.statusTone === "lavender" &&
+            tone === "lavender" &&
               "bg-[#F0EBF9] text-[#6D4FA3] ring-[#E4DBF5]",
-            item.statusTone === "slate" &&
-              "bg-slate-100 text-slate-600 ring-slate-200",
-            item.statusTone === "mint" &&
-              "bg-[#E2F0ED] text-brand-700 ring-brand-100",
+            tone === "slate" && "bg-slate-100 text-slate-600 ring-slate-200",
+            tone === "mint" && "bg-[#E2F0ED] text-brand-700 ring-brand-100",
           )}
         >
-          {item.statusTone === "gold" && (
-            <AlertTriangle className="h-2.5 w-2.5" />
-          )}
-          {item.statusTone === "mint" && (
-            <CheckCircle2 className="h-2.5 w-2.5" />
-          )}
+          {tone === "gold" && <AlertTriangle className="h-2.5 w-2.5" />}
+          {tone === "mint" && <CheckCircle2 className="h-2.5 w-2.5" />}
           {item.status}
         </span>
       </div>
@@ -539,7 +624,11 @@ function TodoCard({ item }: { item: (typeof TODO_ITEMS)[number] }) {
   );
 }
 
-function TimetableWidget() {
+function TimetableWidget({
+  timetable,
+}: {
+  timetable: TeacherOverviewData["timetable"];
+}) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card sm:p-4">
       <div className="flex items-center justify-between gap-3 px-1 pb-3">
@@ -547,78 +636,107 @@ function TimetableWidget() {
           Today&apos;s timetable
         </h2>
         <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          [Day]
+          {timetable.dayLabel?.trim() || "—"}
         </span>
       </div>
 
-      <div className="space-y-2">
-        <div className="flex items-center gap-3 rounded-xl bg-[#E8F5F3] p-3">
-          <div className="w-[58px] shrink-0">
-            <p className="text-[9px] font-semibold text-slate-500">[Start]</p>
-            <p className="text-[10px] font-medium text-slate-400">[End]</p>
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-bold text-slate-800">
-              [Subject Title]
-            </p>
-            <p className="truncate text-[10px] text-slate-500">[Location]</p>
-          </div>
-          <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-white/80 text-brand-600">
-            <Check className="h-3.5 w-3.5" />
-          </span>
+      {timetable.rows.length > 0 ? (
+        <div className="space-y-2">
+          {timetable.rows.map((row) => (
+            <TimetableRowCard key={row.id} row={row} />
+          ))}
         </div>
-
-        <div className="flex items-center gap-3 rounded-xl border border-[#E4DBF5] bg-[#F0EBF9] p-3">
-          <div className="w-[58px] shrink-0">
-            <p className="text-[9px] font-semibold text-[#6D4FA3]">[Start]</p>
-            <p className="text-[10px] font-medium text-[#8A6DBC]">[End]</p>
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <p className="truncate text-[11px] font-bold text-slate-800">
-                [Subject Title]
-              </p>
-              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-[#6D4FA3]">
-                <span className="h-1 w-1 rounded-full bg-[#7C5CBF]" />
-                Now
-              </span>
-            </div>
-            <p className="truncate text-[10px] text-slate-500">[Location]</p>
-          </div>
-          <ArrowRight className="h-4 w-4 shrink-0 text-[#6D4FA3]" />
-        </div>
-
-        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5">
-          <span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-slate-500">
-            <Coffee className="h-3.5 w-3.5 text-slate-400" />
-            [Break Label]
-          </span>
-          <span className="text-[10px] font-semibold text-slate-400">
-            [Time]
-          </span>
-        </div>
-
-        <div className="flex items-center gap-3 rounded-xl bg-[#E8F5F3]/70 p-3">
-          <div className="w-[58px] shrink-0">
-            <p className="text-[9px] font-semibold text-slate-500">[Start]</p>
-            <p className="text-[10px] font-medium text-slate-400">[End]</p>
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-bold text-slate-800">
-              [Subject Title]
-            </p>
-            <p className="truncate text-[10px] text-slate-500">[Location]</p>
-          </div>
-          <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-white/80 text-slate-400">
-            <Clock3 className="h-3.5 w-3.5" />
-          </span>
-        </div>
-      </div>
+      ) : (
+        <EmptyState
+          icon={CalendarDays}
+          title="No periods available"
+          body="Today's timetable will appear here when it is published."
+        />
+      )}
     </section>
   );
 }
 
-function AnnouncementsCard() {
+function TimetableRowCard({ row }: { row: TimetableRow }) {
+  if (row.kind === "break") {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5">
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-slate-500">
+          <Coffee className="h-3.5 w-3.5 text-slate-400" />
+          {row.label?.trim() || "Break"}
+        </span>
+        <span className="text-[10px] font-semibold text-slate-400">
+          {formatTimeRange(row.startTime, row.endTime)}
+        </span>
+      </div>
+    );
+  }
+
+  const active = row.kind === "active";
+  const completed = row.kind === "completed";
+  const StatusIcon = active ? ArrowRight : completed ? Check : Clock3;
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-xl p-3",
+        active
+          ? "border border-[#E4DBF5] bg-[#F0EBF9]"
+          : "bg-[#E8F5F3]",
+        row.kind === "upcoming" && "bg-[#E8F5F3]/70",
+      )}
+    >
+      <div className="w-[58px] shrink-0">
+        <p
+          className={cn(
+            "text-[9px] font-semibold",
+            active ? "text-[#6D4FA3]" : "text-slate-500",
+          )}
+        >
+          {row.startTime || "—"}
+        </p>
+        <p
+          className={cn(
+            "text-[10px] font-medium",
+            active ? "text-[#8A6DBC]" : "text-slate-400",
+          )}
+        >
+          {row.endTime || "—"}
+        </p>
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <p className="truncate text-[11px] font-bold text-slate-800">
+            {row.subject?.trim() || "Subject not provided"}
+          </p>
+          {active && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-[#6D4FA3]">
+              <span className="h-1 w-1 rounded-full bg-[#7C5CBF]" />
+              Now
+            </span>
+          )}
+        </div>
+        <p className="truncate text-[10px] text-slate-500">
+          {row.location?.trim() || "Location not provided"}
+        </p>
+      </div>
+      <span
+        className={cn(
+          "grid h-6 w-6 shrink-0 place-items-center rounded-full bg-white/80",
+          active ? "text-[#6D4FA3]" : completed ? "text-brand-600" : "text-slate-400",
+        )}
+      >
+        <StatusIcon className="h-3.5 w-3.5" />
+      </span>
+    </div>
+  );
+}
+
+function AnnouncementsCard({
+  announcements,
+}: {
+  announcements: Announcement[];
+}) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-center justify-between gap-3">
@@ -630,35 +748,48 @@ function AnnouncementsCard() {
         </span>
       </div>
 
-      <div className="mt-3 divide-y divide-slate-100">
-        {ANNOUNCEMENTS.map((item) => {
-          const Icon = item.icon;
+      {announcements.length > 0 ? (
+        <div className="mt-3 divide-y divide-slate-100">
+          {announcements.map((item) => {
+            const Icon = ANNOUNCEMENT_ICON[item.kind];
+            const tone = ANNOUNCEMENT_TONE_BY_KIND[item.kind];
 
-          return (
-            <div key={item.id} className="flex gap-3 py-3 first:pt-0 last:pb-0">
-              <span
-                className={cn(
-                  "grid h-8 w-8 shrink-0 place-items-center rounded-full",
-                  item.tone === "mint" && "bg-[#E2F0ED] text-brand-700",
-                  item.tone === "lavender" &&
-                    "bg-[#F0EBF9] text-[#6D4FA3]",
-                  item.tone === "slate" && "bg-slate-100 text-slate-500",
-                )}
+            return (
+              <div
+                key={item.id}
+                className="flex gap-3 py-3 first:pt-0 last:pb-0"
               >
-                <Icon className="h-3.5 w-3.5" />
-              </span>
-              <div className="min-w-0">
-                <p className="text-[11px] font-bold text-slate-800">
-                  {item.title}
-                </p>
-                <p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">
-                  {item.body}
-                </p>
+                <span
+                  className={cn(
+                    "grid h-8 w-8 shrink-0 place-items-center rounded-full",
+                    tone === "mint" && "bg-[#E2F0ED] text-brand-700",
+                    tone === "lavender" &&
+                      "bg-[#F0EBF9] text-[#6D4FA3]",
+                    tone === "slate" && "bg-slate-100 text-slate-500",
+                  )}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-[11px] font-bold text-slate-800">
+                    {item.title}
+                  </p>
+                  <p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">
+                    {item.description}
+                  </p>
+                </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState
+          icon={Megaphone}
+          title="No announcements available"
+          body="Staff updates will appear here when they are published."
+          className="mt-3"
+        />
+      )}
 
       <a
         href="#"
@@ -668,6 +799,35 @@ function AnnouncementsCard() {
         <ArrowRight className="h-3.5 w-3.5" />
       </a>
     </section>
+  );
+}
+
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+  className,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-7 text-center",
+        className,
+      )}
+    >
+      <span className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-white text-slate-400 shadow-sm">
+        <Icon className="h-4 w-4" />
+      </span>
+      <p className="mt-2.5 text-xs font-semibold text-slate-700">{title}</p>
+      <p className="mx-auto mt-1 max-w-xs text-[10px] leading-relaxed text-slate-500">
+        {body}
+      </p>
+    </div>
   );
 }
 
@@ -706,7 +866,19 @@ function BottomNav() {
   );
 }
 
-function MobileDrawer({ onClose }: { onClose: () => void }) {
+function MobileDrawer({
+  userFullName,
+  userRole,
+  userSubject,
+  userInitials,
+  onClose,
+}: {
+  userFullName: string;
+  userRole: string;
+  userSubject: string;
+  userInitials: string;
+  onClose: () => void;
+}) {
   const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
@@ -745,9 +917,33 @@ function MobileDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <SidebarContent onNavigate={onClose} />
+          <SidebarContent
+            userFullName={userFullName}
+            userRole={userRole}
+            userSubject={userSubject}
+            userInitials={userInitials}
+            onNavigate={onClose}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function formatTimeRange(start: string | null, end: string | null) {
+  if (!start && !end) {
+    return "—";
+  }
+
+  return `${start || "—"} – ${end || "—"}`;
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "T";
 }
