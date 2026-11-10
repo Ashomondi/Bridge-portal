@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Award,
   BarChart3,
@@ -34,6 +34,14 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import {
+  buildSparklinePoints,
+  formatMetric,
+  type ClassMeansData,
+  type ClassMeansIcon,
+  type ClassMeansOption,
+  type ClassMeansStrand,
+} from "./class-means-data";
 
 type NavItem = {
   label: string;
@@ -75,24 +83,31 @@ const BOTTOM_NAV = [
   { label: "More", icon: MoreHorizontal, href: "#" },
 ];
 
-const SUBJECT_STRANDS = [
-  { id: "strand-1", icon: BookOpen, points: "4,26 22,22 40,24 58,16 76,18 94,10 116,12" },
-  { id: "strand-2", icon: Calculator, points: "4,22 22,24 40,18 58,20 76,12 94,15 116,8" },
-  { id: "strand-3", icon: Languages, points: "4,27 22,20 40,23 58,15 76,19 94,12 116,14" },
-  { id: "strand-4", icon: FlaskConical, points: "4,24 22,25 40,19 58,21 76,14 94,17 116,9" },
-];
+const STRAND_ICONS: Record<ClassMeansIcon, LucideIcon> = {
+  book: BookOpen,
+  calculator: Calculator,
+  language: Languages,
+  science: FlaskConical,
+};
 
-const TABLE_ROWS = Array.from({ length: 5 }, (_, index) => ({
-  id: `strand-row-${index + 1}`,
-  subject: "[Subject]",
-  assessment: "[Assessment]",
-  term1: "[Score]",
-  term2: "[Score]",
-  count: "[Count]",
-}));
-
-export default function ClassMeansDashboard() {
+export default function ClassMeansDashboard({
+  data,
+}: {
+  data: ClassMeansData | null;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const portalName = data?.portal?.name?.trim() || "Teacher portal";
+  const academicTerm =
+    data?.portal?.academicTerm?.trim() || "No active term";
+  const session = data?.session ?? null;
+  const userFullName = session?.fullName?.trim() || "Teacher";
+  const userRole = session?.role?.trim() || "Staff";
+  const userSubject = session?.subject?.trim() || "No subject assigned";
+  const userInitials = session?.initials?.trim() || initialsFromName(userFullName);
+  const frameworkStandard = data?.frameworkStandard?.trim() || null;
+  const strands = data?.strands ?? [];
+  const rows = data?.rows ?? [];
+  const filters = data?.filters ?? null;
 
   useEffect(() => {
     if (!menuOpen) {
@@ -116,39 +131,72 @@ export default function ClassMeansDashboard() {
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[272px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          userFullName={userFullName}
+          userRole={userRole}
+          userSubject={userSubject}
+          userInitials={userInitials}
+        />
       </aside>
 
       <MobileAppBar
+        portalName={portalName}
+        userInitials={userInitials}
         menuOpen={menuOpen}
         onOpenMenu={() => setMenuOpen(true)}
       />
 
       <div className="lg:pl-[272px]">
-        <DesktopHeader />
+        <DesktopHeader
+          portalName={portalName}
+          academicTerm={academicTerm}
+          userFullName={userFullName}
+          userRole={userRole}
+          userInitials={userInitials}
+        />
 
         <main
           id="class-means-main"
           tabIndex={-1}
           className="mx-auto w-full max-w-[1440px] px-4 pb-28 pt-20 sm:px-6 lg:px-8 lg:pb-10 lg:pt-7"
         >
-          <PageHeader />
+          <PageHeader frameworkStandard={frameworkStandard} />
           <InfoBanner />
-          <FilterBar />
-          <StrandsSection />
-          <DetailedTable />
+          <FilterBar filters={filters} />
+          <StrandsSection strands={strands} sortLabel={data?.sortLabel ?? null} />
+          <DetailedTable rows={rows} />
           <PolicyBanner />
         </main>
       </div>
 
       <BottomNav />
 
-      {menuOpen && <MobileDrawer onClose={() => setMenuOpen(false)} />}
+      {menuOpen && (
+        <MobileDrawer
+          userFullName={userFullName}
+          userRole={userRole}
+          userSubject={userSubject}
+          userInitials={userInitials}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  userFullName,
+  userRole,
+  userSubject,
+  userInitials,
+  onNavigate,
+}: {
+  userFullName: string;
+  userRole: string;
+  userSubject: string;
+  userInitials: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -213,17 +261,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3">
           <div className="flex items-center gap-2.5">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-              [AB]
+              {userInitials}
             </span>
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold text-slate-800">
-                [Full Name]
+                {userFullName}
               </p>
-              <p className="truncate text-[10px] text-slate-400">
-                [Role Title]
-              </p>
+              <p className="truncate text-[10px] text-slate-400">{userRole}</p>
               <p className="truncate text-[9px] font-medium text-brand-600">
-                [Subject Assignment]
+                {userSubject}
               </p>
             </div>
           </div>
@@ -241,9 +287,13 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function MobileAppBar({
+  portalName,
+  userInitials,
   menuOpen,
   onOpenMenu,
 }: {
+  portalName: string;
+  userInitials: string;
   menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
@@ -263,7 +313,7 @@ function MobileAppBar({
 
         <div className="min-w-0 flex-1 text-center">
           <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-            [Organization Name]
+            {portalName}
           </p>
           <p className="truncate text-sm font-bold tracking-tight text-slate-900">
             Class Means
@@ -284,7 +334,7 @@ function MobileAppBar({
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {userInitials}
           </button>
         </div>
       </div>
@@ -292,18 +342,28 @@ function MobileAppBar({
   );
 }
 
-function DesktopHeader() {
+function DesktopHeader({
+  portalName,
+  academicTerm,
+  userFullName,
+  userRole,
+  userInitials,
+}: {
+  portalName: string;
+  academicTerm: string;
+  userFullName: string;
+  userRole: string;
+  userInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
           <span className="max-w-[220px] truncate text-slate-700">
-            [Portal Name]
+            {portalName}
           </span>
           <ChevronRight className="h-3.5 w-3.5" />
-          <span className="max-w-[220px] truncate">
-            [Academic Term / Year]
-          </span>
+          <span className="max-w-[220px] truncate">{academicTerm}</span>
         </div>
 
         <div className="flex items-center gap-2.5">
@@ -321,13 +381,13 @@ function DesktopHeader() {
             className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
-              [AB]
+              {userInitials}
             </span>
             <div className="min-w-0 text-left">
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
-                [Full Name]
+                {userFullName}
               </p>
-              <p className="text-[10px] text-slate-400">[Role Title]</p>
+              <p className="text-[10px] text-slate-400">{userRole}</p>
             </div>
             <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
           </button>
@@ -337,7 +397,7 @@ function DesktopHeader() {
   );
 }
 
-function PageHeader() {
+function PageHeader({ frameworkStandard }: { frameworkStandard: string | null }) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
@@ -352,9 +412,16 @@ function PageHeader() {
         </h1>
       </div>
 
-      <span className="inline-flex w-fit items-center gap-1.5 rounded-full bg-[#E2F0ED] px-3 py-1.5 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">
+      <span
+        className={cn(
+          "inline-flex w-fit items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-semibold ring-1",
+          frameworkStandard
+            ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+            : "bg-slate-100 text-slate-500 ring-slate-200",
+        )}
+      >
         <Check className="h-3.5 w-3.5" />
-        [Framework Standard Name]
+        {frameworkStandard || "Framework standard not configured"}
       </span>
     </div>
   );
@@ -369,15 +436,15 @@ function InfoBanner() {
       <div className="min-w-0">
         <p className="text-xs font-bold text-brand-800">Aggregate view only</p>
         <p className="mt-1 max-w-4xl text-[11px] leading-relaxed text-slate-500">
-          [Access restriction explanation] Class-level means are available to
-          authorized staff. Individual learner records remain protected.
+          Class-level means are available to authorized staff. Individual
+          learner records remain protected and are not exposed in this view.
         </p>
       </div>
     </section>
   );
 }
 
-function FilterBar() {
+function FilterBar({ filters }: { filters: ClassMeansData["filters"] | null }) {
   return (
     <section
       aria-label="Class means filters"
@@ -386,19 +453,22 @@ function FilterBar() {
       <div className="grid grid-cols-1 gap-2.5 md:grid-cols-3">
         <FilterSelect
           label="Target class stream"
-          placeholder="[Class Stream]"
-          options={["[Stream A]", "[Stream B]", "[Stream C]"]}
+          placeholder="Select class stream"
+          options={filters?.classStreams ?? []}
+          defaultValue={filters?.selectedClassStream ?? ""}
         />
         <FilterSelect
           label="Academic period"
-          placeholder="[Academic Period]"
-          options={["[Term / Period 1]", "[Term / Period 2]", "[Term / Period 3]"]}
+          placeholder="Select academic period"
+          options={filters?.academicPeriods ?? []}
+          defaultValue={filters?.selectedAcademicPeriod ?? ""}
           icon={CalendarDays}
         />
         <FilterSelect
           label="Assessment series"
-          placeholder="[Assessment Series]"
-          options={["[Series A]", "[Series B]", "[Series C]"]}
+          placeholder="Select assessment series"
+          options={filters?.assessmentSeries ?? []}
+          defaultValue={filters?.selectedAssessmentSeries ?? ""}
           icon={FileText}
         />
       </div>
@@ -410,13 +480,17 @@ function FilterSelect({
   label,
   placeholder,
   options,
+  defaultValue,
   icon: Icon,
 }: {
   label: string;
   placeholder: string;
-  options: string[];
+  options: ClassMeansOption[];
+  defaultValue: string;
   icon?: LucideIcon;
 }) {
+  const disabled = options.length === 0;
+
   return (
     <label className="relative block">
       <span className="sr-only">{label}</span>
@@ -424,16 +498,19 @@ function FilterSelect({
         <Icon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
       )}
       <select
+        disabled={disabled}
+        defaultValue={defaultValue}
         className={cn(
-          "h-11 w-full appearance-none rounded-xl border border-slate-200/80 bg-slate-50/60 pr-8 text-[11px] font-semibold text-slate-600 outline-none transition focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10",
+          "h-11 w-full appearance-none rounded-xl border border-slate-200/80 bg-slate-50/60 pr-8 text-[11px] font-semibold text-slate-600 outline-none transition focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60",
           Icon ? "pl-9" : "pl-3",
         )}
-        defaultValue=""
       >
-        <option value="">{placeholder}</option>
+        <option value="">
+          {disabled ? "No options available" : placeholder}
+        </option>
         {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
+          <option key={option.value} value={option.value}>
+            {option.label}
           </option>
         ))}
       </select>
@@ -442,7 +519,13 @@ function FilterSelect({
   );
 }
 
-function StrandsSection() {
+function StrandsSection({
+  strands,
+  sortLabel,
+}: {
+  strands: ClassMeansStrand[];
+  sortLabel: string | null;
+}) {
   return (
     <section className="mt-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -451,63 +534,87 @@ function StrandsSection() {
             Subject strands
           </h2>
           <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600 shadow-sm ring-1 ring-slate-200/80">
-            [X] Core Learning Areas
+            {strands.length} Core Learning Areas
           </span>
         </div>
         <p className="inline-flex items-center gap-1.5 text-[10px] font-medium text-slate-400">
           <TrendingUp className="h-3.5 w-3.5 text-brand-500" />
-          Sorted by [Criteria]
+          {sortLabel ? `Sorted by ${sortLabel}` : "Sort order not configured"}
         </p>
       </div>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {SUBJECT_STRANDS.map((strand) => {
-          const Icon = strand.icon;
-
-          return (
-            <article
-              key={strand.id}
-              className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card transition hover:-translate-y-px hover:shadow-card-hover motion-reduce:transition-none"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <p className="text-[11px] font-semibold text-slate-600">
-                  [Subject]
-                </p>
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#F8F9FA] text-slate-400">
-                  <Icon className="h-4 w-4" />
-                </span>
-              </div>
-
-              <div className="mt-3 flex items-end gap-1">
-                <span className="text-3xl font-bold leading-none tracking-tight text-slate-900">
-                  [Score]
-                </span>
-                <span className="pb-0.5 text-[11px] font-medium text-slate-400">
-                  /100
-                </span>
-              </div>
-
-              <div className="mt-4 flex items-center justify-between gap-2 text-[9px] font-medium text-slate-400">
-                <span>T1 · T2 · T3 trend</span>
-                <span>[Count] students</span>
-              </div>
-
-              <Sparkline points={strand.points} />
-            </article>
-          );
-        })}
-      </div>
+      {strands.length > 0 ? (
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {strands.map((strand) => (
+            <StrandCard key={strand.id} strand={strand} />
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={BarChart3}
+          title="No subject means available"
+          body="Subject strand analytics will appear here when class assessments are published."
+          className="mt-3"
+        />
+      )}
     </section>
   );
 }
 
-function Sparkline({ points }: { points: string }) {
+function StrandCard({ strand }: { strand: ClassMeansStrand }) {
+  const Icon = STRAND_ICONS[strand.icon];
+  const points = buildSparklinePoints(strand.trendPoints);
+
+  return (
+    <article className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card transition hover:-translate-y-px hover:shadow-card-hover motion-reduce:transition-none">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-[11px] font-semibold text-slate-600">
+          {strand.subject}
+        </p>
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#F8F9FA] text-slate-400">
+          <Icon className="h-4 w-4" />
+        </span>
+      </div>
+
+      <div className="mt-3 flex items-end gap-1">
+        <span className="text-3xl font-bold leading-none tracking-tight text-slate-900">
+          {formatMetric(strand.score)}
+        </span>
+        <span className="pb-0.5 text-[11px] font-medium text-slate-400">
+          /100
+        </span>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-2 text-[9px] font-medium text-slate-400">
+        <span>{strand.trendLabel?.trim() || "Term trend"}</span>
+        <span>
+          {strand.studentCount === null
+            ? "No student count"
+            : `${strand.studentCount.toLocaleString("en-GB")} students`}
+        </span>
+      </div>
+
+      <Sparkline
+        points={points}
+        label={`${strand.subject} trend`}
+      />
+    </article>
+  );
+}
+
+function Sparkline({
+  points,
+  label,
+}: {
+  points: string | null;
+  label: string;
+}) {
   return (
     <svg
       viewBox="0 0 120 32"
       className="mt-2 h-8 w-full"
       role="img"
-      aria-label="Trend line placeholder"
+      aria-label={points ? label : `${label}: no trend data`}
     >
       <path
         d="M4 28H116"
@@ -516,20 +623,38 @@ function Sparkline({ points }: { points: string }) {
         strokeWidth="1"
         strokeLinecap="round"
       />
-      <polyline
-        points={points}
-        fill="none"
-        stroke="#007A78"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="116" cy={points.split(" ").at(-1)?.split(",")[1]} r="2.4" fill="#007A78" />
+      {points ? (
+        <>
+          <polyline
+            points={points}
+            fill="none"
+            stroke="#007A78"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <circle
+            cx={points.split(" ").at(-1)?.split(",")[0]}
+            cy={points.split(" ").at(-1)?.split(",")[1]}
+            r="2.4"
+            fill="#007A78"
+          />
+        </>
+      ) : (
+        <path
+          d="M4 20H116"
+          fill="none"
+          stroke="#CBD5E1"
+          strokeWidth="1.5"
+          strokeDasharray="3 4"
+          strokeLinecap="round"
+        />
+      )}
     </svg>
   );
 }
 
-function DetailedTable() {
+function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
   return (
     <section className="mt-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -538,7 +663,8 @@ function DetailedTable() {
         </h2>
         <button
           type="button"
-          className="inline-flex h-9 w-fit items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-[10px] font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled={rows.length === 0}
+          className="inline-flex h-9 w-fit items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-[10px] font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
         >
           <Download className="h-3.5 w-3.5" />
           Export Data Record
@@ -546,81 +672,95 @@ function DetailedTable() {
       </div>
 
       <div className="mt-3 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card">
-        <div className="hidden overflow-x-auto md:block">
-          <table className="w-full border-collapse text-left">
-            <thead>
-              <tr className="border-b border-slate-100 bg-[#F8F9FA]">
-                <TableHeading>Subject</TableHeading>
-                <TableHeading>Assessment</TableHeading>
-                <TableHeading align="right">Term 1</TableHeading>
-                <TableHeading align="right">Term 2</TableHeading>
-                <TableHeading align="right">Students Counted</TableHeading>
-              </tr>
-            </thead>
-            <tbody>
-              {TABLE_ROWS.map((row) => (
-                <tr
-                  key={row.id}
-                  className="border-b border-slate-100 transition last:border-0 hover:bg-slate-50/70"
-                >
-                  <td className="px-4 py-3.5 text-[11px] font-semibold text-slate-800 sm:px-5">
-                    {row.subject}
-                  </td>
-                  <td className="px-4 py-3.5 text-[11px] text-slate-500 sm:px-5">
-                    {row.assessment}
-                  </td>
-                  <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
-                    {row.term1}
-                  </td>
-                  <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
-                    {row.term2}
-                  </td>
-                  <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
-                    {row.count}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="divide-y divide-slate-100 md:hidden">
-          {TABLE_ROWS.map((row) => (
-            <div key={row.id} className="p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-[11px] font-bold text-slate-800">
-                    {row.subject}
-                  </p>
-                  <p className="mt-0.5 text-[10px] text-slate-400">
-                    {row.assessment}
-                  </p>
-                </div>
-                <span className="rounded-full bg-[#F8F9FA] px-2 py-0.5 text-[9px] font-semibold text-slate-500 ring-1 ring-slate-200/80">
-                  {row.count} counted
-                </span>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
-                  <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
-                    Term 1
-                  </p>
-                  <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
-                    {row.term1}
-                  </p>
-                </div>
-                <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
-                  <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
-                    Term 2
-                  </p>
-                  <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
-                    {row.term2}
-                  </p>
-                </div>
-              </div>
+        {rows.length > 0 ? (
+          <>
+            <div className="hidden overflow-x-auto md:block">
+              <table className="w-full border-collapse text-left">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-[#F8F9FA]">
+                    <TableHeading>Subject</TableHeading>
+                    <TableHeading>Assessment</TableHeading>
+                    <TableHeading align="right">Term 1</TableHeading>
+                    <TableHeading align="right">Term 2</TableHeading>
+                    <TableHeading align="right">Students Counted</TableHeading>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr
+                      key={row.id}
+                      className="border-b border-slate-100 transition last:border-0 hover:bg-slate-50/70"
+                    >
+                      <td className="px-4 py-3.5 text-[11px] font-semibold text-slate-800 sm:px-5">
+                        {row.subject}
+                      </td>
+                      <td className="px-4 py-3.5 text-[11px] text-slate-500 sm:px-5">
+                        {row.assessment}
+                      </td>
+                      <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
+                        {formatMetric(row.term1)}
+                      </td>
+                      <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
+                        {formatMetric(row.term2)}
+                      </td>
+                      <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
+                        {formatMetric(row.studentCount)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          ))}
-        </div>
+
+            <div className="divide-y divide-slate-100 md:hidden">
+              {rows.map((row) => (
+                <div key={row.id} className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-bold text-slate-800">
+                        {row.subject}
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-slate-400">
+                        {row.assessment}
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-[#F8F9FA] px-2 py-0.5 text-[9px] font-semibold text-slate-500 ring-1 ring-slate-200/80">
+                      {row.studentCount === null
+                        ? "No count"
+                        : `${row.studentCount.toLocaleString("en-GB")} counted`}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
+                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
+                        Term 1
+                      </p>
+                      <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
+                        {formatMetric(row.term1)}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
+                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
+                        Term 2
+                      </p>
+                      <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
+                        {formatMetric(row.term2)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="p-4">
+            <EmptyState
+              icon={FileText}
+              title="No tabulation data available"
+              body="Term-by-term strand means will appear here when they are published."
+            />
+          </div>
+        )}
       </div>
     </section>
   );
@@ -630,7 +770,7 @@ function TableHeading({
   children,
   align = "left",
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   align?: "left" | "right";
 }) {
   return (
@@ -656,11 +796,40 @@ function PolicyBanner() {
           Assessment Policy Adherence
         </p>
         <p className="mt-1 max-w-4xl text-[11px] leading-relaxed text-slate-500">
-          [Policy explanation] Scores are aggregated from published assessments
-          only. Restricted learner-level records are not exposed in this view.
+          Scores are aggregated from published assessments only. Restricted
+          learner-level records are not exposed in this view.
         </p>
       </div>
     </section>
+  );
+}
+
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+  className,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-2xl border border-dashed border-slate-200 bg-white/70 px-5 py-10 text-center",
+        className,
+      )}
+    >
+      <span className="mx-auto grid h-11 w-11 place-items-center rounded-2xl bg-slate-50 text-slate-400">
+        <Icon className="h-5 w-5" />
+      </span>
+      <p className="mt-3 text-sm font-semibold text-slate-700">{title}</p>
+      <p className="mx-auto mt-1 max-w-md text-[11px] leading-relaxed text-slate-500">
+        {body}
+      </p>
+    </div>
   );
 }
 
@@ -699,7 +868,19 @@ function BottomNav() {
   );
 }
 
-function MobileDrawer({ onClose }: { onClose: () => void }) {
+function MobileDrawer({
+  userFullName,
+  userRole,
+  userSubject,
+  userInitials,
+  onClose,
+}: {
+  userFullName: string;
+  userRole: string;
+  userSubject: string;
+  userInitials: string;
+  onClose: () => void;
+}) {
   const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
@@ -738,9 +919,25 @@ function MobileDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <SidebarContent onNavigate={onClose} />
+          <SidebarContent
+            userFullName={userFullName}
+            userRole={userRole}
+            userSubject={userSubject}
+            userInitials={userInitials}
+            onNavigate={onClose}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "T";
 }
