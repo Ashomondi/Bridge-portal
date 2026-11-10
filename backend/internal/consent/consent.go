@@ -89,8 +89,13 @@ func (s *Service) handleUpsert(w http.ResponseWriter, r *http.Request) {
 			return errNotGuardian
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO consents (school_id, student_id, guardian_user_id, purpose, granted, timestamp)
-			 VALUES ($1, $2, $3, $4, $5, NOW())`,
+			`INSERT INTO consents (school_id, student_id, guardian_user_id, purpose, granted, timestamp, revoked_at)
+			 VALUES ($1, $2, $3, $4, $5, NOW(), CASE WHEN $5 THEN NULL ELSE NOW() END)
+			 ON CONFLICT (school_id, student_id, guardian_user_id, purpose)
+			 DO UPDATE SET
+			     granted = EXCLUDED.granted,
+			     timestamp = NOW(),
+			     revoked_at = CASE WHEN EXCLUDED.granted THEN NULL ELSE NOW() END`,
 			identity.SchoolID, body.StudentID, identity.UserID, body.Purpose, body.Granted)
 		return err
 	})
@@ -134,10 +139,11 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	consents := make([]consentResponse, 0)
 	err := database.WithTenantTx(ctx, s.db, identity.SchoolID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT student_id::text, purpose, granted, timestamp::text, COALESCE(revoked_at::text, '')
+			`SELECT DISTINCT ON (student_id, purpose)
+			        student_id::text, purpose, granted, timestamp::text, COALESCE(revoked_at::text, '')
 			   FROM consents
 			  WHERE school_id = current_school_id() AND guardian_user_id = $1
-			  ORDER BY timestamp DESC`, identity.UserID)
+			  ORDER BY student_id, purpose, timestamp DESC`, identity.UserID)
 		if err != nil {
 			return err
 		}

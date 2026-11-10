@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 )
 
@@ -45,6 +47,10 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		RespondError(w, http.StatusBadRequest, "INVALID_REQUEST", "The request body is not valid JSON.")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		RespondError(w, http.StatusBadRequest, "INVALID_REQUEST", "The request body must contain a single JSON value.")
 		return false
 	}
 	return true

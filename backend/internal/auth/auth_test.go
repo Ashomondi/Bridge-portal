@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -99,5 +102,43 @@ func TestTokenRejectsTamperingAndExpiry(t *testing.T) {
 	}
 	if _, err := manager.Verify(expiredToken); err == nil {
 		t.Fatalf("expired token was accepted")
+	}
+}
+
+func TestTokenRejectsNonHS256Header(t *testing.T) {
+	manager := NewTokenManager("test-secret-at-least-32-bytes-long", time.Hour)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-1","exp":9999999999}`))
+	token := header + "." + payload + "." + base64.RawURLEncoding.EncodeToString([]byte("signature"))
+
+	if _, err := manager.Verify(token); err == nil {
+		t.Fatal("token with a non-HS256 header was accepted")
+	}
+}
+
+func TestClientIPOnlyTrustsForwardedHeaderWhenConfigured(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.10:4321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
+
+	untrusted := &Service{trustProxyHeaders: false}
+	if got := untrusted.clientIP(req); got != "192.0.2.10" {
+		t.Fatalf("clientIP without proxy trust = %q, want 192.0.2.10", got)
+	}
+
+	trusted := &Service{trustProxyHeaders: true}
+	if got := trusted.clientIP(req); got != "203.0.113.5" {
+		t.Fatalf("clientIP with proxy trust = %q, want 203.0.113.5", got)
+	}
+}
+
+func TestClientIPIgnoresInvalidForwardedHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.10:4321"
+	req.Header.Set("X-Forwarded-For", "not-an-ip")
+
+	service := &Service{trustProxyHeaders: true}
+	if got := service.clientIP(req); got != "192.0.2.10" {
+		t.Fatalf("clientIP = %q, want 192.0.2.10", got)
 	}
 }

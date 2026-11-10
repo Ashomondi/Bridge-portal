@@ -9,6 +9,9 @@ generating this from an OpenAPI spec instead of maintaining it by hand.
 
 - Every authenticated request carries the caller's identity (user + active
   membership) and resolves to a `school_id`.
+- When the caller belongs to more than one school, the request selects one with
+  `X-School-ID`. When the caller holds more than one role in the selected
+  school, it selects one with `X-Membership-ID`.
 - The Go backend sets `app.school_id` for the request's database transaction
   so RLS does the enforcement — see `ARCHITECTURE.md`.
 - Every endpoint declares which permission(s) it requires. A request without
