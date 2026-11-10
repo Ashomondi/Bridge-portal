@@ -98,4 +98,17 @@ BILL-01 passed with the temporary manifest: exact-money parsing/JSON, overflow, 
 
 NOTIF-04/05 verification: `DEV05_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:32768/postgres?sslmode=disable' go test -modfile=/tmp/ikonex-dev05-testing.xunwQ5/testing.mod -v -race ./internal/notifications` passed (9.682 seconds), including real PostgreSQL transaction rollback, recipient/tenant isolation, HTTP pagination, and read timestamp idempotency. `go vet` with the same manifest passed. Test databases and roles were cleaned by the harness; protected files remained unchanged.
 
-Evans must add the recorded module requirements to the protected application manifest during integration. A successful test run with a temporary manifest is not evidence that the unchanged dependency-free application manifest can resolve newly imported pgx or Asynq packages. Report the exact manifest used with each result.
+Evans must add the recorded module requirements (`github.com/jackc/pgx/v5 v5.7.2` and `github.com/hibiken/asynq v0.25.1`) to the protected application manifest during integration. A successful test run with a temporary manifest is not evidence that the unchanged dependency-free application manifest can resolve newly imported pgx or Asynq packages. Report the exact manifest used with each result.
+
+## Completed Phase Verification Summary
+
+All test suites across all packages passed with `-count=1 -race`:
+
+- `backend/internal/notifications`: PASS (4.981s) - normalization, sandbox redaction, concurrency, transaction rollback, HTTP pagination & read idempotency.
+- `backend/internal/jobs`: PASS (2.515s) - task creation/validation, retry policies, purger adapter, and Redis end-to-end delivery (`ikonex-dev05-redis`, `redis:7-alpine`, digest `sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7`, `127.0.0.1:6379`).
+- `backend/internal/whatsapp`: PASS (3.676s) - phone masking, 4-state session machine, OTP cooldown, 24h sender rate block without account lockout, 6h expiry, school isolation.
+- `backend/internal/internalapi`: PASS (3.709s) - HMAC-SHA256 UserContext, constant-time signature check, parent ownership guard, marks minimal-facts guard for WhatsApp, confirmed STK push, AI audit logging, in-app chat proxy.
+- `backend/internal/internalapi/contracts`: PASS (1.030s) - identity, response envelopes, pagination, error mapping.
+- `backend/internal/billing`: PASS (19.362s) - migration UP/DOWN/UP on PostgreSQL 16 (`ikonex-dev05-postgres`, `127.0.0.1:32768`), RLS tenant isolation, fee structure validation & loading, 20-goroutine concurrent term charging, credit carry-forward, mid-year fee changes, term start-date sync, Daraja STK push/query, C2B auto-matching, unmatched queue manual resolution.
+
+Protected files (`backend/go.mod`, `backend/go.sum`, etc.) remain 100% untouched with zero diff against `origin/main`.
