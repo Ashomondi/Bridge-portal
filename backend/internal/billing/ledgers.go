@@ -831,9 +831,3 @@ func registerLedgerRoutes(mux *http.ServeMux, service *Service, identity contrac
 		contracts.Success(w, http.StatusOK, ledger, nil)
 	})
 }
-
-type DarajaProvider interface{}
-
-type STKPollQueue interface{}
-
-func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {}
