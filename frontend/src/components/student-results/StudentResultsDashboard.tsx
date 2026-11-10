@@ -21,6 +21,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
+import type {
+  AdjustmentNotice,
+  PerformanceLevel,
+  ResultsTerm,
+  StudentResultsData,
+  SubjectResult,
+  TeacherComment,
+} from "./student-results-data";
 
 type NavItem = {
   label: string;
@@ -44,78 +52,54 @@ const BOTTOM_NAV = [
   { label: "Assistant", icon: MessageCircle, href: "#" },
 ];
 
-const STUDENTS = [
-  { id: "student-1", label: "[Student Name]", initials: "[AB]" },
-  { id: "student-2", label: "[Student]", initials: "[CD]" },
-  { id: "student-3", label: "[Student]", initials: "[EF]" },
-];
+const LEVEL_TONES: Record<PerformanceLevel["tone"], string> = {
+  slate: "bg-slate-100 text-slate-600",
+  lavender: "bg-[#F0EBF9] text-[#6D4FA3]",
+  purple: "bg-[#D8CBF0] text-[#4F3585]",
+  indigo: "bg-[#4E3A8A] text-white",
+};
 
-const SUBJECT_ROWS = [
-  {
-    id: "subject-row-1",
-    subject: "[Subject Name]",
-    level: "[Performance Level]",
-    corrected: false,
-  },
-  {
-    id: "subject-row-2",
-    subject: "[Subject Name]",
-    level: "[Performance Level]",
-    corrected: true,
-  },
-  {
-    id: "subject-row-3",
-    subject: "[Subject Name]",
-    level: "[Performance Level]",
-    corrected: false,
-  },
-  {
-    id: "subject-row-4",
-    subject: "[Subject Name]",
-    level: "[Performance Level]",
-    corrected: false,
-  },
-  {
-    id: "subject-row-5",
-    subject: "[Subject Name]",
-    level: "[Performance Level]",
-    corrected: false,
-  },
-];
+export default function StudentResultsDashboard({
+  data,
+}: {
+  data: StudentResultsData | null;
+}) {
+  const students = data?.students ?? [];
+  const terms = data?.terms ?? [];
+  const results = data?.results ?? [];
+  const levels = data?.levels ?? [];
+  const adjustment = data?.adjustment ?? null;
+  const teacherComment = data?.teacherComment ?? null;
+  const portalName = data?.portal?.name?.trim() || "Parent portal";
+  const session = data?.session ?? null;
+  const guardianName = session?.fullName?.trim() || "Guardian";
+  const relationship = session?.relationship?.trim() || "Parent";
+  const contact = session?.contact?.trim() || "No contact on file";
+  const guardianInitials =
+    session?.initials?.trim() || initialsFromName(guardianName);
 
-const LEVEL_CARDS = [
-  {
-    id: "level-1",
-    level: "Level 1",
-    title: "Below expectation",
-    description: "[Description]",
-    className: "bg-slate-100 text-slate-600",
-  },
-  {
-    id: "level-2",
-    level: "Level 2",
-    title: "Approaching",
-    description: "[Description]",
-    className: "bg-[#F0EBF9] text-[#6D4FA3]",
-  },
-  {
-    id: "level-3",
-    level: "Level 3",
-    title: "Meeting",
-    description: "[Description]",
-    className: "bg-[#D8CBF0] text-[#4F3585]",
-  },
-  {
-    id: "level-4",
-    level: "Level 4",
-    title: "Exceeding",
-    description: "[Description]",
-    className: "bg-[#4E3A8A] text-white",
-  },
-];
+  const [selectedStudentId, setSelectedStudentId] = useState(
+    data?.selectedStudentId ?? students[0]?.id ?? "",
+  );
+  const [selectedTermId, setSelectedTermId] = useState(
+    data?.selectedTermId ??
+      terms.find((term) => term.released)?.id ??
+      terms[0]?.id ??
+      "",
+  );
 
-export default function StudentResultsDashboard() {
-  const [selectedStudent, setSelectedStudent] = useState(STUDENTS[0].id);
+  const selectedTerm =
+    terms.find((term) => term.id === selectedTermId) ??
+    terms.find((term) => term.released) ??
+    terms[0] ??
+    null;
+  const releaseInfo = selectedTerm?.released
+    ? selectedTerm.releaseDate
+      ? `Released ${selectedTerm.releaseDate} · ${results.length} learning areas`
+      : `Released · ${results.length} learning areas`
+    : results.length > 0
+      ? `${results.length} learning areas`
+      : "No release information";
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -127,13 +111,26 @@ export default function StudentResultsDashboard() {
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[260px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          guardianName={guardianName}
+          relationship={relationship}
+          contact={contact}
+          guardianInitials={guardianInitials}
+        />
       </aside>
 
-      <MobileAppBar />
+      <MobileAppBar
+        portalName={portalName}
+        guardianInitials={guardianInitials}
+      />
 
       <div className="lg:pl-[260px]">
-        <DesktopHeader />
+        <DesktopHeader
+          portalName={portalName}
+          guardianName={guardianName}
+          relationship={relationship}
+          guardianInitials={guardianInitials}
+        />
 
         <main
           id="results-main"
@@ -141,20 +138,28 @@ export default function StudentResultsDashboard() {
           className="mx-auto w-full max-w-[1440px] px-4 pb-28 pt-20 sm:px-6 lg:px-8 lg:pb-10 lg:pt-7"
         >
           <StudentFilter
-            selectedStudent={selectedStudent}
-            onSelect={setSelectedStudent}
+            students={students}
+            selectedStudentId={selectedStudentId}
+            onSelect={setSelectedStudentId}
           />
-          <TermSelector />
+          <TermSelector
+            terms={terms}
+            selectedTermId={selectedTerm?.id ?? ""}
+            onSelect={setSelectedTermId}
+          />
 
           <div className="mt-4 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]">
             <div className="min-w-0 space-y-4">
-              <SubjectPerformanceCard />
-              <AdjustmentNotice />
-              <TeacherComment />
+              <SubjectPerformanceCard
+                results={results}
+                releaseInfo={releaseInfo}
+              />
+              <AdjustmentNoticeCard adjustment={adjustment} />
+              <TeacherCommentCard comment={teacherComment} />
             </div>
 
             <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
-              <LevelsCard />
+              <LevelsCard levels={levels} />
             </div>
           </div>
         </main>
@@ -165,7 +170,17 @@ export default function StudentResultsDashboard() {
   );
 }
 
-function SidebarContent() {
+function SidebarContent({
+  guardianName,
+  relationship,
+  contact,
+  guardianInitials,
+}: {
+  guardianName: string;
+  relationship: string;
+  contact: string;
+  guardianInitials: string;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -224,17 +239,17 @@ function SidebarContent() {
         <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3">
           <div className="flex items-center gap-2.5">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-              [AB]
+              {guardianInitials}
             </span>
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-semibold text-slate-800">
-                [Guardian Name]
+                {guardianName}
               </p>
               <p className="truncate text-[10px] text-slate-400">
-                [Relationship]
+                {relationship}
               </p>
               <p className="truncate text-[9px] font-medium text-brand-600">
-                [Email / Phone]
+                {contact}
               </p>
             </div>
           </div>
@@ -251,13 +266,19 @@ function SidebarContent() {
   );
 }
 
-function MobileAppBar() {
+function MobileAppBar({
+  portalName,
+  guardianInitials,
+}: {
+  portalName: string;
+  guardianInitials: string;
+}) {
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
         <div className="min-w-0 flex-1">
           <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-            [Organization Name]
+            {portalName}
           </p>
           <p className="truncate text-lg font-bold tracking-tight text-slate-900">
             Results
@@ -278,7 +299,7 @@ function MobileAppBar() {
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {guardianInitials}
           </button>
         </div>
       </div>
@@ -286,13 +307,23 @@ function MobileAppBar() {
   );
 }
 
-function DesktopHeader() {
+function DesktopHeader({
+  portalName,
+  guardianName,
+  relationship,
+  guardianInitials,
+}: {
+  portalName: string;
+  guardianName: string;
+  relationship: string;
+  guardianInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
           <span className="max-w-[220px] truncate text-slate-700">
-            [Portal Name]
+            {portalName}
           </span>
           <ChevronRight className="h-3.5 w-3.5" />
           <span>Results</span>
@@ -313,13 +344,13 @@ function DesktopHeader() {
             className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
-              [AB]
+              {guardianInitials}
             </span>
             <div className="min-w-0 text-left">
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
-                [Guardian Name]
+                {guardianName}
               </p>
-              <p className="text-[10px] text-slate-400">[Relationship]</p>
+              <p className="text-[10px] text-slate-400">{relationship}</p>
             </div>
             <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
           </button>
@@ -330,10 +361,12 @@ function DesktopHeader() {
 }
 
 function StudentFilter({
-  selectedStudent,
+  students,
+  selectedStudentId,
   onSelect,
 }: {
-  selectedStudent: string;
+  students: StudentResultsData["students"];
+  selectedStudentId: string;
   onSelect: (id: string) => void;
 }) {
   return (
@@ -342,79 +375,111 @@ function StudentFilter({
       role="tablist"
       aria-label="Student records"
     >
-      <div className="flex min-w-max gap-2">
-        {STUDENTS.map((student) => {
-          const active = student.id === selectedStudent;
+      {students.length > 0 ? (
+        <div className="flex min-w-max gap-2">
+          {students.map((student) => {
+            const active = student.id === selectedStudentId;
 
-          return (
-            <button
-              key={student.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => onSelect(student.id)}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-full px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                active
-                  ? "bg-brand-500 text-white shadow-md shadow-brand-500/20"
-                  : "border border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
-              )}
-            >
-              <span
+            return (
+              <button
+                key={student.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onSelect(student.id)}
                 className={cn(
-                  "grid h-6 w-6 place-items-center rounded-full text-[8px] font-bold",
+                  "inline-flex items-center gap-2 rounded-full px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
                   active
-                    ? "bg-white/20 text-white"
-                    : "bg-slate-100 text-slate-500",
+                    ? "bg-brand-500 text-white shadow-md shadow-brand-500/20"
+                    : "border border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
                 )}
               >
-                {student.initials}
-              </span>
-              {student.label}
-            </button>
-          );
-        })}
-      </div>
+                <span
+                  className={cn(
+                    "grid h-6 w-6 place-items-center rounded-full text-[8px] font-bold",
+                    active
+                      ? "bg-white/20 text-white"
+                      : "bg-slate-100 text-slate-500",
+                  )}
+                >
+                  {student.initials}
+                </span>
+                {student.name}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <span className="inline-flex items-center rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-500">
+          No student records available
+        </span>
+      )}
     </div>
   );
 }
 
-function TermSelector() {
+function TermSelector({
+  terms,
+  selectedTermId,
+  onSelect,
+}: {
+  terms: ResultsTerm[];
+  selectedTermId: string;
+  onSelect: (id: string) => void;
+}) {
   return (
     <div className="mt-3 rounded-full bg-[#E8F5F3] p-1">
-      <div className="grid grid-cols-3 gap-1" role="tablist" aria-label="Terms">
-        <button
-          type="button"
-          role="tab"
-          aria-selected="true"
-          className="rounded-full bg-white px-2 py-2 text-[10px] font-semibold text-brand-700 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-        >
-          Term 1
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected="false"
-          disabled
-          className="rounded-full px-2 py-2 text-[10px] font-medium text-slate-400 disabled:cursor-not-allowed"
-        >
-          Term 2 · Not released
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected="false"
-          disabled
-          className="rounded-full px-2 py-2 text-[10px] font-medium text-slate-400 disabled:cursor-not-allowed"
-        >
-          Term 3 · Not released
-        </button>
+      <div
+        className="grid gap-1"
+        style={{
+          gridTemplateColumns: `repeat(${Math.max(terms.length, 1)}, minmax(0, 1fr))`,
+        }}
+        role="tablist"
+        aria-label="Terms"
+      >
+        {terms.length > 0 ? (
+          terms.map((term) => {
+            const active = term.released && term.id === selectedTermId;
+
+            return (
+              <button
+                key={term.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                disabled={!term.released}
+                onClick={() => onSelect(term.id)}
+                className={cn(
+                  "rounded-full px-2 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                  active
+                    ? "bg-white text-brand-700 shadow-sm"
+                    : "text-slate-400",
+                  !term.released &&
+                    "cursor-not-allowed font-medium text-slate-400 opacity-70",
+                )}
+              >
+                {term.label}
+                {!term.released ? " · Not released" : ""}
+              </button>
+            );
+          })
+        ) : (
+          <span className="col-span-full rounded-full px-2 py-2 text-center text-[10px] font-medium text-slate-400">
+            No terms available
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-function SubjectPerformanceCard() {
+function SubjectPerformanceCard({
+  results,
+  releaseInfo,
+}: {
+  results: SubjectResult[];
+  releaseInfo: string;
+}) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-start justify-between gap-3">
@@ -422,46 +487,57 @@ function SubjectPerformanceCard() {
           <h2 className="text-sm font-bold tracking-tight text-slate-900">
             Subject performance levels
           </h2>
-          <p className="mt-1 text-[10px] text-slate-400">
-            Released [Date] · [X] learning areas
-          </p>
+          <p className="mt-1 text-[10px] text-slate-400">{releaseInfo}</p>
         </div>
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-600">
           <BarChart3 className="h-4 w-4" />
         </span>
       </div>
 
-      <div className="mt-3">
-        {SUBJECT_ROWS.map((row) => (
-          <div
-            key={row.id}
-            className="flex items-center justify-between gap-3 border-b border-slate-100 py-3 last:border-0"
-          >
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <p className="truncate text-[11px] font-bold text-slate-800">
-                  {row.subject}
+      {results.length > 0 ? (
+        <div className="mt-3">
+          {results.map((row) => (
+            <div
+              key={row.id}
+              className="flex items-center justify-between gap-3 border-b border-slate-100 py-3 last:border-0"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <p className="truncate text-[11px] font-bold text-slate-800">
+                    {row.subject}
+                  </p>
+                  {row.corrected && (
+                    <span className="shrink-0 rounded-full bg-[#FEF3D6] px-1.5 py-0.5 text-[8px] font-semibold text-[#8A6A25] ring-1 ring-[#EBD7A5]">
+                      Corrected
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 flex items-center gap-1 text-[9px] font-medium text-slate-400">
+                  <TrendingUp className="h-3 w-3 text-brand-500" />
+                  {row.performanceLevel}
                 </p>
-                {row.corrected && (
-                  <span className="shrink-0 rounded-full bg-[#FEF3D6] px-1.5 py-0.5 text-[8px] font-semibold text-[#8A6A25] ring-1 ring-[#EBD7A5]">
-                    Corrected
-                  </span>
-                )}
               </div>
-              <p className="mt-0.5 flex items-center gap-1 text-[9px] font-medium text-slate-400">
-                <TrendingUp className="h-3 w-3 text-brand-500" />
-                {row.level}
-              </p>
-            </div>
 
-            <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-slate-50 p-0.5 ring-1 ring-slate-200/80">
-              <TermPill label="T1" active />
-              <TermPill label="T2" />
-              <TermPill label="T3" />
+              <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-slate-50 p-0.5 ring-1 ring-slate-200/80">
+                {(["T1", "T2", "T3"] as const).map((term) => (
+                  <TermPill
+                    key={term}
+                    label={term}
+                    active={row.activeTerms.includes(term)}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={BarChart3}
+          title="No subject results available"
+          body="Released subject performance levels will appear here when the school publishes them."
+          className="mt-3"
+        />
+      )}
 
       <div className="mt-3 rounded-xl bg-[#E2F0ED] px-3 py-2.5">
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-[9px] font-medium text-brand-700">
@@ -487,7 +563,11 @@ function TermPill({ label, active = false }: { label: string; active?: boolean }
   );
 }
 
-function AdjustmentNotice() {
+function AdjustmentNoticeCard({
+  adjustment,
+}: {
+  adjustment: AdjustmentNotice | null;
+}) {
   return (
     <section className="rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
       <div className="flex gap-3">
@@ -495,32 +575,49 @@ function AdjustmentNotice() {
           <FileText className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-bold text-slate-800">
-            Grade adjustment recorded
-          </p>
-          <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-            [Adjustment note description] A correction was applied to
-            [Subject Name].
-          </p>
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <button
-              type="button"
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D7C8F2] bg-white px-2.5 text-[9px] font-semibold text-[#6D4FA3] transition hover:bg-[#F7F3FD] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            >
-              <FileText className="h-3 w-3" />
-              Read note
-            </button>
-            <span className="text-[9px] font-medium text-slate-400">
-              [Timestamp]
-            </span>
-          </div>
+          {adjustment ? (
+            <>
+              <p className="text-xs font-bold text-slate-800">
+                {adjustment.title}
+              </p>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                {adjustment.description}
+              </p>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                {adjustment.noteHref ? (
+                  <a
+                    href={adjustment.noteHref}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D7C8F2] bg-white px-2.5 text-[9px] font-semibold text-[#6D4FA3] transition hover:bg-[#F7F3FD] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+                  >
+                    <FileText className="h-3 w-3" />
+                    Read note
+                  </a>
+                ) : (
+                  <span />
+                )}
+                <span className="text-[9px] font-medium text-slate-400">
+                  {adjustment.timestamp}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-xl border border-dashed border-[#D7C8F2] bg-white/60 px-4 py-5 text-center">
+              <p className="text-[11px] font-semibold text-slate-700">
+                No grade adjustments recorded
+              </p>
+              <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+                Correction notes will appear here when the school records an
+                adjustment.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-function TeacherComment() {
+function TeacherCommentCard({ comment }: { comment: TeacherComment | null }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-center justify-between gap-3">
@@ -532,32 +629,45 @@ function TeacherComment() {
         </span>
       </div>
 
-      <div className="mt-3 rounded-xl bg-[#E8F5F3] p-4">
-        <p className="text-[11px] italic leading-relaxed text-slate-600">
-          “[Comment]”
-        </p>
-      </div>
+      {comment ? (
+        <>
+          <div className="mt-3 rounded-xl bg-[#E8F5F3] p-4">
+            <p className="text-[11px] italic leading-relaxed text-slate-600">
+              “{comment.comment}”
+            </p>
+          </div>
 
-      <div className="mt-4 flex items-center gap-2.5 border-t border-slate-100 pt-3">
-        <span className="grid h-9 w-9 place-items-center rounded-full bg-slate-900 text-[9px] font-bold text-white">
-          [AB]
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[11px] font-bold text-slate-800">
-            [Teacher Name]
-          </p>
-          <p className="text-[9px] text-slate-400">[Role]</p>
-        </div>
-        <span className="inline-flex items-center gap-1 rounded-full bg-[#E2F0ED] px-2 py-0.5 text-[8px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          <ShieldCheck className="h-3 w-3" />
-          Verified
-        </span>
-      </div>
+          <div className="mt-4 flex items-center gap-2.5 border-t border-slate-100 pt-3">
+            <span className="grid h-9 w-9 place-items-center rounded-full bg-slate-900 text-[9px] font-bold text-white">
+              {comment.initials}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[11px] font-bold text-slate-800">
+                {comment.teacherName}
+              </p>
+              <p className="text-[9px] text-slate-400">{comment.role}</p>
+            </div>
+            {comment.verified && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-[#E2F0ED] px-2 py-0.5 text-[8px] font-semibold text-brand-700 ring-1 ring-brand-100">
+                <ShieldCheck className="h-3 w-3" />
+                Verified
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <EmptyState
+          icon={Quote}
+          title="No class teacher comment available"
+          body="The class teacher's comment will appear here after results are released."
+          className="mt-3"
+        />
+      )}
     </section>
   );
 }
 
-function LevelsCard() {
+function LevelsCard({ levels }: { levels: PerformanceLevel[] }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-center justify-between gap-3">
@@ -569,28 +679,76 @@ function LevelsCard() {
         </span>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        {LEVEL_CARDS.map((level) => (
-          <div key={level.id} className={cn("rounded-xl p-3", level.className)}>
-            <p className="text-[8px] font-semibold uppercase tracking-wide opacity-60">
-              {level.level}
-            </p>
-            <p className="mt-1 text-[11px] font-bold">{level.title}</p>
-            <p className="mt-1 text-[9px] leading-relaxed opacity-70">
-              {level.description}
-            </p>
-          </div>
-        ))}
-      </div>
+      {levels.length > 0 ? (
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {levels.map((level) => (
+            <div
+              key={level.id}
+              className={cn("rounded-xl p-3", LEVEL_TONES[level.tone])}
+            >
+              <p className="text-[8px] font-semibold uppercase tracking-wide opacity-60">
+                {level.level}
+              </p>
+              <p className="mt-1 text-[11px] font-bold">{level.title}</p>
+              <p className="mt-1 text-[9px] leading-relaxed opacity-70">
+                {level.description}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={GraduationCap}
+          title="Level guide not available"
+          body="Performance level definitions will appear here when the school publishes them."
+          className="mt-3"
+        />
+      )}
 
       <div className="mt-3 flex gap-2 rounded-xl bg-[#E2F0ED] p-3">
         <Info className="h-3.5 w-3.5 shrink-0 text-brand-600" />
         <p className="text-[9px] leading-relaxed text-brand-800">
-          [Evaluation philosophy note] Levels describe achievement against
-          learning outcomes, not comparison with other learners.
+          Levels describe achievement against learning outcomes, not comparison
+          with other learners.
         </p>
       </div>
     </section>
+  );
+}
+
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+  className,
+  tone = "slate",
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  className?: string;
+  tone?: "slate" | "lavender";
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-dashed px-4 py-6 text-center",
+        tone === "slate"
+          ? "border-slate-200 bg-slate-50/60"
+          : "border-[#D7C8F2] bg-white/60",
+        className,
+      )}
+    >
+      <span className="mx-auto grid h-9 w-9 place-items-center rounded-xl bg-white text-slate-400 shadow-sm">
+        <Icon className="h-4 w-4" />
+      </span>
+      <p className="mt-2.5 text-[11px] font-semibold text-slate-700">
+        {title}
+      </p>
+      <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+        {body}
+      </p>
+    </div>
   );
 }
 
@@ -627,4 +785,14 @@ function BottomNav() {
       </div>
     </nav>
   );
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "G";
 }
