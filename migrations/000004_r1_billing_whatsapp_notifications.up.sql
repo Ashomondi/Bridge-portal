@@ -5,10 +5,13 @@ ALTER TABLE academic_years ADD CONSTRAINT r1_c_year_school_id UNIQUE (school_id,
 ALTER TABLE terms ADD CONSTRAINT r1_c_term_school_year_id UNIQUE (school_id, academic_year_id, id);
 ALTER TABLE terms ADD CONSTRAINT r1_c_term_school_id UNIQUE (school_id, id);
 ALTER TABLE students ADD CONSTRAINT r1_c_student_school_id UNIQUE (school_id, id);
-ALTER TABLE fee_structures ADD CONSTRAINT r1_c_structure_school_id UNIQUE (school_id, id);
+ALTER TABLE fee_structures DROP CONSTRAINT fee_structures_school_id_academic_year_id_grade_level_id_te_key,
+    ADD COLUMN boarding_status VARCHAR(20) NOT NULL DEFAULT 'all'
+        CHECK (boarding_status IN ('all', 'boarder', 'day')),
+    ADD CONSTRAINT r1_c_structure_school_id UNIQUE (school_id, id),
+    ADD CONSTRAINT r1_c_structure_variant UNIQUE (school_id, academic_year_id, grade_level_id, term_id, boarding_status);
+CREATE INDEX fee_structure_items_structure_idx ON fee_structure_items(fee_structure_id, lower(title), id);
 ALTER TABLE payments ADD CONSTRAINT r1_c_payment_school_id UNIQUE (school_id, id);
-ALTER TABLE fee_structures ADD COLUMN boarding_status VARCHAR(20) NOT NULL DEFAULT 'all'
-    CHECK (boarding_status IN ('all', 'boarder', 'day'));
 ALTER TABLE fee_ledgers ADD COLUMN credit_balance NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     ADD COLUMN credit_applied NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     ADD COLUMN credit_transferred NUMERIC(12,2) NOT NULL DEFAULT 0.00,
