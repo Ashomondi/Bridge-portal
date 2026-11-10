@@ -26,11 +26,18 @@ type TermDateFeeSyncer interface {
 	OnTermStartDateChanged(ctx context.Context, tx pgx.Tx, schoolID, termID string, newStartDate time.Time, actorUserID, note string) error
 }
 
+// InAppNotifier is the consumer-oriented notification interface used by billing
+// and academics within an open tenant transaction.
+type InAppNotifier = notifications.InAppNotifier
+
+// CreateNotification is the notification payload alias for InAppNotifier.
+type CreateNotification = notifications.CreateNotification
+
 // Service handles fee structures, student ledgers, M-Pesa STK push payments, and reconciliation.
 type Service struct {
 	DB        contracts.TenantDB
 	Audit     contracts.AuditLogger
-	Notifier  notifications.InAppNotifier
+	Notifier  InAppNotifier
 	Daraja    DarajaProvider
 	PollQueue STKPollQueue
 	Now       func() time.Time
@@ -90,4 +97,5 @@ var (
 	_ StudentChargeHook  = (*Service)(nil)
 	_ StudentBillingHook = (*Service)(nil)
 	_ TermDateFeeSyncer  = (*Service)(nil)
+	_ InAppNotifier      = (*notifications.Service)(nil)
 )

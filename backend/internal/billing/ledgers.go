@@ -573,6 +573,265 @@ func resolveActiveLedgerTerm(ctx context.Context, tx pgx.Tx, schoolID, studentID
 	return yearID, termID, &s, nil
 }
 
+func (s *Service) GetStudentFeeBalance(ctx context.Context, p contracts.Principal, studentID string) (StudentFeeBalance, error) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+		return StudentFeeBalance{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
+	}
+	if !contracts.ValidID(studentID) {
+		return StudentFeeBalance{}, contracts.Fail(http.StatusBadRequest, "INVALID_STUDENT_ID", "A valid student ID is required.")
+	}
+	if s == nil || s.DB == nil {
+		return StudentFeeBalance{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	var out StudentFeeBalance
+	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+		var err error
+		out, err = s.GetStudentFeeBalanceTx(ctx, tx, p, studentID)
+		return err
+	})
+	return out, err
+}
+
+func (s *Service) GetStudentLedger(ctx context.Context, p contracts.Principal, studentID string) (StudentLedger, error) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+		return StudentLedger{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
+	}
+	if !contracts.ValidID(studentID) {
+		return StudentLedger{}, contracts.Fail(http.StatusBadRequest, "INVALID_STUDENT_ID", "A valid student ID is required.")
+	}
+	if s == nil || s.DB == nil {
+		return StudentLedger{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	var out StudentLedger
+	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+		balance, err := s.GetStudentFeeBalanceTx(ctx, tx, p, studentID)
+		if err != nil {
+			return err
+		}
+		entries, err := loadStudentLedgerEntries(ctx, tx, p.SchoolID, studentID)
+		if err != nil {
+			return err
+		}
+		out = StudentLedger{
+			StudentFeeBalance: balance,
+			Entries:           entries,
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (s *Service) GetStudentFeeBalanceTx(ctx context.Context, tx pgx.Tx, p contracts.Principal, studentID string) (StudentFeeBalance, error) {
+	var admissionNumber, fullName string
+	err := tx.QueryRow(ctx, `
+		SELECT admission_number, full_name
+		FROM students
+		WHERE school_id = $1 AND id = $2`,
+		p.SchoolID, studentID,
+	).Scan(&admissionNumber, &fullName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return StudentFeeBalance{}, contracts.Fail(http.StatusNotFound, "STUDENT_NOT_FOUND", "Student not found.")
+	}
+	if err != nil {
+		return StudentFeeBalance{}, err
+	}
+
+	if !isIkonexTeamRole(p.Role) {
+		var linked bool
+		err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM student_guardians
+				WHERE school_id = $1 AND student_id = $2 AND user_id = $3
+			)`,
+			p.SchoolID, studentID, p.UserID,
+		).Scan(&linked)
+		if err != nil {
+			return StudentFeeBalance{}, err
+		}
+		if !linked {
+			return StudentFeeBalance{}, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "You are not authorized to view this student's financial records.")
+		}
+	}
+
+	opening, billed, paid, current, credit, err := computeStudentTotals(ctx, tx, p.SchoolID, studentID)
+	if err != nil {
+		return StudentFeeBalance{}, err
+	}
+
+	var dueDate *time.Time
+	_ = tx.QueryRow(ctx, `
+		SELECT fl.due_date
+		FROM fee_ledgers fl
+		JOIN terms t ON t.school_id = fl.school_id AND t.id = fl.term_id
+		WHERE fl.school_id = $1 AND fl.student_id = $2 AND fl.due_date IS NOT NULL
+		ORDER BY t.start_date DESC, t.term_number DESC, fl.updated_at DESC
+		LIMIT 1`,
+		p.SchoolID, studentID,
+	).Scan(&dueDate)
+	var dueDateStr *string
+	if dueDate != nil {
+		formatted := dueDate.Format("2006-01-02")
+		dueDateStr = &formatted
+	}
+
+	items, err := loadStudentFeeItems(ctx, tx, p.SchoolID, studentID)
+	if err != nil {
+		return StudentFeeBalance{}, err
+	}
+	notes, err := loadStudentFeeChangeNotes(ctx, tx, p.SchoolID, studentID)
+	if err != nil {
+		return StudentFeeBalance{}, err
+	}
+
+	return StudentFeeBalance{
+		StudentID:       studentID,
+		AdmissionNumber: admissionNumber,
+		StudentName:     fullName,
+		OpeningBalance:  opening,
+		BilledAmount:    billed,
+		PaidAmount:      paid,
+		CurrentBalance:  current,
+		CreditBalance:   credit,
+		DueDate:         dueDateStr,
+		Items:           items,
+		FeeChangeNotes:  notes,
+	}, nil
+}
+
+func loadStudentFeeItems(ctx context.Context, tx pgx.Tx, schoolID, studentID string) ([]FeeStructureItem, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT i.id, i.title, i.amount, i.is_compulsory
+		FROM fee_charges fc
+		JOIN fee_structure_items i ON i.fee_structure_id = fc.fee_structure_id
+		WHERE fc.school_id = $1 AND fc.student_id = $2
+		ORDER BY fc.due_date DESC, lower(i.title) ASC, i.title ASC, i.id ASC`,
+		schoolID, studentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FeeStructureItem{}
+	for rows.Next() {
+		var it FeeStructureItem
+		if err := rows.Scan(&it.ID, &it.Title, &it.Amount, &it.IsCompulsory); err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	return items, rows.Err()
+}
+
+func loadStudentFeeChangeNotes(ctx context.Context, tx pgx.Tx, schoolID, studentID string) ([]FeeChangeNoteView, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT n.id, n.term_id, n.fee_period_id, n.change_type, n.amount_delta,
+		       n.old_due_date, n.new_due_date, n.note, n.affected_students_count, n.created_at
+		FROM fee_change_notes n
+		WHERE n.school_id = $1
+		  AND (
+			EXISTS (
+				SELECT 1 FROM fee_change_note_students ns
+				WHERE ns.school_id = n.school_id AND ns.note_id = n.id AND ns.student_id = $2
+			)
+			OR (
+				NOT EXISTS (
+					SELECT 1 FROM fee_change_note_students ns2
+					WHERE ns2.school_id = n.school_id AND ns2.note_id = n.id
+				)
+				AND EXISTS (
+					SELECT 1 FROM fee_charges fc
+					WHERE fc.school_id = n.school_id AND fc.student_id = $2
+					  AND (fc.fee_period_id = n.fee_period_id OR EXISTS (
+						SELECT 1 FROM fee_periods fp
+						WHERE fp.school_id = n.school_id AND fp.id = fc.fee_period_id AND fp.term_id = n.term_id
+					  ))
+				)
+			)
+		  )
+		ORDER BY n.created_at DESC, n.id DESC`,
+		schoolID, studentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	notes := []FeeChangeNoteView{}
+	for rows.Next() {
+		var n FeeChangeNoteView
+		var oldDate, newDate *time.Time
+		if err := rows.Scan(
+			&n.ID, &n.TermID, &n.FeePeriodID, &n.ChangeType, &n.AmountDelta,
+			&oldDate, &newDate, &n.Note, &n.AffectedStudentsCount, &n.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if oldDate != nil {
+			s := oldDate.Format("2006-01-02")
+			n.OldDueDate = &s
+		}
+		if newDate != nil {
+			s := newDate.Format("2006-01-02")
+			n.NewDueDate = &s
+		}
+		n.CreatedAt = n.CreatedAt.UTC()
+		notes = append(notes, n)
+	}
+	return notes, rows.Err()
+}
+
+func loadStudentLedgerEntries(ctx context.Context, tx pgx.Tx, schoolID, studentID string) ([]LedgerEntry, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, term_id, entry_type, amount, reference, COALESCE(description, ''), created_at
+		FROM ledger_entries
+		WHERE school_id = $1 AND student_id = $2
+		ORDER BY created_at ASC, id ASC`,
+		schoolID, studentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := []LedgerEntry{}
+	for rows.Next() {
+		var e LedgerEntry
+		if err := rows.Scan(&e.ID, &e.TermID, &e.EntryType, &e.Amount, &e.Reference, &e.Description, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		e.CreatedAt = e.CreatedAt.UTC()
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func registerLedgerRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {
+	mux.HandleFunc("GET /api/v1/students/{id}/fee-balance", func(w http.ResponseWriter, r *http.Request) {
+		p, err := contracts.RequireIdentity(r, identity)
+		if err != nil {
+			contracts.WriteError(w, err)
+			return
+		}
+		balance, err := service.GetStudentFeeBalance(r.Context(), p, r.PathValue("id"))
+		if err != nil {
+			contracts.WriteError(w, err)
+			return
+		}
+		contracts.Success(w, http.StatusOK, balance, nil)
+	})
+	mux.HandleFunc("GET /api/v1/students/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
+		p, err := contracts.RequireIdentity(r, identity)
+		if err != nil {
+			contracts.WriteError(w, err)
+			return
+		}
+		ledger, err := service.GetStudentLedger(r.Context(), p, r.PathValue("id"))
+		if err != nil {
+			contracts.WriteError(w, err)
+			return
+		}
+		contracts.Success(w, http.StatusOK, ledger, nil)
+	})
+}
+
 type DarajaProvider interface{}
 
 type STKPollQueue interface{}
@@ -581,6 +840,5 @@ func (s *Service) OnTermStartDateChanged(ctx context.Context, tx pgx.Tx, schoolI
 	return nil
 }
 
-func registerLedgerRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity)    {}
 func registerFeeChangeRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {}
 func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity)     {}
