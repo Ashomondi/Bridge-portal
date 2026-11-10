@@ -50,3 +50,34 @@ export function formatAmount(
     return amount.toLocaleString("en-GB");
   }
 }
+
+/**
+ * Structural fallback options so the checkout layout remains visible before
+ * real fee options are loaded. These are placeholders, not learner data.
+ */
+export const PLACEHOLDER_PAYMENT_OPTIONS: PaymentOption[] = [
+  {
+    id: "placeholder-full",
+    label: "[Option]",
+    amount: null,
+    currency: "KES",
+    recommended: false,
+    custom: false,
+  },
+  {
+    id: "placeholder-recommended",
+    label: "[Option]",
+    amount: null,
+    currency: "KES",
+    recommended: true,
+    custom: false,
+  },
+  {
+    id: "placeholder-custom",
+    label: "[Custom Amount]",
+    amount: null,
+    currency: "KES",
+    recommended: false,
+    custom: true,
+  },
+];

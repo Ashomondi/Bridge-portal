@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import {
+  PLACEHOLDER_PAYMENT_OPTIONS,
   formatAmount,
   type PaymentCheckoutData,
   type PaymentOption,
@@ -49,7 +50,11 @@ export default function PaymentCheckoutDashboard({
 }: {
   data: PaymentCheckoutData | null;
 }) {
-  const options = data?.options ?? [];
+  const options =
+    data?.options && data.options.length > 0
+      ? data.options
+      : PLACEHOLDER_PAYMENT_OPTIONS;
+  const hasLiveOptions = Boolean(data?.options && data.options.length > 0);
   const session = data?.session ?? null;
   const guardianName = session?.fullName?.trim() || "Guardian";
   const relationship = session?.relationship?.trim() || "Parent";
@@ -64,11 +69,11 @@ export default function PaymentCheckoutDashboard({
       "",
   );
   const [customAmount, setCustomAmount] = useState("");
-  const selectedOption = options.find(
-    (option) => option.id === selectedOptionId,
-  );
+  const selectedOption =
+    options.find((option) => option.id === selectedOptionId) ?? options[0];
   const canSubmit = Boolean(
-    selectedOption &&
+    hasLiveOptions &&
+      selectedOption &&
       phone?.verified &&
       (!selectedOption.custom || customAmount.trim().length > 0),
   );
@@ -319,9 +324,8 @@ function StudentBanner({
         <GraduationCap className="h-3.5 w-3.5" />
       </span>
       <p className="min-w-0 truncate text-[10px] font-semibold text-[#6D4FA3]">
-        {student
-          ? `Billing to ${student.name} · ${student.admissionNumber}`
-          : "No student account selected"}
+        Billing to {student?.name || "[Student Name]"} ·{" "}
+        {student?.admissionNumber || "[Admission #]"}
       </p>
     </div>
   );
@@ -458,7 +462,9 @@ function PaymentOptionRow({
           <Pencil className="h-3.5 w-3.5 text-slate-400" />
         ) : (
           <span className="text-[11px] font-bold tabular-nums text-slate-800">
-            {formatAmount(option.amount, option.currency)}
+            {option.amount === null
+              ? "[Amount]"
+              : formatAmount(option.amount, option.currency)}
           </span>
         )}
       </label>
@@ -498,7 +504,7 @@ function PhoneCard({ phone }: { phone: PaymentPhone | null }) {
           value={phone?.number ?? ""}
           readOnly
           disabled={!phone}
-          placeholder="No verified number"
+          placeholder="[Phone Number]"
           className="h-9 min-w-0 flex-1 bg-transparent px-2.5 text-xs font-semibold text-slate-700 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed"
         />
       </label>
