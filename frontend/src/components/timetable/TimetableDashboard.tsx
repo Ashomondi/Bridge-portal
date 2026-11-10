@@ -9,15 +9,7 @@ import {
   ChevronRight,
   ChevronsUpDown,
   ClipboardCheck,
-  Coffee,📍 Zone01 Kisumu
-
-📅 [Date and time]
-
-🎤 [Speaker/facilitator, if applicable]
-
-[Optional personal line: e.g. “Working across the full stack has taught me that the hardest bugs are rarely in the code, they’re in how the pieces fit together.”]
-
-Planning to join? Comment below or tag someone who’d benefit. 👇
+  Coffee,
   DoorOpen,
   GraduationCap,
   HelpCircle,
