@@ -47,8 +47,9 @@ export default function LoginPage() {
 
       setRateLimitActive(true);
       router.push(`/verify?phone=${encodeURIComponent(normalizedPhone)}`);
-    } catch (err: any) {
-      setError(err.message || 'An error occurred. Please check your connection.');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred. Please check your connection.';
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -79,7 +80,7 @@ export default function LoginPage() {
           <div className="space-y-1">
             <h2 className="text-xl font-bold text-slate-900">Sign in</h2>
             <p className="text-slate-600 text-sm leading-relaxed">
-              Enter the mobile number linked to your school account. We'll send you a code by SMS.
+              Enter the mobile number linked to your school account. We&apos;ll send you a code by SMS.
             </p>
           </div>
 
