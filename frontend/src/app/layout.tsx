@@ -1,5 +1,5 @@
-import './globals.css'; // <-- CRITICAL: This imports your Tailwind CSS styles
-import type { Metadata } from 'node_modules/next';
+import './globals.css';
+import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
   title: 'Ikonex Academy Institutional Portal',
