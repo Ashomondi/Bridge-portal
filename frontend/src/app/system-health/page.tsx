@@ -75,7 +75,7 @@ export default function SystemHealthPage() {
           <div className="bg-amber-50 border border-amber-200 text-amber-900 px-4 py-3 rounded-2xl flex items-center justify-between text-xs font-medium shadow-sm">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>You're offline. You can read pages you've already opened. Payments and changes need a connection.</span>
+              <span>You are offline. You can read pages you have already opened. Payments and changes need a connection.</span>
             </div>
             <div className="flex items-center gap-3">
               <span className="text-[11px] font-semibold text-amber-700 hidden sm:inline">Live Sync Paused</span>
@@ -145,7 +145,7 @@ export default function SystemHealthPage() {
                 <Compass className="w-7 h-7" />
               </div>
               <div className="space-y-2">
-                <h3 className="text-2xl font-bold tracking-tight text-slate-900">We can't find that page</h3>
+                <h3 className="text-2xl font-bold tracking-tight text-slate-900">We can&apos;t find that page</h3>
                 <p className="text-xs text-slate-600 leading-relaxed max-w-xs mx-auto">
                   The link may be old or mistyped. Check the URL or return to your student dashboard.
                 </p>
