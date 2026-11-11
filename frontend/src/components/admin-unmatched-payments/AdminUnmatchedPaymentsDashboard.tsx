@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode, type SVGProps } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  Activity,
   AlertTriangle,
   Bell,
   Building2,
@@ -11,6 +12,7 @@ import {
   ChevronRight,
   Clock3,
   CreditCard,
+  FileText,
   GraduationCap,
   Link2,
   LogOut,
@@ -24,84 +26,62 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import type { AdminUnmatchedData } from "./admin-unmatched-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  badge?: string;
+  countKey?: "schools" | "connections" | "unmatchedPayments";
   active?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Schools", icon: Building2, badge: "[X]" },
-  { label: "Connections", icon: Link2, badge: "[X]" },
+  { label: "Schools", icon: Building2, countKey: "schools" },
+  { label: "Connections", icon: Link2, countKey: "connections" },
   { label: "Fee Structures", icon: Wallet },
-  { label: "Unmatched Payments", icon: AlertTriangle, badge: "[X]", active: true },
+  {
+    label: "Unmatched Payments",
+    icon: AlertTriangle,
+    countKey: "unmatchedPayments",
+    active: true,
+  },
   { label: "System Audit", icon: ShieldCheck },
 ];
 
-const TRANSACTIONS = [
-  {
-    id: "transaction-1",
-    received: "[Timestamp]",
-    amount: "[Amount]",
-    reference: "[Reference]",
-    note: "[Payer Note]",
-    phone: "[Phone]",
-  },
-  {
-    id: "transaction-2",
-    received: "[Timestamp]",
-    amount: "[Amount]",
-    reference: "[Reference]",
-    note: "[Payer Note]",
-    phone: "[Phone]",
-  },
-  {
-    id: "transaction-3",
-    received: "[Timestamp]",
-    amount: "[Amount]",
-    reference: "[Reference]",
-    note: "[Payer Note]",
-    phone: "[Phone]",
-  },
-  {
-    id: "transaction-4",
-    received: "[Timestamp]",
-    amount: "[Amount]",
-    reference: "[Reference]",
-    note: "[Payer Note]",
-    phone: "[Phone]",
-  },
-  {
-    id: "transaction-5",
-    received: "[Timestamp]",
-    amount: "[Amount]",
-    reference: "[Reference]",
-    note: "[Payer Note]",
-    phone: "[Phone]",
-  },
-];
+const METRIC_ICONS = [Clock3, CheckCircle2, CreditCard];
 
-const METRICS = [
-  { id: "pending", label: "Pending allocation", value: "[X]", icon: Clock3 },
-  { id: "matched", label: "Matched this term", value: "[Y]", icon: CheckCircle2 },
-  { id: "triage", label: "Avg triage time", value: "[Z]", icon: ActivityIcon },
-];
-
-function ActivityIcon(props: SVGProps<SVGSVGElement>) {
-  return <CreditCard {...props} />;
-}
-
-export default function AdminUnmatchedPaymentsDashboard() {
+export default function AdminUnmatchedPaymentsDashboard({
+  data,
+}: {
+  data: AdminUnmatchedData | null;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"unmatched" | "matched" | "all">(
     "unmatched",
   );
-  const [selectedId, setSelectedId] = useState(TRANSACTIONS[0].id);
+  const session = data?.session ?? null;
+  const operatorName = session?.operatorName?.trim() || "Operator";
+  const tier = session?.tier?.trim() || "Staff";
+  const initials = session?.initials?.trim() || initialsFromName(operatorName);
+  const consoleData = data?.console ?? {
+    version: "Console",
+    environment: "Internal infrastructure",
+    gatewayRef: null,
+    gatewayLive: false,
+  };
+  const counts = data?.counts ?? {
+    schools: null,
+    connections: null,
+    unmatchedPayments: null,
+  };
+  const transactions = data?.transactions ?? [];
+  const metrics = data?.metrics ?? [];
+  const [selectedId, setSelectedId] = useState(
+    transactions[0]?.id ?? "",
+  );
   const selected = useMemo(
-    () => TRANSACTIONS.find((row) => row.id === selectedId) ?? TRANSACTIONS[0],
-    [selectedId],
+    () => transactions.find((row) => row.id === selectedId) ?? null,
+    [selectedId, transactions],
   );
 
   useEffect(() => {
@@ -126,47 +106,99 @@ export default function AdminUnmatchedPaymentsDashboard() {
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[280px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          activeEntity={data?.activeEntity ?? null}
+          consoleVersion={consoleData.version}
+          counts={counts}
+          operatorName={operatorName}
+          tier={tier}
+          initials={initials}
+        />
       </aside>
 
-      <MobileAppBar menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} />
+      <MobileAppBar
+        operatorInitials={initials}
+        menuOpen={menuOpen}
+        onOpenMenu={() => setMenuOpen(true)}
+      />
 
       <div className="lg:pl-[280px]">
-        <TopBar />
+        <TopBar
+          environment={consoleData.environment}
+          gatewayRef={consoleData.gatewayRef}
+          gatewayLive={consoleData.gatewayLive}
+          operatorInitials={initials}
+        />
 
         <main
           id="unmatched-main"
           tabIndex={-1}
           className="mx-auto w-full max-w-[1440px] px-4 pb-10 pt-20 sm:px-6 lg:px-8 lg:pt-7"
         >
-          <PageHeader />
-          <ViewTabs activeTab={activeTab} onChange={setActiveTab} />
-          <FilterToolbar />
+          <PageHeader header={data?.header ?? null} />
+          <ViewTabs
+            activeTab={activeTab}
+            tabs={
+              data?.tabs ?? { unmatched: null, matched: null, all: null }
+            }
+            onChange={setActiveTab}
+          />
+          <FilterToolbar termLabel={data?.filter.termLabel ?? null} />
 
           <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,1fr)]">
             <div className="min-w-0 space-y-4">
               <IncomingStreamTable
+                transactions={transactions}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
               />
-              <MetricsGrid />
+              <MetricsGrid metrics={metrics} />
               <AuditGuarantee />
             </div>
             <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
-              <PaymentInspector transaction={selected} />
+              <PaymentInspector
+                transaction={selected}
+                inspector={data?.inspector ?? null}
+              />
             </div>
           </div>
 
-          <QueueFooter />
+          <QueueFooter queue={data?.queue ?? null} />
         </main>
       </div>
 
-      {menuOpen && <MobileDrawer onClose={() => setMenuOpen(false)} />}
+      {menuOpen && (
+        <MobileDrawer
+          activeEntity={data?.activeEntity ?? null}
+          consoleVersion={consoleData.version}
+          counts={counts}
+          operatorName={operatorName}
+          tier={tier}
+          initials={initials}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  activeEntity,
+  consoleVersion,
+  counts,
+  operatorName,
+  tier,
+  initials,
+  onNavigate,
+}: {
+  activeEntity: string | null;
+  consoleVersion: string;
+  counts: AdminUnmatchedData["counts"];
+  operatorName: string;
+  tier: string;
+  initials: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -179,7 +211,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-              Console v10.4
+              {consoleVersion}
             </p>
             <span className="rounded-full bg-[#F0EBF9] px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-wide text-[#6D4FA3] ring-1 ring-[#E4DBF5]">
               Operator
@@ -200,7 +232,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             Active context
           </span>
           <span className="block truncate text-[11px] font-semibold text-slate-700">
-            [Institution / Entity]
+            {activeEntity || "No entity selected"}
           </span>
         </span>
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
@@ -213,6 +245,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav className="mt-2 space-y-0.5" aria-label="Operations">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
+          const count = item.countKey ? counts[item.countKey] : null;
 
           return (
             <a
@@ -236,9 +269,9 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                 )}
               />
               <span className="flex-1">{item.label}</span>
-              {item.badge && (
+              {count !== null && (
                 <span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-semibold text-slate-500 ring-1 ring-slate-200/80">
-                  {item.badge}
+                  {count.toLocaleString("en-GB")}
                 </span>
               )}
             </a>
@@ -249,13 +282,13 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <div className="mt-auto pt-6">
         <div className="flex items-center gap-2.5 border-t border-slate-100 pt-4">
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-            [AB]
+            {initials}
           </span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-[11px] font-semibold text-slate-800">
-              [Operator Name]
+              {operatorName}
             </p>
-            <p className="truncate text-[9px] text-slate-400">[Tier / Role]</p>
+            <p className="truncate text-[9px] text-slate-400">{tier}</p>
           </div>
           <button
             type="button"
@@ -271,9 +304,11 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function MobileAppBar({
+  operatorInitials,
   menuOpen,
   onOpenMenu,
 }: {
+  operatorInitials: string;
   menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
@@ -314,7 +349,7 @@ function MobileAppBar({
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {operatorInitials}
           </button>
         </div>
       </div>
@@ -322,29 +357,51 @@ function MobileAppBar({
   );
 }
 
-function TopBar() {
+function TopBar({
+  environment,
+  gatewayRef,
+  gatewayLive,
+  operatorInitials,
+}: {
+  environment: string;
+  gatewayRef: string | null;
+  gatewayLive: boolean;
+  operatorInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:block print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-4 px-8 py-2.5">
         <div className="flex items-center gap-2.5">
           <span className="rounded-full bg-slate-100 px-2 py-1 text-[8px] font-semibold uppercase tracking-wide text-slate-500">
-            Internal infrastructure
+            {environment}
           </span>
           <span className="text-[9px] font-medium text-slate-400">
-            [Gateway reference]
+            {gatewayRef || "No gateway reference"}
           </span>
         </div>
         <div className="flex items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#E2F0ED] px-2.5 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-            <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
-            Daraja API Live
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[9px] font-semibold ring-1",
+              gatewayLive
+                ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+                : "bg-slate-100 text-slate-500 ring-slate-200",
+            )}
+          >
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                gatewayLive ? "bg-brand-500" : "bg-slate-400",
+              )}
+            />
+            {gatewayLive ? "Daraja API Live" : "Gateway status unavailable"}
           </span>
           <button
             type="button"
             className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {operatorInitials}
           </button>
         </div>
       </div>
@@ -352,7 +409,11 @@ function TopBar() {
   );
 }
 
-function PageHeader() {
+function PageHeader({
+  header,
+}: {
+  header: AdminUnmatchedData["header"] | null;
+}) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
@@ -361,16 +422,31 @@ function PageHeader() {
           Gateway code
         </p>
         <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">
-          Unmatched payments · [Entity Name]
+          Unmatched payments · {header?.entityName || "No entity selected"}
         </h1>
         <p className="mt-1 max-w-2xl text-[10px] leading-relaxed text-slate-500">
-          [Description body] Review incoming direct payments and reconcile them
-          against student ledgers.
+          {header?.description || "No reconciliation description available."}
         </p>
       </div>
-      <span className="inline-flex w-fit items-center gap-1.5 rounded-full bg-[#E2F0ED] px-3 py-1.5 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-        <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
-        Queue health: [X] exceptions pending
+      <span
+        className={cn(
+          "inline-flex w-fit items-center gap-1.5 rounded-full px-3 py-1.5 text-[9px] font-semibold ring-1",
+          header?.queueHealth !== null && header?.queueHealth !== undefined
+            ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+            : "bg-slate-100 text-slate-500 ring-slate-200",
+        )}
+      >
+        <span
+          className={cn(
+            "h-1.5 w-1.5 rounded-full",
+            header?.queueHealth !== null && header?.queueHealth !== undefined
+              ? "bg-brand-500"
+              : "bg-slate-400",
+          )}
+        />
+        {header?.queueHealth !== null && header?.queueHealth !== undefined
+          ? `Queue health: ${header.queueHealth} exceptions pending`
+          : "Queue health unavailable"}
       </span>
     </div>
   );
@@ -378,21 +454,23 @@ function PageHeader() {
 
 function ViewTabs({
   activeTab,
+  tabs,
   onChange,
 }: {
   activeTab: "unmatched" | "matched" | "all";
+  tabs: AdminUnmatchedData["tabs"];
   onChange: (tab: "unmatched" | "matched" | "all") => void;
 }) {
-  const tabs = [
-    { id: "unmatched" as const, label: "Unmatched", count: "[X]" },
-    { id: "matched" as const, label: "Matched", count: "[Y]" },
-    { id: "all" as const, label: "All", count: "[Z]" },
+  const items = [
+    { id: "unmatched" as const, label: "Unmatched", count: tabs.unmatched },
+    { id: "matched" as const, label: "Matched", count: tabs.matched },
+    { id: "all" as const, label: "All", count: tabs.all },
   ];
 
   return (
     <div className="mt-4 rounded-full bg-[#E8F5F3] p-1">
       <div className="grid grid-cols-3 gap-1" role="tablist" aria-label="Payment views">
-        {tabs.map((tab) => (
+        {items.map((tab) => (
           <button
             key={tab.id}
             type="button"
@@ -408,7 +486,7 @@ function ViewTabs({
           >
             {tab.label}
             <span className="rounded-full bg-[#FEF3D6] px-1.5 py-0.5 text-[7px] text-[#8A6A25]">
-              {tab.count}
+              {tab.count === null ? "—" : tab.count.toLocaleString("en-GB")}
             </span>
           </button>
         ))}
@@ -417,12 +495,15 @@ function ViewTabs({
   );
 }
 
-function FilterToolbar() {
+function FilterToolbar({ termLabel }: { termLabel: string | null }) {
   return (
     <section className="mt-3 flex flex-col gap-2 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card sm:flex-row sm:items-center">
       <label className="relative shrink-0 sm:w-52">
-        <select className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] font-semibold text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10">
-          <option>[Current Academic Term]</option>
+        <select
+          disabled={!termLabel}
+          className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] font-semibold text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <option>{termLabel || "No active term"}</option>
         </select>
         <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
       </label>
@@ -446,9 +527,11 @@ function FilterToolbar() {
 }
 
 function IncomingStreamTable({
+  transactions,
   selectedId,
   onSelect,
 }: {
+  transactions: AdminUnmatchedData["transactions"];
   selectedId: string;
   onSelect: (id: string) => void;
 }) {
@@ -460,70 +543,76 @@ function IncomingStreamTable({
             Incoming Paybill Stream
           </h2>
           <p className="mt-0.5 text-[8px] text-slate-400">
-            Live polling active · [Timestamp]
+            Live polling active
           </p>
         </div>
         <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[#FEF3D6] px-2.5 py-1 text-[8px] font-semibold text-[#8A6A25] ring-1 ring-[#EBD7A5]">
           <AlertTriangle className="h-3 w-3" />
-          [X] requires manual triage
+          {transactions.length} requires manual triage
         </span>
       </div>
 
-      <div className="mt-3 overflow-x-auto rounded-xl border border-slate-100">
-        <table className="min-w-[600px] w-full border-collapse text-left">
-          <thead>
-            <tr className="border-b border-slate-100 bg-[#F8F9FA]">
-              <TableHeading>Received</TableHeading>
-              <TableHeading align="right">Amount</TableHeading>
-              <TableHeading>Reference</TableHeading>
-              <TableHeading>Payer Note</TableHeading>
-              <TableHeading>Phone</TableHeading>
-            </tr>
-          </thead>
-          <tbody>
-            {TRANSACTIONS.map((row) => (
-              <tr
-                key={row.id}
-                onClick={() => onSelect(row.id)}
-                className={cn(
-                  "cursor-pointer border-b border-slate-100 transition last:border-0",
-                  selectedId === row.id
-                    ? "bg-[#F1FAF8]"
-                    : "hover:bg-slate-50/70",
-                )}
-              >
-                <td className="px-3 py-3">
-                  <p className="text-[9px] font-medium text-slate-600">
-                    {row.received}
-                  </p>
-                  <p className="text-[7px] text-slate-400">[Timestamp]</p>
-                </td>
-                <td className="px-3 py-3 text-right text-[10px] font-bold tabular-nums text-brand-700">
-                  {row.amount}
-                </td>
-                <td className="px-3 py-3 text-[9px] font-semibold text-slate-600">
-                  {row.reference}
-                </td>
-                <td className="px-3 py-3">
-                  <span className="rounded-lg bg-[#F0EBF9] px-2 py-1 text-[8px] font-medium text-[#6D4FA3]">
-                    {row.note}
-                  </span>
-                </td>
-                <td className="px-3 py-3 text-[9px] text-slate-500">
-                  {row.phone}
-                </td>
+      {transactions.length > 0 ? (
+        <div className="mt-3 overflow-x-auto rounded-xl border border-slate-100">
+          <table className="min-w-[600px] w-full border-collapse text-left">
+            <thead>
+              <tr className="border-b border-slate-100 bg-[#F8F9FA]">
+                <TableHeading>Received</TableHeading>
+                <TableHeading align="right">Amount</TableHeading>
+                <TableHeading>Reference</TableHeading>
+                <TableHeading>Payer Note</TableHeading>
+                <TableHeading>Phone</TableHeading>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {transactions.map((row) => (
+                <tr
+                  key={row.id}
+                  onClick={() => onSelect(row.id)}
+                  className={cn(
+                    "cursor-pointer border-b border-slate-100 transition last:border-0",
+                    selectedId === row.id
+                      ? "bg-[#F1FAF8]"
+                      : "hover:bg-slate-50/70",
+                  )}
+                >
+                  <td className="px-3 py-3 text-[9px] font-medium text-slate-600">
+                    {row.received}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[10px] font-bold tabular-nums text-brand-700">
+                    {row.amount}
+                  </td>
+                  <td className="px-3 py-3 text-[9px] font-semibold text-slate-600">
+                    {row.reference}
+                  </td>
+                  <td className="px-3 py-3">
+                    <span className="rounded-lg bg-[#F0EBF9] px-2 py-1 text-[8px] font-medium text-[#6D4FA3]">
+                      {row.note}
+                    </span>
+                  </td>
+                  <td className="px-3 py-3 text-[9px] text-slate-500">
+                    {row.phone}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState
+          icon={FileText}
+          title="No incoming transactions"
+          body="Unmatched payments will appear here when they are received."
+          className="mt-3"
+        />
+      )}
 
       <div className="mt-2.5 flex flex-col gap-1 text-[8px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
         <span className="inline-flex items-center gap-1">
           <ShieldCheck className="h-3 w-3 text-brand-600" />
           Cryptographic signature verification active
         </span>
-        <span>[X] visible transactions</span>
+        <span>{transactions.length} visible transactions</span>
       </div>
     </section>
   );
@@ -548,11 +637,21 @@ function TableHeading({
   );
 }
 
-function MetricsGrid() {
+function MetricsGrid({ metrics }: { metrics: AdminUnmatchedData["metrics"] }) {
+  if (metrics.length === 0) {
+    return (
+      <EmptyState
+        icon={Activity}
+        title="No reconciliation metrics available"
+        body="Queue metrics will appear here when transactions are being processed."
+      />
+    );
+  }
+
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-      {METRICS.map((metric) => {
-        const Icon = metric.icon;
+      {metrics.map((metric, index) => {
+        const Icon = METRIC_ICONS[index % METRIC_ICONS.length];
         return (
           <article
             key={metric.id}
@@ -565,10 +664,10 @@ function MetricsGrid() {
               <Icon className="h-3.5 w-3.5 text-brand-500" />
             </div>
             <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
-              {metric.value}
+              {metric.value || "—"}
             </p>
             <p className="mt-1 text-[8px] text-slate-400">
-              [Secondary explanation]
+              {metric.note || "No supporting note"}
             </p>
           </article>
         );
@@ -582,8 +681,7 @@ function AuditGuarantee() {
     <div className="flex gap-2.5 rounded-2xl border border-brand-100 bg-[#E2F0ED] p-3.5">
       <ShieldCheck className="h-4 w-4 shrink-0 text-brand-600" />
       <p className="text-[9px] leading-relaxed text-brand-800">
-        [Immutable audit guarantee] Every assignment is timestamped and signed
-        by the operator.
+        Every assignment is timestamped and signed by the operator.
       </p>
     </div>
   );
@@ -591,9 +689,35 @@ function AuditGuarantee() {
 
 function PaymentInspector({
   transaction,
+  inspector,
 }: {
-  transaction: (typeof TRANSACTIONS)[number];
+  transaction: AdminUnmatchedData["transactions"][number] | null;
+  inspector: AdminUnmatchedData["inspector"];
 }) {
+  if (!transaction) {
+    return (
+      <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
+        <div className="flex items-center gap-2">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600">
+            <CreditCard className="h-4 w-4" />
+          </span>
+          <h2 className="text-sm font-bold tracking-tight text-slate-900">
+            Active Payment Inspector
+          </h2>
+        </div>
+        <EmptyState
+          icon={CreditCard}
+          title="No payment selected"
+          body="Select an incoming transaction to inspect and reconcile it."
+          className="mt-4"
+        />
+      </section>
+    );
+  }
+
+  const student = inspector?.student ?? null;
+  const ledger = inspector?.ledger ?? null;
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-center justify-between gap-3">
@@ -640,53 +764,80 @@ function PaymentInspector({
             className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-8 pr-8 text-[9px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10"
           />
         </label>
-        <div className="mt-2 rounded-xl border border-slate-100 bg-white p-3">
-          <div className="flex items-center gap-2">
-            <span className="grid h-9 w-9 place-items-center rounded-full bg-[#F0EBF9] text-[9px] font-bold text-[#6D4FA3]">
-              [AB]
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-[10px] font-bold text-slate-800">
-                [Student Name]
-              </p>
-              <p className="text-[8px] text-brand-600">[Admission #]</p>
-              <p className="truncate text-[8px] text-slate-400">
-                [Grade] · [Boarding status]
-              </p>
+
+        {student ? (
+          <div className="mt-2 rounded-xl border border-slate-100 bg-white p-3">
+            <div className="flex items-center gap-2">
+              <span className="grid h-9 w-9 place-items-center rounded-full bg-[#F0EBF9] text-[9px] font-bold text-[#6D4FA3]">
+                {student.initials}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[10px] font-bold text-slate-800">
+                  {student.name}
+                </p>
+                <p className="text-[8px] text-brand-600">
+                  {student.admission}
+                </p>
+                <p className="truncate text-[8px] text-slate-400">
+                  {student.grade} · {student.boarding}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="grid h-6 w-6 place-items-center rounded-full bg-slate-100 text-slate-400 hover:bg-slate-200"
+                aria-label="Remove selected student"
+              >
+                <X className="h-3 w-3" />
+              </button>
             </div>
-            <button
-              type="button"
-              className="grid h-6 w-6 place-items-center rounded-full bg-slate-100 text-slate-400 hover:bg-slate-200"
-              aria-label="Remove selected student"
-            >
-              <X className="h-3 w-3" />
-            </button>
+            <div className="mt-2 border-t border-slate-100 pt-2 text-[8px] text-slate-400">
+              Guardian: {student.guardianName} · {student.guardianPhone}
+            </div>
           </div>
-          <div className="mt-2 border-t border-slate-100 pt-2 text-[8px] text-slate-400">
-            Guardian: [Guardian Name] · [Phone]
-          </div>
-        </div>
+        ) : (
+          <EmptyState
+            icon={Search}
+            title="No directory match selected"
+            body="Search and select a student to continue the reconciliation."
+            className="mt-2"
+          />
+        )}
       </div>
 
-      <div className="mt-3 rounded-xl bg-[#E2F0ED] p-3">
-        <p className="text-[8px] font-semibold uppercase tracking-[0.12em] text-brand-700">
-          Live ledger impact
-        </p>
-        <p className="mt-1 text-[9px] text-slate-600">
-          Balance projection: [Amount] cleared of [Amount] total fees.
-        </p>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white">
-          <div className="h-full w-[62%] rounded-full bg-brand-500" />
+      {ledger ? (
+        <div className="mt-3 rounded-xl bg-[#E2F0ED] p-3">
+          <p className="text-[8px] font-semibold uppercase tracking-[0.12em] text-brand-700">
+            Live ledger impact
+          </p>
+          <p className="mt-1 text-[9px] text-slate-600">
+            {ledger.projectionNote}
+          </p>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white">
+            <div
+              className="h-full rounded-full bg-brand-500"
+              style={{ width: `${Math.max(0, Math.min(100, ledger.progress))}%` }}
+            />
+          </div>
+          <div className="mt-1.5 flex justify-between text-[7px] text-slate-400">
+            <span>Cleared {ledger.cleared}</span>
+            <span>Total {ledger.total}</span>
+          </div>
         </div>
-        <div className="mt-1.5 flex justify-between text-[7px] text-slate-400">
-          <span>Cleared [Amount]</span>
-          <span>Total [Amount]</span>
-        </div>
-      </div>
+      ) : (
+        <EmptyState
+          icon={Activity}
+          title="No ledger preview"
+          body="A balance projection will appear when a student is selected."
+          className="mt-3"
+        />
+      )}
 
       <label className="mt-3 block">
         <span className="mb-1 block text-[8px] font-semibold text-slate-500">
-          Reason for manual assignment <span className="text-rose-500">*</span>
+          Reason for manual assignment{" "}
+          {inspector?.auditReasonRequired && (
+            <span className="text-rose-500">*</span>
+          )}
         </span>
         <input
           type="text"
@@ -698,13 +849,14 @@ function PaymentInspector({
         </span>
       </label>
 
-      <div className="mt-3 flex gap-2 rounded-xl bg-[#FEF3D6] p-2.5">
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[#8A6A25]" />
-        <p className="text-[8px] leading-relaxed text-[#8A6A25]">
-          [Overpayment warning] Excess credit will be carried forward on the
-          ledger.
-        </p>
-      </div>
+      {inspector?.overpaymentWarning && (
+        <div className="mt-3 flex gap-2 rounded-xl bg-[#FEF3D6] p-2.5">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[#8A6A25]" />
+          <p className="text-[8px] leading-relaxed text-[#8A6A25]">
+            {inspector.overpaymentWarning}
+          </p>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row">
         <button
@@ -725,21 +877,70 @@ function PaymentInspector({
   );
 }
 
-function QueueFooter() {
+function QueueFooter({ queue }: { queue: AdminUnmatchedData["queue"] }) {
   return (
     <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-brand-100 bg-[#E2F0ED] p-3.5">
       <p className="inline-flex items-center gap-2 text-[9px] font-medium text-brand-800">
         <CheckCircle2 className="h-3.5 w-3.5" />
-        [Empty state configuration status] Queue is clear.
+        {queue?.status || "Queue status unavailable"}
       </p>
-      <span className="rounded-full bg-white px-2.5 py-1 text-[8px] font-semibold text-brand-700">
-        All Clear Ready
-      </span>
+      {queue?.allClear && (
+        <span className="rounded-full bg-white px-2.5 py-1 text-[8px] font-semibold text-brand-700">
+          All Clear Ready
+        </span>
+      )}
     </div>
   );
 }
 
-function MobileDrawer({ onClose }: { onClose: () => void }) {
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+  className,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-7 text-center",
+        className,
+      )}
+    >
+      <span className="mx-auto grid h-9 w-9 place-items-center rounded-xl bg-white text-slate-400 shadow-sm">
+        <Icon className="h-4 w-4" />
+      </span>
+      <p className="mt-2.5 text-[11px] font-semibold text-slate-700">
+        {title}
+      </p>
+      <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+        {body}
+      </p>
+    </div>
+  );
+}
+
+function MobileDrawer({
+  activeEntity,
+  consoleVersion,
+  counts,
+  operatorName,
+  tier,
+  initials,
+  onClose,
+}: {
+  activeEntity: string | null;
+  consoleVersion: string;
+  counts: AdminUnmatchedData["counts"];
+  operatorName: string;
+  tier: string;
+  initials: string;
+  onClose: () => void;
+}) {
   const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
@@ -778,9 +979,27 @@ function MobileDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <SidebarContent onNavigate={onClose} />
+          <SidebarContent
+            activeEntity={activeEntity}
+            consoleVersion={consoleVersion}
+            counts={counts}
+            operatorName={operatorName}
+            tier={tier}
+            initials={initials}
+            onNavigate={onClose}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "OP";
 }
