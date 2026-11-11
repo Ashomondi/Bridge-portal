@@ -25,43 +25,49 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import type { AdminFeesData } from "./admin-fees-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  badge?: string;
+  countKey?: "schools" | "connections" | "unmatchedPayments";
   active?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Schools", icon: Building2, badge: "[X]" },
-  { label: "Connections", icon: Link2, badge: "[X]" },
+  { label: "Schools", icon: Building2, countKey: "schools" },
+  { label: "Connections", icon: Link2, countKey: "connections" },
   { label: "Fee Structures", icon: Wallet, active: true },
-  { label: "Unmatched Payments", icon: AlertTriangle, badge: "[X]" },
+  { label: "Unmatched Payments", icon: AlertTriangle, countKey: "unmatchedPayments" },
   { label: "System Audit", icon: ShieldCheck },
 ];
 
-const GRADES = ["Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11", "Grade 12"];
-
-const FEE_ROWS = [
-  { id: "fee-1", title: "[Fee Item]", term1: "[Amount]", term2: "[Amount]", term3: "[Amount]", total: "[Amount]" },
-  { id: "fee-2", title: "[Fee Item]", term1: "[Amount]", term2: "[Amount]", term3: "[Amount]", total: "[Amount]" },
-  { id: "fee-3", title: "[Fee Item]", term1: "[Amount]", term2: "[Amount]", term3: "[Amount]", total: "[Amount]" },
-  { id: "fee-4", title: "[Fee Item]", term1: "[Amount]", term2: "[Amount]", term3: "[Amount]", total: "[Amount]" },
-  { id: "fee-5", title: "[Fee Item]", term1: "[Amount]", term2: "[Amount]", term3: "[Amount]", total: "[Amount]" },
-];
-
-const DONUT_SEGMENTS = [
-  { id: "segment-1", label: "[Fee Item]", percent: "[X]%", color: "#007A78", value: 42 },
-  { id: "segment-2", label: "[Fee Item]", percent: "[X]%", color: "#B9A3E0", value: 26 },
-  { id: "segment-3", label: "[Fee Item]", percent: "[X]%", color: "#E8C97A", value: 18 },
-  { id: "segment-4", label: "[Fee Item]", percent: "[X]%", color: "#CBD5E1", value: 14 },
-];
-
-export default function AdminFeeStructureDashboard() {
+export default function AdminFeeStructureDashboard({
+  data,
+}: {
+  data: AdminFeesData | null;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [activeGrade, setActiveGrade] = useState("Grade 8");
   const [activeTab, setActiveTab] = useState<"structure" | "changes">("structure");
+  const session = data?.session ?? null;
+  const operatorName = session?.operatorName?.trim() || "Operator";
+  const tier = session?.tier?.trim() || "Staff";
+  const initials = session?.initials?.trim() || initialsFromName(operatorName);
+  const consoleData = data?.console ?? {
+    version: "Console",
+    environment: "Internal infrastructure",
+    gatewayRef: null,
+    gatewayLive: false,
+  };
+  const counts = data?.counts ?? {
+    schools: null,
+    connections: null,
+    unmatchedPayments: null,
+  };
+  const grades = data?.grades ?? [];
+  const [activeGrade, setActiveGrade] = useState(
+    data?.selectedGrade ?? grades[0] ?? "",
+  );
 
   useEffect(() => {
     if (!menuOpen) {
@@ -75,6 +81,12 @@ export default function AdminFeeStructureDashboard() {
     };
   }, [menuOpen]);
 
+  useEffect(() => {
+    if (grades.length > 0 && !grades.includes(activeGrade)) {
+      setActiveGrade(grades[0]);
+    }
+  }, [activeGrade, grades]);
+
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
       <a
@@ -85,43 +97,91 @@ export default function AdminFeeStructureDashboard() {
       </a>
 
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[280px] border-r border-slate-200/70 bg-white lg:flex print:hidden">
-        <SidebarContent />
+        <SidebarContent
+          activeEntity={data?.activeEntity ?? null}
+          consoleVersion={consoleData.version}
+          counts={counts}
+          operatorName={operatorName}
+          tier={tier}
+          initials={initials}
+        />
       </aside>
 
-      <MobileAppBar menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} />
+      <MobileAppBar
+        operatorInitials={initials}
+        menuOpen={menuOpen}
+        onOpenMenu={() => setMenuOpen(true)}
+      />
 
       <div className="lg:pl-[280px]">
-        <TopBar />
+        <TopBar
+          environment={consoleData.environment}
+          gatewayRef={consoleData.gatewayRef}
+          gatewayLive={consoleData.gatewayLive}
+          operatorInitials={initials}
+        />
 
         <main
           id="fees-main"
           tabIndex={-1}
           className="mx-auto w-full max-w-[1440px] px-4 pb-10 pt-20 sm:px-6 lg:px-8 lg:pt-7"
         >
-          <PageHeader />
-          <ViewTabs activeTab={activeTab} onChange={setActiveTab} />
+          <PageHeader header={data?.header ?? null} />
+          <ViewTabs
+            activeTab={activeTab}
+            changesLogged={data?.changesLogged ?? null}
+            onChange={setActiveTab}
+          />
           <FilterCard
+            filters={data?.filters ?? null}
+            grades={grades}
             activeGrade={activeGrade}
             onGradeChange={setActiveGrade}
           />
-          <CohortBanner grade={activeGrade} />
+          <CohortBanner grade={activeGrade} cohort={data?.cohort ?? null} />
 
           <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,1fr)]">
-            <FeeMatrixCard />
+            <FeeMatrixCard matrix={data?.matrix ?? null} />
             <div className="min-w-0 space-y-4">
-              <DonutCard />
-              <AdjustmentCallout />
+              <DonutCard distribution={data?.distribution ?? null} />
+              <AdjustmentCallout adjustment={data?.adjustment ?? null} />
             </div>
           </div>
         </main>
       </div>
 
-      {menuOpen && <MobileDrawer onClose={() => setMenuOpen(false)} />}
+      {menuOpen && (
+        <MobileDrawer
+          activeEntity={data?.activeEntity ?? null}
+          consoleVersion={consoleData.version}
+          counts={counts}
+          operatorName={operatorName}
+          tier={tier}
+          initials={initials}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  activeEntity,
+  consoleVersion,
+  counts,
+  operatorName,
+  tier,
+  initials,
+  onNavigate,
+}: {
+  activeEntity: string | null;
+  consoleVersion: string;
+  counts: AdminFeesData["counts"];
+  operatorName: string;
+  tier: string;
+  initials: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
@@ -134,7 +194,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-              Console v10.4
+              {consoleVersion}
             </p>
             <span className="rounded-full bg-[#F0EBF9] px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-wide text-[#6D4FA3] ring-1 ring-[#E4DBF5]">
               Operator
@@ -155,7 +215,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             Active context
           </span>
           <span className="block truncate text-[11px] font-semibold text-slate-700">
-            [Institution / Entity]
+            {activeEntity || "No entity selected"}
           </span>
         </span>
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
@@ -168,6 +228,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav className="mt-2 space-y-0.5" aria-label="Operations">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
+          const count = item.countKey ? counts[item.countKey] : null;
 
           return (
             <a
@@ -191,9 +252,9 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                 )}
               />
               <span className="flex-1">{item.label}</span>
-              {item.badge && (
+              {count !== null && (
                 <span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-semibold text-slate-500 ring-1 ring-slate-200/80">
-                  {item.badge}
+                  {count.toLocaleString("en-GB")}
                 </span>
               )}
             </a>
@@ -204,13 +265,13 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <div className="mt-auto pt-6">
         <div className="flex items-center gap-2.5 border-t border-slate-100 pt-4">
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-bold text-white">
-            [AB]
+            {initials}
           </span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-[11px] font-semibold text-slate-800">
-              [Operator Name]
+              {operatorName}
             </p>
-            <p className="truncate text-[9px] text-slate-400">[Tier / Role]</p>
+            <p className="truncate text-[9px] text-slate-400">{tier}</p>
           </div>
           <button
             type="button"
@@ -226,9 +287,11 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function MobileAppBar({
+  operatorInitials,
   menuOpen,
   onOpenMenu,
 }: {
+  operatorInitials: string;
   menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
@@ -269,7 +332,7 @@ function MobileAppBar({
             className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {operatorInitials}
           </button>
         </div>
       </div>
@@ -277,29 +340,51 @@ function MobileAppBar({
   );
 }
 
-function TopBar() {
+function TopBar({
+  environment,
+  gatewayRef,
+  gatewayLive,
+  operatorInitials,
+}: {
+  environment: string;
+  gatewayRef: string | null;
+  gatewayLive: boolean;
+  operatorInitials: string;
+}) {
   return (
     <header className="sticky top-0 z-30 hidden border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:block print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-4 px-8 py-2.5">
         <div className="flex items-center gap-2.5">
           <span className="rounded-full bg-slate-100 px-2 py-1 text-[8px] font-semibold uppercase tracking-wide text-slate-500">
-            Internal infrastructure
+            {environment}
           </span>
           <span className="text-[9px] font-medium text-slate-400">
-            [Gateway reference]
+            {gatewayRef || "No gateway reference"}
           </span>
         </div>
         <div className="flex items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-[#E2F0ED] px-2.5 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-            <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
-            Daraja API Live
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[9px] font-semibold ring-1",
+              gatewayLive
+                ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+                : "bg-slate-100 text-slate-500 ring-slate-200",
+            )}
+          >
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                gatewayLive ? "bg-brand-500" : "bg-slate-400",
+              )}
+            />
+            {gatewayLive ? "Daraja API Live" : "Gateway status unavailable"}
           </span>
           <button
             type="button"
             className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
             aria-label="Open user profile"
           >
-            [AB]
+            {operatorInitials}
           </button>
         </div>
       </div>
@@ -307,7 +392,7 @@ function TopBar() {
   );
 }
 
-function PageHeader() {
+function PageHeader({ header }: { header: AdminFeesData["header"] | null }) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
@@ -316,20 +401,32 @@ function PageHeader() {
           <ChevronRight className="inline h-2.5 w-2.5" /> Release tag
         </p>
         <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">
-          Fees · [Entity Name]
+          Fees · {header?.entityName || "No entity selected"}
         </h1>
         <p className="mt-1 max-w-2xl text-[10px] leading-relaxed text-slate-500">
-          [Description body] Annual billing matrices and operational release
-          context.
+          {header?.description ||
+            "No fee structure description available."}
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-1 rounded-full bg-[#E2F0ED] px-2.5 py-1 text-[8px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
-          Sync active
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[8px] font-semibold ring-1",
+            header?.syncLabel
+              ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+              : "bg-slate-100 text-slate-500 ring-slate-200",
+          )}
+        >
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              header?.syncLabel ? "bg-brand-500" : "bg-slate-400",
+            )}
+          />
+          {header?.syncLabel || "Sync status unavailable"}
         </span>
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[8px] font-semibold text-slate-500">
-          Audit v[X]
+          Audit {header?.auditVersion || "not available"}
         </span>
       </div>
     </div>
@@ -338,9 +435,11 @@ function PageHeader() {
 
 function ViewTabs({
   activeTab,
+  changesLogged,
   onChange,
 }: {
   activeTab: "structure" | "changes";
+  changesLogged: number | null;
   onChange: (tab: "structure" | "changes") => void;
 }) {
   return (
@@ -375,7 +474,7 @@ function ViewTabs({
         >
           Fee Changes
           <span className="rounded-full bg-[#F0EBF9] px-1.5 py-0.5 text-[7px] text-[#6D4FA3]">
-            [X] logged
+            {changesLogged === null ? "—" : `${changesLogged} logged`}
           </span>
         </button>
       </div>
@@ -384,9 +483,13 @@ function ViewTabs({
 }
 
 function FilterCard({
+  filters,
+  grades,
   activeGrade,
   onGradeChange,
 }: {
+  filters: AdminFeesData["filters"] | null;
+  grades: string[];
   activeGrade: string;
   onGradeChange: (grade: string) => void;
 }) {
@@ -394,56 +497,100 @@ function FilterCard({
     <section className="mt-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <FilterSelect label="Academic year" placeholder="[Academic Year]" />
-          <FilterSelect label="Curriculum tier" placeholder="[Curriculum Tier]" />
+          <FilterSelect
+            label="Academic year"
+            placeholder="Select academic year"
+            options={filters?.academicYears ?? []}
+          />
+          <FilterSelect
+            label="Curriculum tier"
+            placeholder="Select curriculum tier"
+            options={filters?.curriculumTiers ?? []}
+          />
         </div>
-        <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[#E2F0ED] px-2.5 py-1 text-[8px] font-semibold text-brand-700 ring-1 ring-brand-100">
+        <span
+          className={cn(
+            "inline-flex w-fit items-center gap-1 rounded-full px-2.5 py-1 text-[8px] font-semibold ring-1",
+            filters?.published
+              ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+              : "bg-slate-100 text-slate-500 ring-slate-200",
+          )}
+        >
           <Lock className="h-3 w-3" />
-          Published [Date]
+          {filters?.published
+            ? `Published ${filters.publishedAt || ""}`.trim()
+            : "Not published"}
         </span>
       </div>
 
       <div className="mt-3 overflow-x-auto pb-1">
-        <div className="flex min-w-max items-center gap-1.5">
-          {GRADES.map((grade) => (
-            <button
-              key={grade}
-              type="button"
-              onClick={() => onGradeChange(grade)}
-              className={cn(
-                "rounded-full px-2.5 py-1 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
-                grade === activeGrade
-                  ? "bg-brand-500 text-white shadow-sm"
-                  : "bg-slate-50 text-slate-500 ring-1 ring-slate-200/80 hover:bg-white",
-              )}
-            >
-              {grade}
-            </button>
-          ))}
-          <span className="ml-2 text-[8px] font-medium text-slate-400">
-            Cohort [Code]
-          </span>
-        </div>
+        {grades.length > 0 ? (
+          <div className="flex min-w-max items-center gap-1.5">
+            {grades.map((grade) => (
+              <button
+                key={grade}
+                type="button"
+                onClick={() => onGradeChange(grade)}
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                  grade === activeGrade
+                    ? "bg-brand-500 text-white shadow-sm"
+                    : "bg-slate-50 text-slate-500 ring-1 ring-slate-200/80 hover:bg-white",
+                )}
+              >
+                {grade}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[9px] text-slate-400">
+            No grade cohorts available.
+          </p>
+        )}
       </div>
     </section>
   );
 }
 
-function FilterSelect({ label, placeholder }: { label: string; placeholder: string }) {
+function FilterSelect({
+  label,
+  placeholder,
+  options,
+}: {
+  label: string;
+  placeholder: string;
+  options: { value: string; label: string }[];
+}) {
   return (
     <label className="relative block">
       <span className="mb-1 block text-[8px] font-semibold text-slate-500">
         {label}
       </span>
-      <select className="h-8 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10">
-        <option>{placeholder}</option>
+      <select
+        disabled={options.length === 0}
+        className="h-8 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        <option>
+          {options.length > 0 ? placeholder : "No options available"}
+        </option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
       </select>
       <ChevronDown className="pointer-events-none absolute bottom-2 right-2 h-3 w-3 text-slate-400" />
     </label>
   );
 }
 
-function CohortBanner({ grade }: { grade: string }) {
+function CohortBanner({
+  grade,
+  cohort,
+}: {
+  grade: string;
+  cohort: AdminFeesData["cohort"];
+}) {
   return (
     <div className="mt-3 rounded-2xl bg-[#E2F0ED] p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -451,31 +598,46 @@ function CohortBanner({ grade }: { grade: string }) {
           <Users className="h-4 w-4 shrink-0 text-brand-600" />
           <div>
             <p className="text-[11px] font-bold text-brand-800">
-              {grade} has [X] active enrolled students
+              {cohort
+                ? `${cohort.gradeName} has ${
+                    cohort.studentCount === null
+                      ? "no"
+                      : cohort.studentCount.toLocaleString("en-GB")
+                  } active enrolled students`
+                : `${grade || "No grade"} cohort summary unavailable`}
             </p>
             <p className="mt-0.5 text-[9px] text-slate-500">
-              [Explanation subtext for the active cohort]
+              {cohort?.description || "No cohort metadata available."}
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full bg-white px-2.5 py-1 text-[9px] font-semibold text-brand-700">
-            Ledger base: [Amount]
-          </span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 text-[9px] font-semibold text-brand-700 hover:underline"
-          >
-            Apply cohort adjustment
-            <ArrowRight className="h-3 w-3" />
-          </button>
-        </div>
+        {cohort && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-white px-2.5 py-1 text-[9px] font-semibold text-brand-700">
+              Ledger base: {cohort.ledgerBase || "Not available"}
+            </span>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-[9px] font-semibold text-brand-700 hover:underline"
+            >
+              Apply cohort adjustment
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function FeeMatrixCard() {
+function FeeMatrixCard({
+  matrix,
+}: {
+  matrix: AdminFeesData["matrix"] | null;
+}) {
+  const rows = matrix?.rows ?? [];
+  const dueDates = matrix?.dueDates ?? [];
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -484,12 +646,12 @@ function FeeMatrixCard() {
             Core Fee Matrix
           </h2>
           <p className="mt-0.5 text-[9px] text-slate-400">
-            [Billing schedule subtext]
+            Billing schedule and structure
           </p>
         </div>
         <div className="flex gap-1.5">
           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
-            Currency: KES
+            Currency: {matrix?.currency || "—"}
           </span>
           <span className="inline-flex items-center gap-1 rounded-full bg-[#E2F0ED] px-2 py-0.5 text-[8px] font-semibold text-brand-700">
             <Lock className="h-2.5 w-2.5" />
@@ -498,74 +660,87 @@ function FeeMatrixCard() {
         </div>
       </div>
 
-      <div className="mt-3 overflow-x-auto rounded-xl border border-slate-100">
-        <table className="min-w-[560px] w-full border-collapse text-left">
-          <thead>
-            <tr className="border-b border-slate-100 bg-[#F8F9FA]">
-              <TableHeading>Fee Item</TableHeading>
-              <TableHeading align="right">Term 1</TableHeading>
-              <TableHeading align="right">Term 2</TableHeading>
-              <TableHeading align="right">Term 3</TableHeading>
-              <TableHeading align="right">Annual Total</TableHeading>
-            </tr>
-          </thead>
-          <tbody>
-            {FEE_ROWS.map((row) => (
-              <tr key={row.id} className="border-b border-slate-100 last:border-0">
-                <td className="px-3 py-3">
-                  <div className="flex items-center gap-2">
-                    <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
-                    <span className="text-[9px] font-semibold text-slate-700">
-                      {row.title}
-                    </span>
-                  </div>
-                </td>
-                <td className="px-3 py-3 text-right text-[9px] tabular-nums text-slate-500">
-                  {row.term1}
-                </td>
-                <td className="px-3 py-3 text-right text-[9px] tabular-nums text-slate-500">
-                  {row.term2}
-                </td>
-                <td className="px-3 py-3 text-right text-[9px] tabular-nums text-slate-500">
-                  {row.term3}
-                </td>
-                <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-slate-800">
-                  {row.total}
-                </td>
+      {rows.length > 0 ? (
+        <div className="mt-3 overflow-x-auto rounded-xl border border-slate-100">
+          <table className="min-w-[560px] w-full border-collapse text-left">
+            <thead>
+              <tr className="border-b border-slate-100 bg-[#F8F9FA]">
+                <TableHeading>Fee Item</TableHeading>
+                <TableHeading align="right">Term 1</TableHeading>
+                <TableHeading align="right">Term 2</TableHeading>
+                <TableHeading align="right">Term 3</TableHeading>
+                <TableHeading align="right">Annual Total</TableHeading>
               </tr>
-            ))}
-            <tr className="bg-[#E2F0ED]">
-              <td className="px-3 py-3 text-[9px] font-bold text-brand-800">
-                Totals
-              </td>
-              <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
-                [Amount]
-              </td>
-              <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
-                [Amount]
-              </td>
-              <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
-                [Amount]
-              </td>
-              <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
-                [Amount]
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id} className="border-b border-slate-100 last:border-0">
+                  <td className="px-3 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+                      <span className="text-[9px] font-semibold text-slate-700">
+                        {row.title}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] tabular-nums text-slate-500">
+                    {row.term1}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] tabular-nums text-slate-500">
+                    {row.term2}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] tabular-nums text-slate-500">
+                    {row.term3}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-slate-800">
+                    {row.total}
+                  </td>
+                </tr>
+              ))}
+              {matrix?.totals && (
+                <tr className="bg-[#E2F0ED]">
+                  <td className="px-3 py-3 text-[9px] font-bold text-brand-800">
+                    Totals
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
+                    {matrix.totals.term1}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
+                    {matrix.totals.term2}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
+                    {matrix.totals.term3}
+                  </td>
+                  <td className="px-3 py-3 text-right text-[9px] font-bold tabular-nums text-brand-800">
+                    {matrix.totals.total}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState
+          icon={Wallet}
+          title="No fee items available"
+          body="The fee matrix will appear here when a structure is selected."
+          className="mt-3"
+        />
+      )}
 
       <div className="mt-3 flex gap-2 rounded-xl bg-[#E2F0ED] p-3">
         <CalendarDays className="h-3.5 w-3.5 shrink-0 text-brand-600" />
         <p className="text-[9px] leading-relaxed text-brand-800">
-          Due dates · Term 1 [Date] · Term 2 [Date] · Term 3 [Date]
+          {dueDates.length > 0
+            ? dueDates.map((item) => `${item.term}: ${item.date}`).join(" · ")
+            : "No term due dates available"}
         </p>
       </div>
 
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="inline-flex items-center gap-1 text-[8px] text-slate-400">
           <CheckCircle2 className="h-3 w-3 text-brand-600" />
-          [Verification note]
+          {matrix?.verificationNote || "Verification note unavailable"}
         </p>
         <div className="flex gap-2">
           <button
@@ -606,7 +781,13 @@ function TableHeading({
   );
 }
 
-function DonutCard() {
+function DonutCard({
+  distribution,
+}: {
+  distribution: AdminFeesData["distribution"] | null;
+}) {
+  const segments = distribution?.segments ?? [];
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-center justify-between gap-2">
@@ -614,66 +795,86 @@ function DonutCard() {
           Annual Distribution
         </h2>
         <span className="rounded-full bg-[#F0EBF9] px-2 py-0.5 text-[8px] font-semibold text-[#6D4FA3]">
-          [Grade]
+          {distribution?.gradeTag || "No grade"}
         </span>
       </div>
 
-      <div className="mt-3 flex justify-center">
-        <svg viewBox="0 0 120 120" className="h-40 w-40" role="img" aria-label="Annual fee distribution">
-          <g transform="rotate(-90 60 60)">
-            {DONUT_SEGMENTS.reduce<{ nodes: ReactNode[]; offset: number }>(
-              (acc, segment, index) => {
-                const circumference = 2 * Math.PI * 42;
-                const length = (segment.value / 100) * circumference;
-                acc.nodes.push(
-                  <circle
-                    key={segment.id}
-                    cx="60"
-                    cy="60"
-                    r="42"
-                    fill="none"
-                    stroke={segment.color}
-                    strokeWidth="14"
-                    strokeDasharray={`${length} ${circumference}`}
-                    strokeDashoffset={-acc.offset}
-                  />,
-                );
-                acc.offset += length;
-                return acc;
-              },
-              { nodes: [], offset: 0 },
-            ).nodes}
-          </g>
-          <text x="60" y="56" textAnchor="middle" className="fill-slate-900 text-[11px] font-bold">
-            [Total]
-          </text>
-          <text x="60" y="68" textAnchor="middle" className="fill-slate-400 text-[6px]">
-            Annual
-          </text>
-        </svg>
-      </div>
-
-      <div className="mt-2 space-y-1.5">
-        {DONUT_SEGMENTS.map((segment) => (
-          <div key={segment.id} className="flex items-center gap-2">
-            <span
-              className="h-2 w-2 rounded-full"
-              style={{ backgroundColor: segment.color }}
-            />
-            <span className="flex-1 text-[9px] text-slate-500">
-              {segment.label}
-            </span>
-            <span className="text-[9px] font-semibold text-slate-700">
-              {segment.percent}
-            </span>
+      {segments.length > 0 ? (
+        <>
+          <div className="mt-3 flex justify-center">
+            <svg viewBox="0 0 120 120" className="h-40 w-40" role="img" aria-label="Annual fee distribution">
+              <g transform="rotate(-90 60 60)">
+                {segments.reduce<{ nodes: ReactNode[]; offset: number }>(
+                  (acc, segment) => {
+                    const circumference = 2 * Math.PI * 42;
+                    const length = (segment.value / 100) * circumference;
+                    acc.nodes.push(
+                      <circle
+                        key={segment.id}
+                        cx="60"
+                        cy="60"
+                        r="42"
+                        fill="none"
+                        stroke={segment.color}
+                        strokeWidth="14"
+                        strokeDasharray={`${length} ${circumference}`}
+                        strokeDashoffset={-acc.offset}
+                      />,
+                    );
+                    acc.offset += length;
+                    return acc;
+                  },
+                  { nodes: [], offset: 0 },
+                ).nodes}
+              </g>
+              <text
+                x="60"
+                y="56"
+                textAnchor="middle"
+                className="fill-slate-900 text-[11px] font-bold"
+              >
+                {distribution?.total || "—"}
+              </text>
+              <text x="60" y="68" textAnchor="middle" className="fill-slate-400 text-[6px]">
+                Annual
+              </text>
+            </svg>
           </div>
-        ))}
-      </div>
+
+          <div className="mt-2 space-y-1.5">
+            {segments.map((segment) => (
+              <div key={segment.id} className="flex items-center gap-2">
+                <span
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: segment.color }}
+                />
+                <span className="flex-1 text-[9px] text-slate-500">
+                  {segment.label}
+                </span>
+                <span className="text-[9px] font-semibold text-slate-700">
+                  {segment.percent}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <EmptyState
+          icon={Info}
+          title="No distribution data available"
+          body="The annual fee distribution will appear here when the matrix is loaded."
+          className="mt-3"
+        />
+      )}
     </section>
   );
 }
 
-function AdjustmentCallout() {
+function AdjustmentCallout({
+  adjustment,
+}: {
+  adjustment: AdminFeesData["adjustment"] | null;
+}) {
   return (
     <section className="rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
       <div className="flex gap-2.5">
@@ -685,8 +886,8 @@ function AdjustmentCallout() {
             Need a mid-term adjustment?
           </p>
           <p className="mt-1 text-[9px] leading-relaxed text-slate-500">
-            [Policy note] Post-dispatch modifications require an audit reason and
-            may create a new version.
+            {adjustment?.policyNote ||
+              "No adjustment policy is available for this fee structure."}
           </p>
           <button
             type="button"
@@ -701,7 +902,54 @@ function AdjustmentCallout() {
   );
 }
 
-function MobileDrawer({ onClose }: { onClose: () => void }) {
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+  className,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-7 text-center",
+        className,
+      )}
+    >
+      <span className="mx-auto grid h-9 w-9 place-items-center rounded-xl bg-white text-slate-400 shadow-sm">
+        <Icon className="h-4 w-4" />
+      </span>
+      <p className="mt-2.5 text-[11px] font-semibold text-slate-700">
+        {title}
+      </p>
+      <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+        {body}
+      </p>
+    </div>
+  );
+}
+
+function MobileDrawer({
+  activeEntity,
+  consoleVersion,
+  counts,
+  operatorName,
+  tier,
+  initials,
+  onClose,
+}: {
+  activeEntity: string | null;
+  consoleVersion: string;
+  counts: AdminFeesData["counts"];
+  operatorName: string;
+  tier: string;
+  initials: string;
+  onClose: () => void;
+}) {
   const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
@@ -740,9 +988,27 @@ function MobileDrawer({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <SidebarContent onNavigate={onClose} />
+          <SidebarContent
+            activeEntity={activeEntity}
+            consoleVersion={consoleVersion}
+            counts={counts}
+            operatorName={operatorName}
+            tier={tier}
+            initials={initials}
+            onNavigate={onClose}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "OP";
 }
