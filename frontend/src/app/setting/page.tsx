@@ -155,7 +155,7 @@ export default function AccountSettingsPage() {
               </div>
 
               <p className="text-xs text-slate-600">
-                We'll send a code to your new number. We'll also send a text to your old number so you know about the change.
+                We&apos;ll send a code to your new number. We&apos;ll also send a text to your old number so you know about the change.
               </p>
 
               <form onSubmit={handleSendNewCode} className="space-y-4">
@@ -193,7 +193,7 @@ export default function AccountSettingsPage() {
           )}
 
           <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-100">
-            Can't receive texts on your current number? Visit the school office for help.
+            Can&apos;t receive texts on your current number? Visit the school office for help.
           </div>
         </div>
 
@@ -222,7 +222,7 @@ export default function AccountSettingsPage() {
               <Lock className="w-4 h-4 text-slate-500" /> Privacy & consent
             </div>
             <p className="text-xs text-slate-500">
-              You'll be able to see and change what the school may do with your family's information.
+              You&apos;ll be able to see and change what the school may do with your family&apos;s information.
             </p>
           </div>
           <span className="px-3 py-1 bg-slate-100 text-slate-600 font-semibold rounded-full text-[11px] self-start md:self-auto">
