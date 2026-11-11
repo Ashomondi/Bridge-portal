@@ -1,23 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Award,
   BarChart3,
   Bell,
-  CalendarCheck,
   ChevronRight,
   FileText,
   GraduationCap,
   Home,
   Info,
-  LogOut,
-  MessageCircle,
   Quote,
   ShieldCheck,
-  Sparkles,
   TrendingUp,
-  Wallet,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
@@ -38,18 +33,13 @@ type NavItem = {
 };
 
 const SIDEBAR_ITEMS: NavItem[] = [
-  { label: "Home", icon: Home, href: "#" },
+  { label: "Home", icon: Home, href: "/parent" },
   { label: "Results", icon: Award, href: "/parent/results", active: true },
-  { label: "Attendance", icon: CalendarCheck, href: "#" },
-  { label: "Fees", icon: Wallet, href: "#" },
-  { label: "AI assistant", icon: Sparkles, href: "#" },
 ];
 
 const BOTTOM_NAV = [
-  { label: "Home", icon: Home, href: "#" },
+  { label: "Home", icon: Home, href: "/parent" },
   { label: "Results", icon: BarChart3, href: "/parent/results", active: true },
-  { label: "Fees", icon: Wallet, href: "#" },
-  { label: "Assistant", icon: MessageCircle, href: "#" },
 ];
 
 const LEVEL_TONES: Record<PerformanceLevel["tone"], string> = {
@@ -78,15 +68,24 @@ export default function StudentResultsDashboard({
   const guardianInitials =
     session?.initials?.trim() || initialsFromName(guardianName);
 
-  const [selectedStudentId, setSelectedStudentId] = useState(
-    data?.selectedStudentId ?? students[0]?.id ?? "",
-  );
-  const [selectedTermId, setSelectedTermId] = useState(
-    data?.selectedTermId ??
-      terms.find((term) => term.released)?.id ??
-      terms[0]?.id ??
-      "",
-  );
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // Selection and cards commit together when the server loader returns.
+  const selectedStudentId = data?.selectedStudentId ?? students[0]?.id ?? "";
+  const selectedTermId =
+    data?.selectedTermId ?? terms.find((term) => term.released)?.id ?? "";
+
+  const selectResults = (studentId: string, termId?: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("studentId", studentId);
+    if (termId) {
+      params.set("termId", termId);
+    } else {
+      params.delete("termId");
+    }
+    router.push(`${pathname}?${params.toString()}`, { scroll: false });
+  };
 
   const selectedTerm =
     terms.find((term) => term.id === selectedTermId) ??
@@ -140,12 +139,12 @@ export default function StudentResultsDashboard({
           <StudentFilter
             students={students}
             selectedStudentId={selectedStudentId}
-            onSelect={setSelectedStudentId}
+            onSelect={(id) => selectResults(id)}
           />
           <TermSelector
             terms={terms}
             selectedTermId={selectedTerm?.id ?? ""}
-            onSelect={setSelectedTermId}
+            onSelect={(id) => selectResults(selectedStudentId, id)}
           />
 
           <div className="mt-4 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]">
@@ -154,7 +153,10 @@ export default function StudentResultsDashboard({
                 results={results}
                 releaseInfo={releaseInfo}
               />
-              <AdjustmentNoticeCard adjustment={adjustment} />
+              <AdjustmentNoticeCard
+                adjustment={adjustment}
+                available={data !== null}
+              />
               <TeacherCommentCard comment={teacherComment} />
             </div>
 
@@ -253,13 +255,6 @@ function SidebarContent({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-          >
-            <LogOut className="h-3.5 w-3.5" />
-            Sign out
-          </button>
         </div>
       </div>
     </div>
@@ -565,8 +560,10 @@ function TermPill({ label, active = false }: { label: string; active?: boolean }
 
 function AdjustmentNoticeCard({
   adjustment,
+  available,
 }: {
   adjustment: AdjustmentNotice | null;
+  available: boolean;
 }) {
   return (
     <section className="rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
@@ -603,11 +600,14 @@ function AdjustmentNoticeCard({
           ) : (
             <div className="rounded-xl border border-dashed border-[#D7C8F2] bg-white/60 px-4 py-5 text-center">
               <p className="text-[11px] font-semibold text-slate-700">
-                No grade adjustments recorded
+                {available
+                  ? "No grade adjustments recorded"
+                  : "Adjustment data unavailable"}
               </p>
               <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
-                Correction notes will appear here when the school records an
-                adjustment.
+                {available
+                  ? "Correction notes will appear here when the school records an adjustment."
+                  : "Adjustment information could not be loaded. Please try again later."}
               </p>
             </div>
           )}
@@ -758,7 +758,7 @@ function BottomNav() {
       aria-label="Mobile navigation"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200/70 bg-white/95 backdrop-blur-xl lg:hidden print:hidden"
     >
-      <div className="grid grid-cols-4 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
+      <div className="grid grid-cols-2 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
 

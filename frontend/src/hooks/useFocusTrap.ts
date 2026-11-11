@@ -57,7 +57,7 @@ export function useFocusTrap<T extends HTMLElement>(
       getFocusable()[0] ??
       container;
 
-    window.setTimeout(() => {
+    const initialFocusTimer = window.setTimeout(() => {
       initialTarget.focus();
     }, 0);
 
@@ -83,7 +83,11 @@ export function useFocusTrap<T extends HTMLElement>(
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
 
-      if (event.shiftKey && document.activeElement === first) {
+      if (
+        event.shiftKey &&
+        (document.activeElement === first ||
+          !focusable.includes(document.activeElement as HTMLElement))
+      ) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -95,6 +99,7 @@ export function useFocusTrap<T extends HTMLElement>(
     document.addEventListener("keydown", handleKeyDown);
 
     return () => {
+      window.clearTimeout(initialFocusTimer);
       document.removeEventListener("keydown", handleKeyDown);
       previouslyFocused?.focus();
     };
