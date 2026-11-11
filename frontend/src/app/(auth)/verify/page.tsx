@@ -1,19 +1,27 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ShieldCheck, ArrowRight, Edit3, AlertCircle, Loader2 } from 'lucide-react';
 
 export default function VerifyPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-slate-600">Loading verification…</div>}>
+      <VerifyPageContent />
+    </Suspense>
+  );
+}
+
+function VerifyPageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const phone = searchParams.get('phone') || '+254 7•• ••• 678';
+
   // Start with empty strings so the user can type freely
   const [code, setCode] = useState(['', '', '', '', '', '']);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [countdown, setCountdown] = useState(42);
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const phone = searchParams.get('phone') || '+254 7•• ••• 678';
-  
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   useEffect(() => {
@@ -65,13 +73,16 @@ export default function VerifyPage() {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error?.message || 'That code didn\'t match. Check the SMS and try again.');
+      if (!res.ok) {
+        const errorMessage = typeof data?.error?.message === 'string' ? data.error.message : "That code didn't match. Check the SMS and try again.";
+        throw new Error(errorMessage);
+      }
 
-      // Store token and route to dashboard / membership selector
       localStorage.setItem('auth_token', data.token);
       router.push('/dashboard');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'That code did not match. Check the SMS and try again.';
+      setError(message);
     } finally {
       setLoading(false);
     }
