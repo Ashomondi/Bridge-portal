@@ -13,25 +13,19 @@ import {
   QrCode, 
   ArrowRight, 
   X, 
-  Sliders, 
-  FileText, 
-  Palette, 
-  Code2 
+  Sliders
 } from 'lucide-react';
 
 export default function SystemHealthPage() {
   const router = useRouter();
   const [activeFrame, setActiveFrame] = useState<'404' | '403' | 'timeout' | 'offline' | 'qr'>('404');
   const [isOfflineBannerVisible, setIsOfflineBannerVisible] = useState(true);
+  const userName = 'Account Holder';
+  const roleLabel = 'School role';
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#e0f2f1] via-[#f4f8f7] to-white flex flex-col items-center p-4 md:p-8 text-slate-800">
       
-      {/* Top Demo Banner */}
-      <div className="text-xs font-medium text-slate-600 bg-white/80 backdrop-blur px-4 py-1.5 rounded-full border border-slate-200/60 shadow-sm mb-4">
-        Demo environment • sample data only
-      </div>
-
       {/* Main Container Wrapper */}
       <div className="w-full max-w-6xl bg-white/90 backdrop-blur-md border border-slate-200/90 rounded-[32px] p-6 md:p-8 shadow-2xl space-y-6">
         
@@ -60,11 +54,11 @@ export default function SystemHealthPage() {
             </button>
             <div className="flex items-center gap-2.5 bg-slate-100 pl-3 pr-4 py-1.5 rounded-full border border-slate-200">
               <div className="w-7 h-7 rounded-full bg-[#008272] text-white flex items-center justify-center text-xs font-bold">
-                GM
+                AH
               </div>
               <div className="text-left leading-tight">
-                <p className="text-xs font-bold text-slate-900">Grace Mwangi</p>
-                <p className="text-[10px] text-slate-500">CBC Lead Admin</p>
+                <p className="text-xs font-bold text-slate-900">{userName}</p>
+                <p className="text-[10px] text-slate-500">{roleLabel}</p>
               </div>
             </div>
           </div>
@@ -147,7 +141,7 @@ export default function SystemHealthPage() {
               <div className="space-y-2">
                 <h3 className="text-2xl font-bold tracking-tight text-slate-900">We can&apos;t find that page</h3>
                 <p className="text-xs text-slate-600 leading-relaxed max-w-xs mx-auto">
-                  The link may be old or mistyped. Check the URL or return to your student dashboard.
+                  The link may be old or mistyped. Check the URL or return to your dashboard.
                 </p>
               </div>
               <div className="space-y-3 pt-2">
@@ -180,7 +174,7 @@ export default function SystemHealthPage() {
               <div className="space-y-2">
                 <h3 className="text-2xl font-bold tracking-tight text-slate-900">403 Forbidden</h3>
                 <p className="text-xs text-slate-600 leading-relaxed max-w-xs mx-auto">
-                  Requires Guardian / CBC Lead elevated credentials to access this registry zone.
+                  This section requires a higher-level role or valid access to continue.
                 </p>
               </div>
               <button 
@@ -203,7 +197,7 @@ export default function SystemHealthPage() {
               <div className="space-y-2">
                 <h3 className="text-2xl font-bold tracking-tight text-slate-900">Session Timeout</h3>
                 <p className="text-xs text-slate-600 leading-relaxed max-w-xs mx-auto">
-                  Auto-logout protection triggered for unattended classroom terminals.
+                  Auto-logout protection triggered for unattended access.
                 </p>
               </div>
               <button 
@@ -259,138 +253,12 @@ export default function SystemHealthPage() {
                 Use Phone Sign-In
               </button>
               <span className="inline-block px-3 py-1 bg-purple-50 text-purple-700 rounded-full text-[11px] font-mono">
-                • Token Validation Error
+                • QR token invalid • retry scanning
               </span>
             </div>
           )}
-
         </div>
-
-        {/* Design System State Matrix Section */}
-        <div className="space-y-4 pt-2">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
-            <div>
-              <h3 className="text-lg font-bold text-slate-900">Design System State Matrix</h3>
-              <p className="text-xs text-slate-500">Simultaneous comparative overview of desktop cards (440–480px nominal)</p>
-            </div>
-            <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-semibold self-start md:self-auto">
-              Token Compliant • High Trust Mode
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div 
-              onClick={() => setActiveFrame('403')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 2</span>
-                <div className="p-2 bg-rose-50 text-rose-600 rounded-xl group-hover:bg-rose-100 transition">
-                  <Lock className="w-4 h-4" />
-                </div>
-              </div>
-              <div>
-                <h4 className="font-bold text-slate-900 text-sm">403 Forbidden</h4>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">Requires Guardian / CBC Lead elevated credentials.</p>
-              </div>
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-[#008272]">
-                <span>Inspect Frame</span>
-                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
-              </div>
-            </div>
-
-            <div 
-              onClick={() => setActiveFrame('timeout')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 3</span>
-                <div className="p-2 bg-amber-50 text-amber-600 rounded-xl group-hover:bg-amber-100 transition">
-                  <Clock className="w-4 h-4" />
-                </div>
-              </div>
-              <div>
-                <h4 className="font-bold text-slate-900 text-sm">Session Timeout</h4>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">Auto-logout protection for unattended classroom terminals.</p>
-              </div>
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-[#008272]">
-                <span>Inspect Frame</span>
-                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
-              </div>
-            </div>
-
-            <div 
-              onClick={() => setActiveFrame('offline')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 4</span>
-                <div className="p-2 bg-purple-50 text-purple-600 rounded-xl group-hover:bg-purple-100 transition">
-                  <WifiOff className="w-4 h-4" />
-                </div>
-              </div>
-              <div>
-                <h4 className="font-bold text-slate-900 text-sm">Network Disconnect</h4>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">Full offline fallback with clear degraded capability notice.</p>
-              </div>
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-[#008272]">
-                <span>Inspect Frame</span>
-                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
-              </div>
-            </div>
-
-            <div 
-              onClick={() => setActiveFrame('qr')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 5</span>
-                <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl group-hover:bg-emerald-100 transition">
-                  <QrCode className="w-4 h-4" />
-                </div>
-              </div>
-              <div>
-                <h4 className="font-bold text-slate-900 text-sm">Invalid QR Token</h4>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">School desk context card and direct telephone fallback.</p>
-              </div>
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-[#008272]">
-                <span>Inspect Frame</span>
-                <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Implementation Specifications Footer Box */}
-        <div className="bg-[#f2f8f7] border border-slate-200 rounded-2xl p-6 grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-slate-700">
-          <div className="space-y-1">
-            <h4 className="font-bold text-slate-900 flex items-center gap-1.5">
-              <FileText className="w-4 h-4 text-[#008272]" /> Canvas Geometry
-            </h4>
-            <p className="text-slate-600 leading-relaxed">
-              Card container constrained between 440px and 480px width (rendered at 460px optimal). Centered with 96px top breathing margin and 24px border radius.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <h4 className="font-bold text-slate-900 flex items-center gap-1.5">
-              <Palette className="w-4 h-4 text-[#008272]" /> Color Palette Compliance
-            </h4>
-            <p className="text-slate-600 leading-relaxed">
-              Strict 60/30/10 ratio: 60% Atmospheric Canvas (#F2F6F6 with soft gradient wash), 30% Teal (#008080/#006565 buttons & links), 10% Lavender (#EEEAF8/#5B4F9B icon badge).
-            </p>
-          </div>
-          <div className="space-y-1">
-            <h4 className="font-bold text-slate-900 flex items-center gap-1.5">
-              <Code2 className="w-4 h-4 text-[#008272]" /> QA Developer Metadata
-            </h4>
-            <p className="text-slate-600 leading-relaxed">
-              Subtle footer tag provides error code and system state token to accelerate ticketing without alarming guardians or students.
-            </p>
-          </div>
-        </div>
-
       </div>
-
     </div>
   );
 }
