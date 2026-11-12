@@ -40,13 +40,15 @@ type ShortcodeResolver func(ctx context.Context, shortcode string) (string, erro
 
 // Service handles fee structures, student ledgers, M-Pesa STK push payments, and reconciliation.
 type Service struct {
-	DB               contracts.TenantDB
-	Audit            contracts.AuditLogger
-	Notifier         InAppNotifier
-	Daraja           DarajaProvider
-	PollQueue        STKPollQueue
-	ResolveShortcode ShortcodeResolver
-	Now              func() time.Time
+	DB                contracts.TenantDB
+	Audit             contracts.AuditLogger
+	Notifier          InAppNotifier
+	Daraja            DarajaProvider
+	PollQueue         STKPollQueue
+	ResolveShortcode  ShortcodeResolver
+	CallbackAuthToken string
+	VerifyCallback    func(r *http.Request) bool
+	Now               func() time.Time
 }
 
 func (s *Service) now() time.Time {

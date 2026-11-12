@@ -421,6 +421,16 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 			if paused {
 				return contracts.Fail(http.StatusForbidden, "CHAT_PAYMENT_PAUSED_PHONE_CHANGE", "Chat-initiated payments are paused for 24 hours after a phone number change.")
 			}
+
+			// Security Remediation 6.7: Chat-initiated payments must be sent to the guardian's registered phone
+			phoneCandidate := strings.TrimSpace(in.PhoneNumber)
+			if phoneCandidate != "" {
+				normCandidate, errCandidate := notifications.NormalizePhone(phoneCandidate)
+				normRegistered, errReg := notifications.NormalizePhone(registeredPhone)
+				if errCandidate == nil && errReg == nil && normCandidate != normRegistered {
+					return validationFail("phone_number", "CHAT_PHONE_OVERRIDE_FORBIDDEN", "Chat-initiated payments must be sent to the guardian's registered phone number.")
+				}
+			}
 		}
 
 		phoneCandidate := strings.TrimSpace(in.PhoneNumber)
@@ -515,12 +525,24 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 	}
 
 	if s.PollQueue != nil {
-		_ = s.PollQueue.EnqueueSTKPoll(ctx, STKPollTask{
+		if err := s.PollQueue.EnqueueSTKPoll(ctx, STKPollTask{
 			SchoolID:          p.SchoolID,
 			STKRequestID:      stkRequestID,
 			CheckoutRequestID: darajaResp.CheckoutRequestID,
 			EnqueuedAt:        s.now(),
-		}, 45*time.Second)
+		}, 45*time.Second); err != nil && s.Audit != nil {
+			_ = s.Audit.Log(ctx, nil, contracts.AuditEvent{
+				SchoolID:     p.SchoolID,
+				UserID:       p.UserID,
+				Action:       "billing.mpesa.stk_poll_enqueue_failed",
+				ResourceType: "mpesa_stk_request",
+				ResourceID:   stkRequestID,
+				Details: map[string]any{
+					"checkout_request_id": darajaResp.CheckoutRequestID,
+					"error":               err.Error(),
+				},
+			})
+		}
 	}
 
 	return STKPushInitiated{
@@ -661,10 +683,11 @@ func (s *Service) settleSTKResultTx(
 	if receipt == "" {
 		return contracts.Fail(http.StatusUnprocessableEntity, "MISSING_MPESA_RECEIPT", "Successful STK callback requires an MpesaReceiptNumber.")
 	}
-	settledAmount := reqAmount
-	if callbackAmount > 0 {
-		settledAmount = callbackAmount
+	// Security Remediation 6.4: Validate that callback amount matches initiated STK amount exactly
+	if callbackAmount > 0 && callbackAmount != reqAmount {
+		return contracts.Fail(http.StatusUnprocessableEntity, "MPESA_AMOUNT_MISMATCH", "Callback amount does not match initiated STK amount.")
 	}
+	settledAmount := reqAmount
 	settledPhone := reqPhone
 	if norm, err := notifications.NormalizePhone(phoneStr); err == nil {
 		settledPhone = norm
