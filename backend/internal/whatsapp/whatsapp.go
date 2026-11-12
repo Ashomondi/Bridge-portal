@@ -1,14 +1,17 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"sort"
@@ -116,6 +119,7 @@ type Service struct {
 	SenderBlockDuration time.Duration
 	SessionTTL          time.Duration
 	OTPTTL              time.Duration
+	MaxOTPAttempts      int
 	Now                 func() time.Time
 
 	once    sync.Once
@@ -743,9 +747,37 @@ func (s *Service) transitionVerifyOTPTx(ctx context.Context, tx pgx.Tx, schoolID
 	if len(code) != 6 || session.OTPHash == nil || session.OTPExpiresAt == nil || !now.Before(*session.OTPExpiresAt) {
 		return contracts.Fail(http.StatusUnauthorized, "INVALID_OTP", "The verification code is invalid or has expired.")
 	}
+
+	maxAttempts := s.MaxOTPAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	if session.OTPAttempts >= maxAttempts {
+		_, _ = tx.Exec(ctx, `
+			UPDATE chat_sessions
+			SET state = $1, otp_hash = NULL, otp_expires_at = NULL, updated_at = NOW()
+			WHERE school_id = $2 AND id = $3`,
+			StateAwaitingAdmissionNumber, schoolID, session.ID,
+		)
+		return contracts.Fail(http.StatusTooManyRequests, "OTP_ATTEMPTS_EXHAUSTED", "Too many invalid verification attempts. Please start over and request a new code.")
+	}
+
 	candidateHash := hashSecret(code)
 	if subtle.ConstantTimeCompare([]byte(candidateHash), []byte(*session.OTPHash)) != 1 {
 		newAttempts := session.OTPAttempts + 1
+		if newAttempts >= maxAttempts {
+			_, _ = tx.Exec(ctx, `
+				UPDATE chat_sessions
+				SET state = $1,
+				    otp_hash = NULL,
+				    otp_expires_at = NULL,
+				    otp_attempts = $2,
+				    updated_at = NOW()
+				WHERE school_id = $3 AND id = $4`,
+				StateAwaitingAdmissionNumber, newAttempts, schoolID, session.ID,
+			)
+			return contracts.Fail(http.StatusTooManyRequests, "OTP_ATTEMPTS_EXHAUSTED", "Too many invalid verification attempts. Please start over and request a new code.")
+		}
 		_, _ = tx.Exec(ctx, `
 			UPDATE chat_sessions
 			SET otp_attempts = $1, updated_at = NOW()
@@ -893,9 +925,24 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 	})
 
 	mux.HandleFunc("POST /api/v1/whatsapp/webhook", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			contracts.WriteError(w, contracts.Fail(http.StatusBadRequest, "INVALID_REQUEST", "Could not read webhook body."))
+			return
+		}
+		if service.WebhookAppSecret != "" {
+			sigHeader := r.Header.Get("X-Hub-Signature-256")
+			if !verifyWebhookSignature(service.WebhookAppSecret, sigHeader, bodyBytes) {
+				contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "WEBHOOK_SIGNATURE_INVALID", "Invalid or missing WhatsApp webhook signature."))
+				return
+			}
+		}
 		var payload MetaWebhookPayload
-		if err := contracts.Decode(w, r, &payload); err != nil {
-			contracts.WriteError(w, err)
+		decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&payload); err != nil {
+			contracts.WriteError(w, contracts.Fail(http.StatusBadRequest, "INVALID_JSON", "A valid JSON request is required."))
 			return
 		}
 		var responses []SessionResponse
@@ -931,10 +978,13 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 			contracts.WriteError(w, err)
 			return
 		}
-		if input.SchoolID == "" && identity != nil {
-			if p, err := contracts.RequireIdentity(r, identity); err == nil {
-				input.SchoolID = p.SchoolID
+		if identity != nil {
+			p, err := contracts.RequireIdentity(r, identity)
+			if err != nil {
+				contracts.WriteError(w, err)
+				return
 			}
+			input.SchoolID = p.SchoolID
 		}
 		res, err := service.StartOrAdvanceSession(r.Context(), input)
 		if err != nil {
@@ -951,10 +1001,13 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 			return
 		}
 		schoolID := r.URL.Query().Get("school_id")
-		if schoolID == "" && identity != nil {
-			if p, err := contracts.RequireIdentity(r, identity); err == nil {
-				schoolID = p.SchoolID
+		if identity != nil {
+			p, err := contracts.RequireIdentity(r, identity)
+			if err != nil {
+				contracts.WriteError(w, err)
+				return
 			}
+			schoolID = p.SchoolID
 		}
 		res, err := service.HandleSessionOTP(r.Context(), schoolID, r.PathValue("id"), input)
 		if err != nil {

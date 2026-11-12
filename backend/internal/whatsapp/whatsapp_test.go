@@ -278,4 +278,50 @@ func TestWhatsAppStateMachineTenantIsolationAndRateLimits(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"VERIFIED"`) {
 		t.Fatalf("POST /api/v1/chat/sessions/{id}/otp failed: %d %s", rec.Code, rec.Body.String())
 	}
+
+	// Security Regression 6.5: Max OTP Verification Attempt Limits
+	currentNow = currentNow.Add(5 * time.Minute)
+	resExhaust, err := svc.StartOrAdvanceSession(ctx, whatsapp.StartSessionInput{
+		SchoolID:            schoolA.ID,
+		SenderWANumber:      "+254722111482",
+		AdmissionNumber:     "ADM-A-100",
+		GuardianChoiceIndex: &choiceOne,
+	})
+	if err != nil || resExhaust.State != whatsapp.StateAwaitingOTP {
+		t.Fatalf("expected state AwaitingOTP, got %+v (%v)", resExhaust, err)
+	}
+	// Try 4 invalid codes
+	for i := 0; i < 4; i++ {
+		_, err := svc.HandleSessionOTP(ctx, schoolA.ID, resExhaust.SessionID, whatsapp.SessionOTPInput{OTP: "000000"})
+		if !errors.As(err, &apiErr) || apiErr.Code != "INVALID_OTP" {
+			t.Fatalf("attempt %d: expected INVALID_OTP, got %v", i+1, err)
+		}
+	}
+	// 5th invalid attempt must exhaust the OTP session
+	_, err = svc.HandleSessionOTP(ctx, schoolA.ID, resExhaust.SessionID, whatsapp.SessionOTPInput{OTP: "000000"})
+	if !errors.As(err, &apiErr) || apiErr.Code != "OTP_ATTEMPTS_EXHAUSTED" {
+		t.Fatalf("expected OTP_ATTEMPTS_EXHAUSTED on 5th failure, got %v", err)
+	}
+
+	// Security Regression 6.1: Webhook Signature Verification
+	svc.WebhookAppSecret = "meta-webhook-app-secret"
+	muxSecure := http.NewServeMux()
+	whatsapp.RegisterRoutes(muxSecure, svc, nil)
+
+	// Missing signature should fail
+	reqNoSig := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook?school_id="+schoolA.ID, bytes.NewBufferString(`{"entry":[]}`))
+	recNoSig := httptest.NewRecorder()
+	muxSecure.ServeHTTP(recNoSig, reqNoSig)
+	if recNoSig.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on missing webhook signature, got %d", recNoSig.Code)
+	}
+
+	// Invalid signature should fail
+	reqBadSig := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook?school_id="+schoolA.ID, bytes.NewBufferString(`{"entry":[]}`))
+	reqBadSig.Header.Set("X-Hub-Signature-256", "sha256=invalidhash000000000000000000000000000000000000000000000000000000")
+	recBadSig := httptest.NewRecorder()
+	muxSecure.ServeHTTP(recBadSig, reqBadSig)
+	if recBadSig.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on invalid webhook signature, got %d", recBadSig.Code)
+	}
 }
