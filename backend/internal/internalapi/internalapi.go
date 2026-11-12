@@ -92,11 +92,34 @@ type Service struct {
 	Billing              *billing.Service
 	Academics            AcademicsReader
 	InternalServiceToken string
+	AIServiceToken       string
+	ContextSigningKey    string
+	Environment          string
 	AIServiceBaseURL     string
 	PortalBaseURL        string
 	HTTPClient           *http.Client
 	ContextTTL           time.Duration
 	Now                  func() time.Time
+}
+
+func (s *Service) signingKey() string {
+	if s != nil && strings.TrimSpace(s.ContextSigningKey) != "" {
+		return strings.TrimSpace(s.ContextSigningKey)
+	}
+	if s != nil {
+		return strings.TrimSpace(s.InternalServiceToken)
+	}
+	return ""
+}
+
+func (s *Service) aiServiceToken() string {
+	if s != nil && strings.TrimSpace(s.AIServiceToken) != "" {
+		return strings.TrimSpace(s.AIServiceToken)
+	}
+	if s != nil {
+		return strings.TrimSpace(s.InternalServiceToken)
+	}
+	return ""
 }
 
 func (s *Service) now() time.Time {
@@ -152,7 +175,7 @@ func (s *Service) AuthenticateInternalRequest(r *http.Request) (UserContext, con
 		return UserContext{}, contracts.Principal{}, err
 	}
 	now := s.now()
-	uctx, err := VerifyUserContext(r.Header.Get(HeaderUserContext), s.InternalServiceToken, now)
+	uctx, err := VerifyUserContext(r.Header.Get(HeaderUserContext), s.signingKey(), now)
 	if err != nil {
 		return UserContext{}, contracts.Principal{}, err
 	}
@@ -362,23 +385,70 @@ func (s *Service) InitiateInternalSTKPush(ctx context.Context, uctx UserContext,
 	return s.Billing.InitiateSTKPush(ctx, p, in, true)
 }
 
-func sanitizeMetadata(in map[string]any) map[string]any {
+func isSensitiveKey(k string) bool {
+	lower := strings.ToLower(strings.TrimSpace(k))
+	clean := strings.ReplaceAll(strings.ReplaceAll(lower, "-", "_"), " ", "_")
+	for _, part := range strings.Split(clean, "_") {
+		switch part {
+		case "key", "keys", "token", "tokens", "secret", "secrets",
+			"password", "passwords", "otp", "passkey", "passkeys",
+			"auth", "authorization", "signature", "signatures",
+			"credential", "credentials":
+			return true
+		}
+	}
+	sensitiveSubstrings := []string{
+		"token", "secret", "password", "passkey", "otp", "auth",
+		"signature", "credential", "x-internal", "x-user-context",
+	}
+	for _, sub := range sensitiveSubstrings {
+		if strings.Contains(clean, sub) {
+			return true
+		}
+	}
+	if strings.Contains(clean, "api_key") || strings.Contains(clean, "priv_key") || strings.Contains(clean, "pub_key") || clean == "key" {
+		return true
+	}
+	return false
+}
+
+func sanitizeValue(val any) any {
+	switch v := val.(type) {
+	case map[string]any:
+		return sanitizeMap(v)
+	case []any:
+		cleanedSlice := make([]any, 0, len(v))
+		for _, item := range v {
+			cleanedSlice = append(cleanedSlice, sanitizeValue(item))
+		}
+		return cleanedSlice
+	default:
+		return v
+	}
+}
+
+func sanitizeMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
 	out := make(map[string]any, len(in))
 	for k, v := range in {
-		lower := strings.ToLower(strings.TrimSpace(k))
-		if strings.Contains(lower, "secret") ||
-			strings.Contains(lower, "token") ||
-			strings.Contains(lower, "password") ||
-			strings.Contains(lower, "passkey") ||
-			strings.Contains(lower, "otp") ||
-			strings.Contains(lower, "authorization") ||
-			strings.Contains(lower, "x-internal") ||
-			strings.Contains(lower, "x-user-context") {
+		if isSensitiveKey(k) {
 			continue
 		}
-		out[k] = v
+		out[k] = sanitizeValue(v)
 	}
 	return out
+}
+
+// SanitizeMetadata strips sensitive keys (passwords, tokens, keys, OTPs, signatures, credentials)
+// recursively at any nesting level.
+func SanitizeMetadata(in map[string]any) map[string]any {
+	return sanitizeMap(in)
+}
+
+func sanitizeMetadata(in map[string]any) map[string]any {
+	return SanitizeMetadata(in)
 }
 
 func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, in AIAuditLogInput) (string, error) {
@@ -435,6 +505,15 @@ func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, in AIA
 
 // ForwardParentQuery implements whatsapp.AIForwarder and also powers the in-app chat proxy.
 func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParentQueryInput) (string, error) {
+	aiURL := s.aiBaseURL()
+	isProd := false
+	if s != nil && (strings.EqualFold(s.Environment, "production") || strings.EqualFold(s.Environment, "prod")) {
+		isProd = true
+	}
+	if isProd && !strings.HasPrefix(strings.ToLower(aiURL), "https://") {
+		return "", contracts.Fail(http.StatusBadGateway, "INSECURE_AI_TRANSPORT", "AI service URL must use HTTPS in production environment.")
+	}
+
 	now := s.now()
 	exp := now.Add(s.contextTTL())
 	if !input.ExpiresAt.IsZero() && input.ExpiresAt.Before(exp) {
@@ -448,7 +527,7 @@ func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParen
 		Channel:      input.Channel,
 		SessionID:    input.SessionID,
 		Exp:          exp.UTC().Unix(),
-	}, s.InternalServiceToken)
+	}, s.signingKey())
 	if err != nil {
 		return "", err
 	}
@@ -464,12 +543,12 @@ func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParen
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aiBaseURL()+"/parent-query", bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, aiURL+"/parent-query", bytes.NewReader(encoded))
 	if err != nil {
 		return "", contracts.Fail(http.StatusBadGateway, "AI_SERVICE_UNAVAILABLE", "Could not build AI assistant request.")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(HeaderInternalServiceToken, s.InternalServiceToken)
+	req.Header.Set(HeaderInternalServiceToken, s.aiServiceToken())
 	req.Header.Set(HeaderUserContext, signedCtx)
 
 	resp, err := s.httpClient().Do(req)

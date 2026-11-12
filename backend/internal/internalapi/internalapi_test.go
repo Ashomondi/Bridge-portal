@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/Ashomondi/ikonex-academy/backend/internal/billing/testenv"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/whatsapp"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -454,5 +456,228 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 	}
 	if capturedAIBody["message"] != "How much do I owe for Term 1?" {
 		t.Fatalf("unexpected forwarded AI body: %+v", capturedAIBody)
+	}
+}
+
+func TestCredentialSeparationAndProductionHTTPS(t *testing.T) {
+	now := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	var capturedAIToken, capturedAICtxHeader string
+
+	aiServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAIToken = r.Header.Get(internalapi.HeaderInternalServiceToken)
+		capturedAICtxHeader = r.Header.Get(internalapi.HeaderUserContext)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"reply":"Secure AI response"}`))
+	}))
+	defer aiServer.Close()
+
+	svc := &internalapi.Service{
+		InternalServiceToken: "incoming-internal-token",
+		AIServiceToken:       "outgoing-ai-service-token",
+		ContextSigningKey:    "hmac-signing-key-separate",
+		Environment:          "production",
+		AIServiceBaseURL:     "http://plain-http-ai.internal/api/v1/ai",
+		HTTPClient:           aiServer.Client(),
+		Now:                  func() time.Time { return now },
+	}
+
+	ctx := context.Background()
+	input := internalapi.UserContext{
+		UserID:       "11111111-1111-4111-8111-111111111111",
+		SchoolID:     "22222222-2222-4222-8222-222222222222",
+		MembershipID: "33333333-3333-4333-8333-333333333333",
+		Role:         "parent",
+		Channel:      "in_app",
+	}
+
+	// 1. In production, HTTP scheme must be rejected with INSECURE_AI_TRANSPORT
+	_, err := svc.ForwardParentQuery(ctx, whatsapp.AIParentQueryInput{
+		UserID:       input.UserID,
+		SchoolID:     input.SchoolID,
+		MembershipID: input.MembershipID,
+		Role:         input.Role,
+		Channel:      input.Channel,
+		Message:      "Hello?",
+	})
+	var apiErr *contracts.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "INSECURE_AI_TRANSPORT" {
+		t.Fatalf("expected INSECURE_AI_TRANSPORT error for plain HTTP in production, got: %v", err)
+	}
+
+	// 2. Point to HTTPS mock server
+	svc.AIServiceBaseURL = aiServer.URL + "/api/v1/ai"
+	svc.HTTPClient = aiServer.Client()
+
+	reply, err := svc.ForwardParentQuery(ctx, whatsapp.AIParentQueryInput{
+		UserID:       input.UserID,
+		SchoolID:     input.SchoolID,
+		MembershipID: input.MembershipID,
+		Role:         input.Role,
+		Channel:      input.Channel,
+		Message:      "Hello?",
+	})
+	if err != nil {
+		t.Fatalf("ForwardParentQuery failed with HTTPS: %v", err)
+	}
+	if reply != "Secure AI response" {
+		t.Fatalf("unexpected reply: %q", reply)
+	}
+
+	// 3. Verify outbound auth token uses AIServiceToken (separated from InternalServiceToken)
+	if capturedAIToken != "outgoing-ai-service-token" {
+		t.Fatalf("captured token = %q, want 'outgoing-ai-service-token'", capturedAIToken)
+	}
+
+	// 4. Verify context was signed by ContextSigningKey, NOT InternalServiceToken or AIServiceToken
+	if _, err := internalapi.VerifyUserContext(capturedAICtxHeader, "incoming-internal-token", now); err == nil {
+		t.Fatal("expected verification with InternalServiceToken to fail")
+	}
+	if _, err := internalapi.VerifyUserContext(capturedAICtxHeader, "outgoing-ai-service-token", now); err == nil {
+		t.Fatal("expected verification with AIServiceToken to fail")
+	}
+	verified, err := internalapi.VerifyUserContext(capturedAICtxHeader, "hmac-signing-key-separate", now)
+	if err != nil {
+		t.Fatalf("verification with ContextSigningKey failed: %v", err)
+	}
+	if verified.UserID != input.UserID || verified.SchoolID != input.SchoolID {
+		t.Fatalf("verified user context mismatch: %+v", verified)
+	}
+}
+
+func TestDeepRecursiveMetadataSanitization(t *testing.T) {
+	deepMetadata := map[string]any{
+		"request_id": "req-98765",
+		"normal_str": "harmless_value",
+		"top_secret": "drop-me",
+		"nested_obj": map[string]any{
+			"safe_nested":  "visible",
+			"bearer_token": "drop-nested-bearer",
+			"sub_obj": map[string]any{
+				"password":    "super-secret-pwd",
+				"api_key":     "key-12345",
+				"deep_safe":   42,
+				"passkey":     "fido2-cred",
+				"credentials": map[string]any{"raw": "hidden"},
+			},
+		},
+		"slice_of_items": []any{
+			map[string]any{
+				"item_name": "book",
+				"otp_code":  "999888",
+			},
+			map[string]any{
+				"signature": "hmac-sig-123",
+				"approved":  true,
+			},
+		},
+	}
+
+	sanitized := internalapi.SanitizeMetadata(deepMetadata)
+	sanitizedBytes, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatalf("marshal sanitized: %v", err)
+	}
+	sanitizedStr := string(sanitizedBytes)
+
+	// Must preserve safe fields
+	for _, safeVal := range []string{"req-98765", "harmless_value", "visible", "42", "book", "approved"} {
+		if !strings.Contains(sanitizedStr, safeVal) {
+			t.Errorf("expected sanitized metadata to contain safe field %q, got: %s", safeVal, sanitizedStr)
+		}
+	}
+
+	// Must strip sensitive fields at all depths
+	for _, sensitiveVal := range []string{
+		"drop-me",
+		"drop-nested-bearer",
+		"super-secret-pwd",
+		"key-12345",
+		"fido2-cred",
+		"hidden",
+		"999888",
+		"hmac-sig-123",
+		"bearer_token",
+		"password",
+		"api_key",
+		"passkey",
+		"credentials",
+		"otp_code",
+		"signature",
+	} {
+		if strings.Contains(sanitizedStr, sensitiveVal) {
+			t.Errorf("expected sanitized metadata to strip sensitive value %q, found in: %s", sensitiveVal, sanitizedStr)
+		}
+	}
+
+	db := testenv.New(t, true)
+	school := db.SeedSchool(t, "01")
+	ctx := context.Background()
+	now := time.Date(2026, 5, 12, 11, 0, 0, 0, time.UTC)
+
+	svc := &internalapi.Service{
+		DB:                   db,
+		InternalServiceToken: "secret-token",
+		Now:                  func() time.Time { return now },
+	}
+
+	uctx := internalapi.UserContext{
+		UserID:       school.UserID,
+		SchoolID:     school.ID,
+		MembershipID: school.MembershipID,
+		Role:         "parent",
+		Channel:      "in_app",
+		Exp:          now.Add(1 * time.Hour).Unix(),
+	}
+
+	logID, err := svc.RecordAIAuditLog(ctx, uctx, internalapi.AIAuditLogInput{
+		Feature:       "parent_query",
+		Intent:        "check_grades",
+		EndpointsRead: []string{"/api/v1/internal/students/1/marks"},
+		ActionTaken:   "return_summary",
+		Metadata:      deepMetadata,
+	})
+	if err != nil {
+		t.Fatalf("RecordAIAuditLog: %v", err)
+	}
+	if logID == "" {
+		t.Fatal("expected non-empty logID")
+	}
+
+	var storedMeta string
+	err = db.WithTenantTx(ctx, school.ID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata::text FROM ai_action_logs WHERE id = $1`, logID).Scan(&storedMeta)
+	})
+	if err != nil {
+		t.Fatalf("query ai_action_logs: %v", err)
+	}
+
+	// Must preserve safe fields
+	for _, safeVal := range []string{"req-98765", "harmless_value", "visible", "deep_safe", "book", "approved"} {
+		if !strings.Contains(storedMeta, safeVal) {
+			t.Errorf("expected stored metadata to contain safe field %q, got: %s", safeVal, storedMeta)
+		}
+	}
+
+	// Must strip sensitive fields at all depths
+	for _, sensitiveVal := range []string{
+		"drop-me",
+		"drop-nested-bearer",
+		"super-secret-pwd",
+		"key-12345",
+		"fido2-cred",
+		"hidden",
+		"999888",
+		"hmac-sig-123",
+		"bearer_token",
+		"password",
+		"api_key",
+		"passkey",
+		"credentials",
+		"otp_code",
+		"signature",
+	} {
+		if strings.Contains(storedMeta, sensitiveVal) {
+			t.Errorf("expected stored metadata to strip sensitive value %q, found in: %s", sensitiveVal, storedMeta)
+		}
 	}
 }

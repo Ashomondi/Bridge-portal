@@ -55,11 +55,11 @@ func ValidateUserContext(ctx UserContext, now time.Time) error {
 }
 
 // SignUserContext encodes and signs UserContext in the exact Master Integration Plan format:
-// base64url_raw(json_payload) + "." + hex(hmac_sha256(base64url_payload, serviceToken))
-func SignUserContext(ctx UserContext, serviceToken string) (string, error) {
-	token := strings.TrimSpace(serviceToken)
-	if token == "" {
-		return "", contracts.Fail(http.StatusInternalServerError, "MISSING_SERVICE_TOKEN", "Internal service token is not configured.")
+// base64url_raw(json_payload) + "." + hex(hmac_sha256(base64url_payload, signingKey))
+func SignUserContext(ctx UserContext, signingKey string) (string, error) {
+	key := strings.TrimSpace(signingKey)
+	if key == "" {
+		return "", contracts.Fail(http.StatusInternalServerError, "MISSING_SIGNING_KEY", "Context signing key is not configured.")
 	}
 	if !contracts.ValidID(ctx.UserID) || !contracts.ValidID(ctx.SchoolID) || !contracts.ValidID(ctx.MembershipID) || strings.TrimSpace(ctx.Role) == "" || (ctx.Channel != "whatsapp" && ctx.Channel != "in_app") || ctx.Exp <= 0 {
 		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_USER_CONTEXT", "Cannot sign an incomplete user context.")
@@ -69,7 +69,7 @@ func SignUserContext(ctx UserContext, serviceToken string) (string, error) {
 		return "", err
 	}
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	mac := hmac.New(sha256.New, []byte(token))
+	mac := hmac.New(sha256.New, []byte(key))
 	_, _ = mac.Write([]byte(encodedPayload))
 	signatureHex := hex.EncodeToString(mac.Sum(nil))
 	return encodedPayload + "." + signatureHex, nil
@@ -77,10 +77,10 @@ func SignUserContext(ctx UserContext, serviceToken string) (string, error) {
 
 // VerifyUserContext verifies X-User-Context using constant-time HMAC-SHA256 comparison
 // BEFORE trusting or decoding the JSON payload, and validates all required fields and expiration.
-func VerifyUserContext(headerValue, serviceToken string, now time.Time) (UserContext, error) {
-	token := strings.TrimSpace(serviceToken)
-	if token == "" {
-		return UserContext{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_INTERNAL_SERVICE", "Internal service token is not configured.")
+func VerifyUserContext(headerValue, signingKey string, now time.Time) (UserContext, error) {
+	key := strings.TrimSpace(signingKey)
+	if key == "" {
+		return UserContext{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_INTERNAL_SERVICE", "Context signing key is not configured.")
 	}
 	trimmed := strings.TrimSpace(headerValue)
 	if trimmed == "" {
@@ -91,7 +91,7 @@ func VerifyUserContext(headerValue, serviceToken string, now time.Time) (UserCon
 		return UserContext{}, contracts.Fail(http.StatusUnauthorized, "INVALID_USER_CONTEXT_SIGNATURE", "Malformed X-User-Context header.")
 	}
 
-	mac := hmac.New(sha256.New, []byte(token))
+	mac := hmac.New(sha256.New, []byte(key))
 	_, _ = mac.Write([]byte(parts[0]))
 	expectedSigHex := hex.EncodeToString(mac.Sum(nil))
 
