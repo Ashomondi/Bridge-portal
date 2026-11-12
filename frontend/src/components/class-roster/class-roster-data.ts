@@ -64,6 +64,7 @@ export const AVATAR_TONE_CLASSES = [
   "bg-[#EAF2FB] text-[#356C9B]",
 ] as const;
 
+/** Returns the learner's initials, falling back to the first letters of their name. */
 export function getStudentInitials(student: RosterStudent) {
   if (student.initials?.trim()) {
     return student.initials.trim();
@@ -78,16 +79,19 @@ export function getStudentInitials(student: RosterStudent) {
   return parts.map((part) => part[0]?.toUpperCase()).join("") || "—";
 }
 
+/** Formats a count using British English grouping, or an em dash when absent. */
 export function formatCount(value: number | null) {
   return value === null || value === undefined
     ? "—"
     : value.toLocaleString("en-GB");
 }
 
+/** Formats an attendance percentage, or a "not recorded" label when absent. */
 export function formatPercent(value: number | null) {
   return value === null || value === undefined ? "Not recorded" : `${value}%`;
 }
 
+/** Returns the learner's primary guardian, falling back to the first linked guardian. */
 export function getPrimaryGuardian(student: RosterStudent) {
   return (
     student.guardians.find((guardian) => guardian.isPrimary) ??

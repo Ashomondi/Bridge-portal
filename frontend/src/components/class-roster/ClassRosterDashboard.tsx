@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Award,
   BarChart3,
@@ -72,18 +72,32 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Notifications", icon: Bell, href: "#", dot: true },
 ];
 
-const BOTTOM_NAV = [
+type BottomNavItem = {
+  label: string;
+  icon: LucideIcon;
+  href?: string;
+  active?: boolean;
+  opensDrawer?: boolean;
+};
+
+const BOTTOM_NAV: BottomNavItem[] = [
   { label: "Home", icon: Home },
-  { label: "Timetable", icon: CalendarDays },
-  { label: "Class", icon: UsersRound, active: true },
+  { label: "Timetable", icon: CalendarDays, href: "/teacher" },
+  { label: "Class", icon: UsersRound, active: true, href: "/teacher/class" },
   { label: "Roll-call", icon: ClipboardCheck },
-  { label: "More", icon: MoreHorizontal },
+  { label: "More", icon: MoreHorizontal, opensDrawer: true },
 ];
 
+/**
+ * Teacher roster dashboard. Renders the class roster, filters, pagination and
+ * the contextual learner detail panel for the authenticated teacher.
+ */
 export default function ClassRosterDashboard({
   roster,
+  isPreview = false,
 }: {
   roster: ClassRosterData | null;
+  isPreview?: boolean;
 }) {
   const students = roster?.students ?? [];
   const portalName = roster?.portal?.name?.trim() || "Teacher portal";
@@ -150,7 +164,7 @@ export default function ClassRosterDashboard({
     startIndex + ROSTER_PAGE_SIZE,
   );
   const selectedStudent =
-    filteredStudents.find((student) => student.id === selectedId) ??
+    pageRows.find((student) => student.id === selectedId) ??
     pageRows[0] ??
     null;
   const firstVisible = filteredStudents.length === 0 ? 0 : startIndex + 1;
@@ -162,6 +176,21 @@ export default function ClassRosterDashboard({
     query.trim().length > 0 ||
     guardianFilter !== "all" ||
     attendanceFilter !== "all";
+
+  // Keep the selected learner aligned with a row that is visible on the
+  // current page whenever filters or pagination change.
+  useEffect(() => {
+    if (pageRows.length === 0) {
+      if (selectedId !== "") {
+        setSelectedId("");
+      }
+      return;
+    }
+
+    if (!pageRows.some((student) => student.id === selectedId)) {
+      setSelectedId(pageRows[0].id);
+    }
+  }, [pageRows, selectedId]);
 
   function selectStudent(student: RosterStudent) {
     setSelectedId(student.id);
@@ -232,7 +261,7 @@ export default function ClassRosterDashboard({
             classTeacher={classTeacher}
             enrolledCount={enrolledCount}
             cycleLabel={cycleLabel}
-            hasClass={Boolean(classInfo)}
+            isPreview={isPreview}
           />
 
           <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(340px,1fr)]">
@@ -278,7 +307,7 @@ export default function ClassRosterDashboard({
         </main>
       </div>
 
-      <MobileBottomNav />
+      <MobileBottomNav onOpenMenu={() => setMenuOpen(true)} />
 
       {menuOpen && (
         <MobileDrawer
@@ -294,6 +323,7 @@ export default function ClassRosterDashboard({
   );
 }
 
+/** Sidebar branding, staff navigation and profile/logout footer. */
 function SidebarContent({
   portalName,
   userFullName,
@@ -400,6 +430,7 @@ function SidebarContent({
   );
 }
 
+/** Sticky desktop header with breadcrumb, notifications and profile menu. */
 function DesktopHeader({
   portalName,
   academicTerm,
@@ -455,6 +486,7 @@ function DesktopHeader({
   );
 }
 
+/** Fixed mobile app bar with the navigation drawer trigger. */
 function MobileAppBar({
   className,
   userInitials,
@@ -507,18 +539,22 @@ function MobileAppBar({
   );
 }
 
+/**
+ * Page heading with class metadata and roster actions. The roster actions stay
+ * disabled until their handlers are implemented.
+ */
 function PageHeader({
   className,
   classTeacher,
   enrolledCount,
   cycleLabel,
-  hasClass,
+  isPreview,
 }: {
   className: string;
   classTeacher: string;
   enrolledCount: number;
   cycleLabel: string;
-  hasClass: boolean;
+  isPreview: boolean;
 }) {
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -528,6 +564,11 @@ function PageHeader({
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
             My class roster
           </p>
+          {isPreview && (
+            <span className="rounded-full bg-[#FEF3D6] px-2 py-0.5 text-[9px] font-semibold text-[#7A5A16] ring-1 ring-[#F3E2B8]">
+              Preview
+            </span>
+          )}
         </div>
         <h1 className="mt-2 text-[26px] font-bold tracking-tight text-slate-900 sm:text-3xl">
           {className}
@@ -547,12 +588,21 @@ function PageHeader({
           <span className="text-slate-300">•</span>
           <span>{cycleLabel}</span>
         </div>
+        {isPreview && (
+          <p className="mt-2 max-w-2xl text-[11px] leading-relaxed text-[#7A5A16]">
+            Preview: live roster sync is not connected yet. Learner, guardian
+            and attendance data will appear once the authenticated roster
+            endpoint is available.
+          </p>
+        )}
       </div>
 
       <div className="flex w-full gap-2 sm:w-auto">
         <button
           type="button"
-          disabled={!hasClass}
+          disabled
+          aria-disabled="true"
+          title="Add students is not available yet"
           className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-xs font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
         >
           <UserPlus className="h-4 w-4" />
@@ -560,7 +610,9 @@ function PageHeader({
         </button>
         <button
           type="button"
-          disabled={!hasClass || enrolledCount === 0}
+          disabled
+          aria-disabled="true"
+          title="Roll-call is not available yet"
           className="inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-brand-500 px-3 text-xs font-semibold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
         >
           <ClipboardCheck className="h-4 w-4" />
@@ -571,6 +623,9 @@ function PageHeader({
   );
 }
 
+/**
+ * Filter controls for the roster: search, guardian status and attendance.
+ */
 function FilterBar({
   query,
   guardianFilter,
@@ -590,6 +645,7 @@ function FilterBar({
     <div className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card">
       <div className="flex flex-col gap-2.5 md:flex-row">
         <label className="relative min-w-0 flex-1">
+          <span className="sr-only">Search roster</span>
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             type="search"
@@ -616,7 +672,7 @@ function FilterBar({
           onChange={onAttendanceChange}
           options={[
             { value: "all", label: "All" },
-            { value: "above", label: "Above 90%" },
+            { value: "above", label: "90% or above" },
             { value: "below", label: "Below 90%" },
           ]}
         />
@@ -625,6 +681,7 @@ function FilterBar({
   );
 }
 
+/** Labelled select used by the roster filter bar. */
 function FilterSelect({
   label,
   value,
@@ -655,6 +712,32 @@ function FilterSelect({
   );
 }
 
+/**
+ * Returns a bounded window of page numbers so pagination never overflows the
+ * available width, even for long rosters.
+ */
+function getVisiblePages(
+  currentPage: number,
+  totalPages: number,
+  maxButtons = 5,
+) {
+  if (totalPages <= maxButtons) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+
+  const half = Math.floor(maxButtons / 2);
+  let start = Math.max(1, currentPage - half);
+  let end = start + maxButtons - 1;
+
+  if (end > totalPages) {
+    end = totalPages;
+    start = totalPages - maxButtons + 1;
+  }
+
+  return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+}
+
+/** Roster table with row selection, empty state and bounded pagination. */
 function RosterTable({
   students,
   selectedId,
@@ -871,7 +954,7 @@ function RosterTable({
           )}
         </p>
 
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <button
             type="button"
             onClick={() => onPageChange(page - 1)}
@@ -882,8 +965,7 @@ function RosterTable({
             Previous
           </button>
 
-          {Array.from({ length: totalPages }, (_, index) => index + 1).map(
-            (pageNumber) => (
+          {getVisiblePages(page, totalPages).map((pageNumber) => (
               <button
                 key={pageNumber}
                 type="button"
@@ -898,8 +980,7 @@ function RosterTable({
               >
                 {pageNumber}
               </button>
-            ),
-          )}
+          ))}
 
           <button
             type="button"
@@ -916,6 +997,7 @@ function RosterTable({
   );
 }
 
+/** Centred empty-state block used inside the roster table. */
 function EmptyTableState({ title, body }: { title: string; body: string }) {
   return (
     <div className="mx-auto max-w-sm text-center">
@@ -928,6 +1010,7 @@ function EmptyTableState({ title, body }: { title: string; body: string }) {
   );
 }
 
+/** Table column heading cell. */
 function TableHeading({ children }: { children: ReactNode }) {
   return (
     <th className="px-4 py-2.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-400 sm:px-5">
@@ -936,6 +1019,7 @@ function TableHeading({ children }: { children: ReactNode }) {
   );
 }
 
+/** Circular initials avatar for a learner. */
 function Avatar({
   student,
   toneIndex,
@@ -965,6 +1049,7 @@ function Avatar({
   );
 }
 
+/** Guardian verification status pill. */
 function GuardianBadge({ status }: { status: GuardianStatus }) {
   const verified = status === "verified";
 
@@ -987,6 +1072,7 @@ function GuardianBadge({ status }: { status: GuardianStatus }) {
   );
 }
 
+/** Contextual learner details: identity, guardians and attendance summary. */
 function StudentDetail({ student }: { student: RosterStudent }) {
   const primaryGuardian = getPrimaryGuardian(student);
   const attendance = student.attendance;
@@ -1120,11 +1206,12 @@ function StudentDetail({ student }: { student: RosterStudent }) {
         </div>
       </section>
 
-      <ActionAndPolicyCards />
+      <ActionAndPolicyCards disabled />
     </>
   );
 }
 
+/** Skeleton detail panel shown when no learner is selected. */
 function EmptyStudentDetail() {
   return (
     <>
@@ -1214,6 +1301,7 @@ function EmptyStudentDetail() {
   );
 }
 
+/** Assessment-portfolio action and data-protection policy callout. */
 function ActionAndPolicyCards({ disabled = false }: { disabled?: boolean }) {
   return (
     <>
@@ -1249,6 +1337,7 @@ function ActionAndPolicyCards({ disabled = false }: { disabled?: boolean }) {
   );
 }
 
+/** Small attendance metric tile. */
 function MetricCard({
   label,
   value,
@@ -1280,7 +1369,8 @@ function MetricCard({
   );
 }
 
-function MobileBottomNav() {
+/** Mobile bottom navigation. Implemented destinations link out; "More" opens the drawer. */
+function MobileBottomNav({ onOpenMenu }: { onOpenMenu: () => void }) {
   return (
     <nav
       aria-label="Mobile navigation"
@@ -1289,25 +1379,56 @@ function MobileBottomNav() {
       <div className="grid grid-cols-5 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.active ? "/teacher/class" : "#"}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition",
-                item.active
-                  ? "text-brand-600"
-                  : "text-slate-400 hover:text-slate-600",
-              )}
-            >
+          const itemClassName = cn(
+            "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition",
+            item.active
+              ? "text-brand-600"
+              : "text-slate-400 hover:text-slate-600",
+          );
+          const content = (
+            <>
               {item.active && (
                 <span className="absolute -top-1 h-0.5 w-8 rounded-full bg-brand-500" />
               )}
               <Icon className="h-5 w-5" />
               <span>{item.label}</span>
-            </a>
+            </>
+          );
+
+          if (item.opensDrawer) {
+            return (
+              <button
+                key={item.label}
+                type="button"
+                onClick={onOpenMenu}
+                className={itemClassName}
+              >
+                {content}
+              </button>
+            );
+          }
+
+          if (item.href) {
+            return (
+              <a
+                key={item.label}
+                href={item.href}
+                aria-current={item.active ? "page" : undefined}
+                className={itemClassName}
+              >
+                {content}
+              </a>
+            );
+          }
+
+          return (
+            <span
+              key={item.label}
+              aria-disabled="true"
+              className={cn(itemClassName, "cursor-default opacity-60")}
+            >
+              {content}
+            </span>
           );
         })}
       </div>
@@ -1315,6 +1436,10 @@ function MobileBottomNav() {
   );
 }
 
+/**
+ * Slide-in mobile navigation drawer. Moves focus inside on open, contains Tab,
+ * closes on Escape and restores focus to the trigger on close.
+ */
 function MobileDrawer({
   portalName,
   userFullName,
@@ -1330,15 +1455,77 @@ function MobileDrawer({
   userInitials: string;
   onClose: () => void;
 }) {
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const drawer = drawerRef.current;
+
+    const getFocusable = () =>
+      drawer
+        ? Array.from(
+            drawer.querySelectorAll<HTMLElement>(
+              'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])',
+            ),
+          ).filter((element) => element.offsetParent !== null)
+        : [];
+
+    getFocusable()[0]?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
   return (
     <div className="fixed inset-0 z-50 lg:hidden print:hidden">
       <button
         type="button"
         onClick={onClose}
+        tabIndex={-1}
         className="absolute inset-0 cursor-default bg-slate-900/40 backdrop-blur-sm animate-fade-in"
         aria-label="Close navigation menu"
       />
-      <div className="absolute inset-y-0 left-0 flex w-[84%] max-w-[320px] flex-col bg-white shadow-2xl animate-drawer-in">
+      <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation menu"
+        className="absolute inset-y-0 left-0 flex w-[84%] max-w-[320px] flex-col bg-white shadow-2xl animate-drawer-in"
+      >
         <div className="flex items-center justify-between px-5 pt-5">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
             Navigation
@@ -1367,6 +1554,7 @@ function MobileDrawer({
   );
 }
 
+/** Derives up to two uppercase initials from a display name. */
 function initialsFromName(name: string) {
   const parts = name
     .trim()
