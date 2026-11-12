@@ -43,10 +43,11 @@ func run(logger *log.Logger) error {
 	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.Expiry)
 	audit := database.NewAuditLogger(db.DB)
 	allowDevelopmentSMS := !strings.EqualFold(cfg.Environment, "production")
+	smsDispatcher := devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}
 
-	authService := auth.NewService(db.DB, tokens, devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}, audit)
+	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit)
 	consentService := consent.NewService(db.DB, audit)
-	onboardingService := onboarding.NewService(db.DB, audit)
+	onboardingService := onboarding.NewService(db.DB, audit, smsDispatcher, nil, cfg.RetentionDays)
 	authMiddleware := middleware.NewAuthMiddleware(db.DB, tokens)
 
 	mux := http.NewServeMux()
