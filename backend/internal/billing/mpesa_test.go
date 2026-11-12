@@ -294,4 +294,62 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 	if billed.String() != "10000.00" || paid.String() != "17500.00" || current.String() != "0.00" || credit.String() != "7500.00" {
 		t.Fatalf("expected paid=17500.00 credit=7500.00 after manual match, got billed=%s paid=%s current=%s credit=%s", billed, paid, current, credit)
 	}
+
+	// 8. Security Regression 6.4: Amount Mismatch on STK Callback rejected
+	stkRes2, err := svc.InitiateSTKPush(ctx, guardianA, billing.InitiateSTKPushInput{
+		StudentID: schoolA.StudentID,
+		Amount:    json.RawMessage(`"500.00"`),
+		Source:    "web",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cbMismatch billing.DarajaSTKCallbackEnvelope
+	cbMismatch.BusinessShortCode = "600001"
+	cbMismatch.Body.StkCallback.MerchantRequestID = stkRes2.MerchantRequestID
+	cbMismatch.Body.StkCallback.CheckoutRequestID = stkRes2.CheckoutRequestID
+	cbMismatch.Body.StkCallback.ResultCode = &zero
+	cbMismatch.Body.StkCallback.CallbackMetadata = &struct {
+		Item []struct {
+			Name  string          `json:"Name"`
+			Value json.RawMessage `json:"Value"`
+		} `json:"Item"`
+	}{
+		Item: []struct {
+			Name  string          `json:"Name"`
+			Value json.RawMessage `json:"Value"`
+		}{
+			{Name: "Amount", Value: json.RawMessage(`99999.00`)}, // Mismatched amount!
+			{Name: "MpesaReceiptNumber", Value: json.RawMessage(`"QWE999FAKE"`)},
+			{Name: "PhoneNumber", Value: json.RawMessage(`254700000001`)},
+		},
+	}
+	err = svc.ProcessSTKCallback(ctx, "", cbMismatch)
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnprocessableEntity || apiErr.Code != "MPESA_AMOUNT_MISMATCH" {
+		t.Fatalf("expected 422 MPESA_AMOUNT_MISMATCH, got %v", err)
+	}
+
+	// 9. Security Regression 6.7: Chat Payment Phone Override rejected
+	// Clear the freeze to isolate phone override
+	if _, err := db.Admin.Exec(ctx, `UPDATE users SET chat_payment_paused_until = NULL WHERE id = $1`, schoolA.UserID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.InitiateSTKPush(ctx, guardianA, billing.InitiateSTKPushInput{
+		StudentID:       schoolA.StudentID,
+		Amount:          json.RawMessage(`"500.00"`),
+		PhoneNumber:     "0799999999", // Different from registered phone
+		Source:          "chat",
+		ParentConfirmed: &tr,
+	}, true)
+	if !errors.As(err, &apiErr) || apiErr.Code != "CHAT_PHONE_OVERRIDE_FORBIDDEN" {
+		t.Fatalf("expected CHAT_PHONE_OVERRIDE_FORBIDDEN on chat phone override, got %v", err)
+	}
+
+	// 10. Security Regression 6.4: Callback origin authentication
+	svc.CallbackAuthToken = "secret-callback-token"
+	recCallback := httptest.NewRecorder()
+	mux.ServeHTTP(recCallback, httptest.NewRequest(http.MethodPost, "/api/v1/billing/mpesa/c2b-confirmation", bytes.NewBufferString(`{}`)))
+	if recCallback.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on missing callback token, got %d", recCallback.Code)
+	}
 }
