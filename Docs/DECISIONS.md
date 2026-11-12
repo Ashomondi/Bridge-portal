@@ -1,3 +1,4 @@
+
 # DECISIONS.md
 
 A short, dated log of decisions worth remembering — so nobody (human or AI
