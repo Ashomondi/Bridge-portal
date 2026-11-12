@@ -222,6 +222,21 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 	return out, err
 }
 
+func (s *Service) isCallbackAuthorized(r *http.Request) bool {
+	if s == nil {
+		return true
+	}
+	if s.VerifyCallback != nil {
+		return s.VerifyCallback(r)
+	}
+	if token := strings.TrimSpace(s.CallbackAuthToken); token != "" {
+		headerToken := strings.TrimSpace(r.Header.Get("X-Callback-Token"))
+		queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
+		return headerToken == token || queryToken == token
+	}
+	return true
+}
+
 func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {
 	mux.HandleFunc("POST /api/v1/payments/stk-push", func(w http.ResponseWriter, r *http.Request) {
 		p, err := contracts.RequireIdentity(r, identity)
@@ -242,6 +257,10 @@ func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contract
 		contracts.Success(w, http.StatusAccepted, res, nil)
 	})
 	mux.HandleFunc("POST /api/v1/billing/mpesa/callback", func(w http.ResponseWriter, r *http.Request) {
+		if !service.isCallbackAuthorized(r) {
+			contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Invalid or missing M-Pesa callback credentials."))
+			return
+		}
 		var payload DarajaSTKCallbackEnvelope
 		if err := contracts.Decode(w, r, &payload); err != nil {
 			contracts.WriteError(w, err)
@@ -255,6 +274,10 @@ func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contract
 		contracts.Success(w, http.StatusOK, map[string]any{"ResultCode": 0, "ResultDesc": "Accepted"}, nil)
 	})
 	mux.HandleFunc("POST /api/v1/billing/mpesa/c2b-confirmation", func(w http.ResponseWriter, r *http.Request) {
+		if !service.isCallbackAuthorized(r) {
+			contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Invalid or missing M-Pesa callback credentials."))
+			return
+		}
 		var payload DarajaC2BConfirmation
 		if err := contracts.Decode(w, r, &payload); err != nil {
 			contracts.WriteError(w, err)
