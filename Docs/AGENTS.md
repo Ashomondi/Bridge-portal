@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 This file is read by AI coding assistants (Claude, or similar tools) before working
 on this repository. Keep it short and current. If a rule here conflicts with what
@@ -32,14 +32,25 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
 
 ## Commands
 
-> Fill these in as the project scaffolding is created — an AI assistant should
-> never guess at commands.
-
-- Backend tests: `TODO`
-- Backend run (dev): `TODO`
-- Frontend run (dev): `TODO`
-- Migrations: `TODO`
-- AI service run (dev): `TODO`
+- Backend build: `cd backend && go build ./...`
+- Backend tests: `cd backend && go test -count=1 -v ./...`
+- PostgreSQL tests: start `docker compose up -d --wait postgres` from the repo
+  root, then export
+  `DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'`
+  (adjust for local credentials) before running the backend tests. Use a
+  dedicated local test server with a superuser that can create databases and
+  roles; never a production database. The harness creates/deletes random
+  `dev05_*` databases and non-BYPASSRLS roles and uses synthetic data.
+  Missing URL skips locally but fails when `CI` is nonempty. CI provides
+  PostgreSQL 16 and the URL in `.github/workflows/backend.yml`.
+- Backend run (dev): `make backend-run` (entry point is still a placeholder)
+- Frontend run (dev): `make frontend-run`
+- Migrations: apply paired SQL files using a PostgreSQL migration runner in
+  version order: `000001_init_schema`, `000003_r1_academics`,
+  `000004_r1_billing_whatsapp_notifications`. There is no migration 000002.
+  `make migrate-up` is advertised but not implemented. The test harness applies
+  the files directly; see `README.md` for test commands and downgrade behavior.
+- AI service run (dev): `make ai-run`
 
 ## Non-negotiable rules
 
@@ -71,7 +82,13 @@ These override convenience or "helpfulness" in any single task. See
 > don't invent conventions here that the code doesn't actually follow.
 
 - Go package layout: `TODO`
-- Error handling style: `TODO`
+- Shared consumer contracts: `backend/internal/internalapi/contracts`;
+  `TenantTxFunc.WithTenantTx` takes the principal from trusted `RequireIdentity`,
+  never a school chosen from request input. See `API_CONTRACTS.md` for envelopes,
+  limits and the distinction between contracts and pending runtime wiring.
+- Error handling style: shared `Fail` / `WriteError` helpers redact unexpected
+  failures. `AuditLogger` is only an interface; do not claim AC-29 is addressed
+  without a wired durable implementation.
 - Naming conventions (DB, API, frontend): `TODO`
 - Commit message style: `TODO`
 

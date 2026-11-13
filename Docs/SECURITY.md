@@ -67,8 +67,11 @@ This is the section most specific to this project's AI features — see also
 4. **It never originates a fact.** Fee balances, attendance, and results come
    from the database; the model's job is language (phrasing, translation,
    mapping natural language to CBC strands), never invention.
-5. **Every AI-initiated action is logged**: what was asked, what data was
-   read, what action (if any) was taken, and by which AI feature.
+5. **Every AI-initiated action must be logged**: structured intent, endpoint
+   names read, action/outcome, actor, school and feature. Do not log raw prompts,
+   replies, access tokens or returned student records. `ai_action_logs` is a
+   schema foundation and `AuditLogger` is an interface; durable logging is not
+   wired by these contracts and AC-29 remains pending.
 6. **A human approves anything sent to a parent or written to a permanent
    record** — report comments, blog posts, plain-language explanations — the
    AI drafts, a teacher/patron/bursar confirms.
@@ -98,9 +101,34 @@ This is the section most specific to this project's AI features — see also
 
 ## Retention
 
-> Fill in per data category once policy is set: how long results, attendance,
-> financial records, and consent records are kept after a student leaves,
-> and the deletion process.
+The following are engineering retention defaults for billing/chat; legal and
+school-controller review must confirm the applicable financial retention period
+before production. These are requirements for handlers and cleanup jobs, not a
+claim that expiry/redaction workers are already implemented. Other categories
+(results, attendance, consent records) still need controller-approved schedules.
+
+| Data | Retention and deletion rule | Redaction/access rule |
+|---|---|---|
+| `chat_sessions.sender_wa_number` | Retain only while the session is active; clear within 24 hours of expiry/revocation. Remove expired session rows after 30 days, after detaching retained AI logs as described below. | Normalize for routing; restrict raw values to verification/delivery code. Mask all but the final 4 digits in staff UI; exclude from URLs, app logs, analytics and AI prompts. A WhatsApp number does not prove guardian identity. |
+| `otp_hash`, `otp_expires_at`, `otp_attempts` | OTP lifetime at most 5 minutes and at most 5 failed attempts. Clear the hash on success, expiry, replacement or exhaustion; purge expired hashes within 24 hours even if no request returns. | Never persist/log plaintext OTPs. Use a keyed hash with a server-held secret because short numeric OTPs are vulnerable to offline guessing. Do not expose hashes to clients or the AI service. |
+| `access_token_hash` and chat verification timestamps | Verification/access lifetime at most 24 hours. Clear hashes on revocation or expiry; cleanup within 24 hours. Validate expiry on every request; cleanup delay must never extend access. | Tokens must be cryptographically random and stored only as a hash. Redact bearer/delegation headers, cookies and token-bearing request fields at proxy and application layers. |
+| `mpesa_stk_requests.phone_number`, `payments` / `unmatched_payments` payer phone, payer name and raw account reference | Retain through settlement/reconciliation, then redact within 90 days of terminal resolution. Review unresolved/uncertain records after 90 days and monthly thereafter; record an owner and time-bounded reason for extension. | Raw payer details only for authorized bursar reconciliation and delivery. Mask phone numbers in displays and notifications; never include them in model prompts, telemetry or error details. AI suggestions use minimal, scoped facts. |
+| Provider `payments.raw_payload` | Allowlist fields at ingestion. Delete raw payload within 30 days of settlement, or resolution for an unmatched receipt. Keep canonical receipt fields separately. | Never retain PINs, credentials, authorization headers, or unrelated provider fields. Do not log raw webhooks. |
+| Canonical financial records | Retain receipt reference, amount, posting dates and required ledger/audit evidence for 7 years after financial-year close by default; a documented legal hold overrides deletion. Payer contact details follow the shorter rule above unless specifically required by the hold. | Tenant- and permission-scoped access only; encrypt storage and backups. Avoid copying financial records into chat or AI logs. |
+| `ai_action_logs` | Retain for 90 days, then delete; keep any legally required financial audit evidence separately in the financial audit trail for its retention period. | Allowlist feature, intent, endpoint templates, action/outcome, opaque resource IDs and timing. No prompts, message transcripts, response bodies, numbers, names, payer details, secrets or hashes in `metadata`. Endpoint templates must omit query strings and personal identifiers. |
+
+Cleanup must execute per school with the same tenant protections as request
+traffic. `ai_action_logs.session_id` currently has a non-cascading foreign key:
+set it to NULL in the same tenant transaction before deleting a referenced
+expired chat session (the log retains its own actor/school/action). Purge or
+redact copies in queue payloads, dead-letter jobs, exports and notification
+metadata too. Keep backups for at most 30 days; apply recorded deletions and
+redactions after restore and before serving traffic. A legal hold must specify
+scope, owner, reason and review/expiry date, not suspend deletion indefinitely.
+
+Tests and examples use synthetic identities and payer data. Audit deletion
+counts and policy outcomes without recording the removed personal data. Review
+new metadata keys and provider fields against this allowlist before storage.
 
 ## Breach response
 

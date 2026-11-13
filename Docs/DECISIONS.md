@@ -81,3 +81,82 @@ justification and owner emerge.
 region**
 *Why:* supports the Data Protection Act cross-border transfer rules and the
 "data stays in Kenya" product/compliance claim; see `SECURITY.md`.
+
+---
+
+**2026-11-13 — ADR: Tenant transactions derive the school from the principal**
+
+`TenantTxFunc.WithTenantTx` accepts a `Principal` produced by `RequireIdentity`
+using trusted authentication middleware, validates its shape, and passes only
+`Principal.SchoolID` to the application's transaction function. That function
+must set transaction-local `app.school_id` and use a role subject to RLS.
+Request-supplied school IDs cannot select the transaction tenant. Switching
+schools requires revalidating the user's active membership before issuing the
+principal. Permission and guardian checks still apply within a school.
+
+*Why:* validating a UUID does not authorize access to that school.
+*Alternative considered:* accepting a separate school argument and relying on
+every handler to compare it with the authenticated school. Removed to avoid a
+second tenant selector. Trusted identity verification remains the middleware's
+responsibility; the contracts are not an authentication implementation.
+
+**2026-11-13 — ADR: Separate debt and available credit, with a defined downgrade**
+
+Use nonnegative `fee_ledgers.current_balance` for debt and `credit_balance` for
+unspent credit. `credit_applied` and `credit_transferred` are cumulative usage
+counters, not additional spendable balances. Migration 000004 backfills legacy
+negative balances into credit before adding the nonnegative constraint. The
+downgrade restores the signed balance as debt minus available credit.
+
+`fee_charges` and `payments` are assessment/settlement sources;
+`ledger_entries` records new postings and `fee_ledgers` is the read projection.
+Legacy ledger snapshots are opening balances because the migration does not
+backfill posting history. STK attempt state is separate from settlement;
+unmatched receipts require human resolution before ledger credit. See
+`ARCHITECTURE.md` for the ledger, STK, unmatched-payment and chat state machines.
+
+For boarding variants, downgrade retains `all`, otherwise `day`, otherwise
+`boarder` per school/year/grade/term, keeping that template and its items intact.
+Discard the other variants and their items after exporting them. Day pricing
+is the fallback to avoid applying boarding fees to a generic template. Up again
+cannot recover discarded variants. Run rollback only with a restorable export.
+
+*Why:* explicit credit avoids displaying overpayment as debt; a deterministic
+downgrade avoids a uniqueness failure when both day and boarder variants exist.
+*Alternatives considered:* keep signed debt indefinitely; sum variant prices;
+or choose an arbitrary template. Separate balances and an explicit precedence
+rule make financial meaning and downgrade data loss reviewable.
+
+**2026-11-13 — ADR: Release 1 chat schema, Release 3 WhatsApp delivery**
+
+Release 1 provides in-app parent chat and parent-confirmed payment flows.
+Migration 000004 creates the shared chat/verification foundation and reserves
+WhatsApp routing support; it does not bring WhatsApp delivery into Release 1.
+`school_whatsapp_bots` remains unused until Release 3 integration and activation.
+The `is_active` database default is not a deployment feature flag. WhatsApp
+webhook routing, provider credentials, templates and outbound delivery must
+remain disabled/unwired until that release and the transfer requirements in
+`SECURITY.md` are met. SMS and in-app notifications remain Release 1 channels.
+
+*Why:* reconciles the forward-compatible schema with the existing release plan
+in `REQUIREMENTS.md`; a table is not a shipped channel.
+*Alternative considered:* implicitly move WhatsApp delivery into Release 1
+because its table exists. Rejected as an unapproved scope change.
+
+The 12 new tables are `school_mpesa_configs`, `fee_periods`, `fee_charges`,
+`fee_change_notes`, `fee_change_note_students`, `ledger_entries`,
+`unmatched_payments`, `mpesa_stk_requests`, `school_whatsapp_bots`,
+`chat_sessions`, `in_app_notifications`, and `ai_action_logs`.
+
+**2026-11-13 — ADR: AI service credential plus delegated session**
+
+Internal AI calls require a service bearer token and a Go-verifiable delegated
+user session, with per-request membership, school, guardian and permission
+checks. A service credential alone cannot select a tenant or impersonate a
+parent. The header protocol is specified in `API_CONTRACTS.md`; middleware is
+pending. Short-lived opaque session tokens allow revocation and are stored only
+as hashes. Do not accept unsigned forwarded identity headers.
+
+*Why:* authenticating the service and authorizing the human are separate checks.
+*Alternative considered:* a shared service token plus raw user/school headers;
+rejected because it permits unverified delegation.
