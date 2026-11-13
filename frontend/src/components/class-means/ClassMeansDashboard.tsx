@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   Award,
   BarChart3,
@@ -35,25 +36,28 @@ import {
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import {
+  CBC_LEVELS,
   buildSparklinePoints,
   formatMetric,
+  getCbcLevel,
   type ClassMeansData,
   type ClassMeansIcon,
   type ClassMeansOption,
   type ClassMeansStrand,
+  type CbcLevelCode,
 } from "./class-means-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  href: string;
+  href?: string;
   active?: boolean;
   badge?: string;
   dot?: boolean;
 };
 
 const SIDEBAR_ITEMS: NavItem[] = [
-  { label: "Home", icon: Home, href: "#" },
+  { label: "Home", icon: Home },
   { label: "My timetable", icon: CalendarDays, href: "/teacher" },
   {
     label: "My class",
@@ -67,20 +71,26 @@ const SIDEBAR_ITEMS: NavItem[] = [
     href: "/teacher/class-means",
     active: true,
   },
-  { label: "Roll-call", icon: ClipboardCheck, href: "#" },
-  { label: "Marks", icon: ClipboardList, href: "#" },
-  { label: "Results", icon: Award, href: "#" },
-  { label: "Comments", icon: MessageSquare, href: "#" },
-  { label: "Add students", icon: UserPlus, href: "#" },
-  { label: "Notifications", icon: Bell, href: "#", dot: true },
+  { label: "Roll-call", icon: ClipboardCheck },
+  { label: "Marks", icon: ClipboardList },
+  { label: "Results", icon: Award },
+  { label: "Comments", icon: MessageSquare },
+  { label: "Add students", icon: UserPlus },
+  { label: "Notifications", icon: Bell, dot: true },
 ];
 
-const BOTTOM_NAV = [
+const BOTTOM_NAV: {
+  label: string;
+  icon: LucideIcon;
+  href?: string;
+  active?: boolean;
+  opensDrawer?: boolean;
+}[] = [
   { label: "Overview", icon: LayoutDashboard, href: "/teacher/overview" },
   { label: "Timetable", icon: CalendarDays, href: "/teacher" },
   { label: "Class", icon: UsersRound, href: "/teacher/class" },
   { label: "Means", icon: BarChart3, href: "/teacher/class-means", active: true },
-  { label: "More", icon: MoreHorizontal, href: "#" },
+  { label: "More", icon: MoreHorizontal, opensDrawer: true },
 ];
 
 const STRAND_ICONS: Record<ClassMeansIcon, LucideIcon> = {
@@ -88,6 +98,13 @@ const STRAND_ICONS: Record<ClassMeansIcon, LucideIcon> = {
   calculator: Calculator,
   language: Languages,
   science: FlaskConical,
+};
+
+const CBC_TONE_CLASSES: Record<string, string> = {
+  mint: "bg-[#E2F0ED] text-brand-700 ring-brand-100",
+  teal: "bg-[#E8F5F3] text-brand-700 ring-brand-100",
+  gold: "bg-[#FEF3D6] text-[#7A5A16] ring-[#EBD7A5]",
+  rose: "bg-rose-50 text-rose-700 ring-rose-100",
 };
 
 export default function ClassMeansDashboard({
@@ -108,6 +125,16 @@ export default function ClassMeansDashboard({
   const strands = data?.strands ?? [];
   const rows = data?.rows ?? [];
   const filters = data?.filters ?? null;
+  const [selectedClassStream, setSelectedClassStream] = useState(
+    filters?.selectedClassStream ?? "",
+  );
+  const [selectedAcademicPeriod, setSelectedAcademicPeriod] = useState(
+    filters?.selectedAcademicPeriod ?? "",
+  );
+  const [selectedAssessmentSeries, setSelectedAssessmentSeries] = useState(
+    filters?.selectedAssessmentSeries ?? "",
+  );
+  const [isOffline, setIsOffline] = useState(false);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -120,6 +147,73 @@ export default function ClassMeansDashboard({
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const handleBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", handleBreakpointChange);
+
+    return () => {
+      desktopQuery.removeEventListener("change", handleBreakpointChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateOnlineState = () => setIsOffline(!navigator.onLine);
+
+    updateOnlineState();
+    window.addEventListener("online", updateOnlineState);
+    window.addEventListener("offline", updateOnlineState);
+
+    return () => {
+      window.removeEventListener("online", updateOnlineState);
+      window.removeEventListener("offline", updateOnlineState);
+    };
+  }, []);
+
+  function handleExport() {
+    if (rows.length === 0) {
+      return;
+    }
+
+    const header = [
+      "Subject",
+      "Assessment",
+      "CBC Level",
+      "Term 1",
+      "Term 2",
+      "Term 3",
+      "Students Counted",
+    ];
+    const lines = rows.map((row) =>
+      [
+        row.subject,
+        row.assessment,
+        row.cbcLevel ?? "",
+        row.term1 ?? "",
+        row.term2 ?? "",
+        row.term3 ?? "",
+        row.studentCount ?? "",
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+    const blob = new Blob([[header.join(","), ...lines].join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = "class-means.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -162,14 +256,24 @@ export default function ClassMeansDashboard({
         >
           <PageHeader frameworkStandard={frameworkStandard} />
           <InfoBanner />
-          <FilterBar filters={filters} />
+          {isOffline && <OfflineNotice />}
+          <FilterBar
+            filters={filters}
+            selectedClassStream={selectedClassStream}
+            selectedAcademicPeriod={selectedAcademicPeriod}
+            selectedAssessmentSeries={selectedAssessmentSeries}
+            onClassStreamChange={setSelectedClassStream}
+            onAcademicPeriodChange={setSelectedAcademicPeriod}
+            onAssessmentSeriesChange={setSelectedAssessmentSeries}
+          />
+          <CbcLevelLegend />
           <StrandsSection strands={strands} sortLabel={data?.sortLabel ?? null} />
-          <DetailedTable rows={rows} />
+          <DetailedTable rows={rows} onExport={handleExport} />
           <PolicyBanner />
         </main>
       </div>
 
-      <BottomNav />
+      <BottomNav onOpenMenu={() => setMenuOpen(true)} />
 
       {menuOpen && (
         <MobileDrawer
@@ -205,7 +309,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
@@ -221,20 +325,15 @@ function SidebarContent({
       <nav className="mt-6 space-y-0.5" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              onClick={onNavigate}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               <Icon
                 className={cn(
                   "h-[17px] w-[17px] shrink-0",
@@ -250,9 +349,36 @@ function SidebarContent({
                 </span>
               )}
               {item.dot && (
-                <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+                <>
+                  <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+                  <span className="sr-only">Unread notifications</span>
+                </>
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              onClick={onNavigate}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -275,7 +401,10 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="Sign out will be available once authentication is connected."
+            className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out
@@ -305,7 +434,7 @@ function MobileAppBar({
           onClick={onOpenMenu}
           aria-expanded={menuOpen}
           aria-controls="class-means-drawer"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           aria-label="Open navigation menu"
         >
           <Menu className="h-5 w-5" />
@@ -323,16 +452,24 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            aria-pressed={false}
+            title="Notifications are unavailable until the notifications service is connected."
+            className="relative grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="Notifications unavailable"
           >
             <Bell className="h-5 w-5" />
             <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <span className="sr-only">Unread notifications</span>
           </button>
           <button
             type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+            disabled
+            aria-disabled="true"
+            title="Profile menu is unavailable until authentication is connected."
+            className="grid h-11 w-11 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="User profile unavailable"
           >
             {userInitials}
           </button>
@@ -369,16 +506,25 @@ function DesktopHeader({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            aria-pressed={false}
+            title="Notifications are unavailable until the notifications service is connected."
+            className="relative grid h-11 w-11 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="Notifications unavailable"
           >
             <Bell className="h-[18px] w-[18px]" />
             <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <span className="sr-only">Unread notifications</span>
           </button>
 
           <button
             type="button"
-            className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            aria-expanded={false}
+            title="Profile menu is unavailable until authentication is connected."
+            className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
               {userInitials}
@@ -387,9 +533,9 @@ function DesktopHeader({
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
                 {userFullName}
               </p>
-              <p className="text-[10px] text-slate-400">{userRole}</p>
+              <p className="text-[10px] text-slate-600">{userRole}</p>
             </div>
-            <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+            <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
           </button>
         </div>
       </div>
@@ -399,8 +545,8 @@ function DesktopHeader({
 
 function PageHeader({ frameworkStandard }: { frameworkStandard: string | null }) {
   return (
-    <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-      <div className="min-w-0">
+    <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+      <div className="min-w-0 sm:flex-1">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-brand-500 shadow-[0_0_0_4px_rgba(0,122,120,0.10)]" />
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -444,7 +590,62 @@ function InfoBanner() {
   );
 }
 
-function FilterBar({ filters }: { filters: ClassMeansData["filters"] | null }) {
+function CbcLevelLegend() {
+  return (
+    <section
+      aria-label="CBC performance levels"
+      className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-card"
+    >
+      <span className="mr-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600">
+        CBC levels
+      </span>
+      {CBC_LEVELS.map((level) => (
+        <span
+          key={level.code}
+          title={level.description}
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-semibold ring-1",
+            CBC_TONE_CLASSES[level.tone],
+          )}
+        >
+          <span className="font-bold">{level.code}</span>
+          <span className="hidden sm:inline">{level.label}</span>
+        </span>
+      ))}
+    </section>
+  );
+}
+
+function OfflineNotice() {
+  return (
+    <div
+      role="status"
+      className="mt-3 flex items-center gap-2 rounded-xl border border-[#EBD7A5] bg-[#FEF3D6] px-3 py-2.5 text-[10px] font-medium text-[#7A5A16]"
+    >
+      <Info className="h-3.5 w-3.5 shrink-0" />
+      You are offline. Showing the last loaded class means data; retry when the
+      connection returns.
+    </div>
+  );
+}
+
+function FilterBar({
+  filters,
+  selectedClassStream,
+  selectedAcademicPeriod,
+  selectedAssessmentSeries,
+  onClassStreamChange,
+  onAcademicPeriodChange,
+  onAssessmentSeriesChange,
+}: {
+  filters: ClassMeansData["filters"] | null;
+  selectedClassStream: string;
+  selectedAcademicPeriod: string;
+  selectedAssessmentSeries: string;
+  onClassStreamChange: (value: string) => void;
+  onAcademicPeriodChange: (value: string) => void;
+  onAssessmentSeriesChange: (value: string) => void;
+}) {
   return (
     <section
       aria-label="Class means filters"
@@ -455,20 +656,23 @@ function FilterBar({ filters }: { filters: ClassMeansData["filters"] | null }) {
           label="Target class stream"
           placeholder="Select class stream"
           options={filters?.classStreams ?? []}
-          defaultValue={filters?.selectedClassStream ?? ""}
+          value={selectedClassStream}
+          onChange={onClassStreamChange}
         />
         <FilterSelect
           label="Academic period"
           placeholder="Select academic period"
           options={filters?.academicPeriods ?? []}
-          defaultValue={filters?.selectedAcademicPeriod ?? ""}
+          value={selectedAcademicPeriod}
+          onChange={onAcademicPeriodChange}
           icon={CalendarDays}
         />
         <FilterSelect
           label="Assessment series"
           placeholder="Select assessment series"
           options={filters?.assessmentSeries ?? []}
-          defaultValue={filters?.selectedAssessmentSeries ?? ""}
+          value={selectedAssessmentSeries}
+          onChange={onAssessmentSeriesChange}
           icon={FileText}
         />
       </div>
@@ -480,13 +684,15 @@ function FilterSelect({
   label,
   placeholder,
   options,
-  defaultValue,
+  value,
+  onChange,
   icon: Icon,
 }: {
   label: string;
   placeholder: string;
   options: ClassMeansOption[];
-  defaultValue: string;
+  value: string;
+  onChange: (value: string) => void;
   icon?: LucideIcon;
 }) {
   const disabled = options.length === 0;
@@ -499,9 +705,10 @@ function FilterSelect({
       )}
       <select
         disabled={disabled}
-        defaultValue={defaultValue}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
         className={cn(
-          "h-11 w-full appearance-none rounded-xl border border-slate-200/80 bg-slate-50/60 pr-8 text-[11px] font-semibold text-slate-600 outline-none transition focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60",
+          "h-11 w-full appearance-none rounded-xl border border-slate-200/80 bg-slate-50/60 pr-8 text-[11px] font-semibold text-slate-600 outline-none transition focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 focus-visible:ring-2 focus-visible:ring-brand-600 disabled:cursor-not-allowed disabled:opacity-60",
           Icon ? "pl-9" : "pl-3",
         )}
       >
@@ -564,6 +771,7 @@ function StrandsSection({
 function StrandCard({ strand }: { strand: ClassMeansStrand }) {
   const Icon = STRAND_ICONS[strand.icon];
   const points = buildSparklinePoints(strand.trendPoints);
+  const cbcLevel = getCbcLevel(strand.cbcLevel);
 
   return (
     <article className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card transition hover:-translate-y-px hover:shadow-card-hover motion-reduce:transition-none">
@@ -576,16 +784,29 @@ function StrandCard({ strand }: { strand: ClassMeansStrand }) {
         </span>
       </div>
 
-      <div className="mt-3 flex items-end gap-1">
-        <span className="text-3xl font-bold leading-none tracking-tight text-slate-900">
-          {formatMetric(strand.score)}
-        </span>
-        <span className="pb-0.5 text-[11px] font-medium text-slate-400">
-          /100
-        </span>
+      <div className="mt-3 flex items-end justify-between gap-2">
+        <div className="flex items-end gap-1">
+          <span className="text-3xl font-bold leading-none tracking-tight text-slate-900">
+            {formatMetric(strand.score)}
+          </span>
+          <span className="pb-0.5 text-[11px] font-medium text-slate-500">
+            /100
+          </span>
+        </div>
+        {cbcLevel && (
+          <span
+            title={cbcLevel.description}
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[9px] font-bold ring-1",
+              CBC_TONE_CLASSES[cbcLevel.tone],
+            )}
+          >
+            {cbcLevel.code}
+          </span>
+        )}
       </div>
 
-      <div className="mt-4 flex items-center justify-between gap-2 text-[9px] font-medium text-slate-400">
+      <div className="mt-4 flex items-center justify-between gap-2 text-[9px] font-medium text-slate-500">
         <span>{strand.trendLabel?.trim() || "Term trend"}</span>
         <span>
           {strand.studentCount === null
@@ -654,7 +875,13 @@ function Sparkline({
   );
 }
 
-function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
+function DetailedTable({
+  rows,
+  onExport,
+}: {
+  rows: ClassMeansData["rows"];
+  onExport: () => void;
+}) {
   return (
     <section className="mt-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -663,8 +890,14 @@ function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
         </h2>
         <button
           type="button"
+          onClick={onExport}
           disabled={rows.length === 0}
-          className="inline-flex h-9 w-fit items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-[10px] font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          title={
+            rows.length === 0
+              ? "No class means data is available to export"
+              : "Download class means as CSV"
+          }
+          className="inline-flex h-10 w-fit items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 text-[10px] font-semibold text-slate-600 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
         >
           <Download className="h-3.5 w-3.5" />
           Export Data Record
@@ -680,8 +913,10 @@ function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
                   <tr className="border-b border-slate-100 bg-[#F8F9FA]">
                     <TableHeading>Subject</TableHeading>
                     <TableHeading>Assessment</TableHeading>
+                    <TableHeading>CBC Level</TableHeading>
                     <TableHeading align="right">Term 1</TableHeading>
                     <TableHeading align="right">Term 2</TableHeading>
+                    <TableHeading align="right">Term 3</TableHeading>
                     <TableHeading align="right">Students Counted</TableHeading>
                   </tr>
                 </thead>
@@ -697,11 +932,17 @@ function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
                       <td className="px-4 py-3.5 text-[11px] text-slate-500 sm:px-5">
                         {row.assessment}
                       </td>
+                      <td className="px-4 py-3.5 sm:px-5">
+                        <CbcLevelBadge code={row.cbcLevel} />
+                      </td>
                       <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
                         {formatMetric(row.term1)}
                       </td>
                       <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
                         {formatMetric(row.term2)}
+                      </td>
+                      <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
+                        {formatMetric(row.term3)}
                       </td>
                       <td className="px-4 py-3.5 text-right text-[11px] font-semibold tabular-nums text-slate-700 sm:px-5">
                         {formatMetric(row.studentCount)}
@@ -724,15 +965,18 @@ function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
                         {row.assessment}
                       </p>
                     </div>
-                    <span className="rounded-full bg-[#F8F9FA] px-2 py-0.5 text-[9px] font-semibold text-slate-500 ring-1 ring-slate-200/80">
-                      {row.studentCount === null
-                        ? "No count"
-                        : `${row.studentCount.toLocaleString("en-GB")} counted`}
-                    </span>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <CbcLevelBadge code={row.cbcLevel} />
+                      <span className="rounded-full bg-[#F8F9FA] px-2 py-0.5 text-[9px] font-semibold text-slate-500 ring-1 ring-slate-200/80">
+                        {row.studentCount === null
+                          ? "No count"
+                          : `${row.studentCount.toLocaleString("en-GB")} counted`}
+                      </span>
+                    </div>
                   </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div className="mt-3 grid grid-cols-3 gap-2">
                     <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
-                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
+                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-500">
                         Term 1
                       </p>
                       <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
@@ -740,11 +984,19 @@ function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
                       </p>
                     </div>
                     <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
-                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
+                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-500">
                         Term 2
                       </p>
                       <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
                         {formatMetric(row.term2)}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-[#F8F9FA] px-3 py-2">
+                      <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-500">
+                        Term 3
+                      </p>
+                      <p className="mt-0.5 text-[11px] font-bold tabular-nums text-slate-700">
+                        {formatMetric(row.term3)}
                       </p>
                     </div>
                   </div>
@@ -763,6 +1015,26 @@ function DetailedTable({ rows }: { rows: ClassMeansData["rows"] }) {
         )}
       </div>
     </section>
+  );
+}
+
+function CbcLevelBadge({ code }: { code: CbcLevelCode | null }) {
+  const level = getCbcLevel(code);
+
+  if (!level) {
+    return <span className="text-[10px] text-slate-500">—</span>;
+  }
+
+  return (
+    <span
+      title={level.description}
+      className={cn(
+        "inline-flex rounded-full px-2 py-0.5 text-[9px] font-bold ring-1",
+        CBC_TONE_CLASSES[level.tone],
+      )}
+    >
+      {level.code}
+    </span>
   );
 }
 
@@ -833,7 +1105,7 @@ function EmptyState({
   );
 }
 
-function BottomNav() {
+function BottomNav({ onOpenMenu }: { onOpenMenu: () => void }) {
   return (
     <nav
       aria-label="Mobile navigation"
@@ -842,25 +1114,57 @@ function BottomNav() {
       <div className="grid grid-cols-5 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "text-brand-600"
-                  : "text-slate-400 hover:text-slate-600",
-              )}
-            >
+          const className = cn(
+            "relative flex min-h-11 flex-col items-center justify-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "text-brand-600"
+              : "text-slate-500 hover:text-slate-700",
+            !item.href && !item.opensDrawer && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               {item.active && (
                 <span className="absolute -top-1 h-0.5 w-8 rounded-full bg-brand-500" />
               )}
               <Icon className="h-5 w-5" />
               <span>{item.label}</span>
-            </a>
+            </>
+          );
+
+          if (item.opensDrawer) {
+            return (
+              <button
+                key={item.label}
+                type="button"
+                onClick={onOpenMenu}
+                className={className}
+              >
+                {content}
+              </button>
+            );
+          }
+
+          if (item.href) {
+            return (
+              <Link
+                key={item.label}
+                href={item.href}
+                aria-current={item.active ? "page" : undefined}
+                className={className}
+              >
+                {content}
+              </Link>
+            );
+          }
+
+          return (
+            <span
+              key={item.label}
+              aria-disabled="true"
+              className={className}
+            >
+              {content}
+            </span>
           );
         })}
       </div>
@@ -912,7 +1216,7 @@ function MobileDrawer({
             type="button"
             onClick={onClose}
             data-autofocus
-            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
             aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />
@@ -930,6 +1234,13 @@ function MobileDrawer({
       </div>
     </div>
   );
+}
+
+/** Escapes a value for CSV output. */
+function csvCell(value: string | number) {
+  const text = String(value);
+
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 function initialsFromName(name: string) {

@@ -1,5 +1,42 @@
 export type ClassMeansIcon = "book" | "calculator" | "language" | "science";
 
+export type CbcLevelCode = "EE" | "ME" | "AE" | "BE";
+
+export type CbcLevel = {
+  code: CbcLevelCode;
+  label: string;
+  description: string;
+  tone: "mint" | "teal" | "gold" | "rose";
+};
+
+/** CBC performance levels used by Kenyan competency-based assessments. */
+export const CBC_LEVELS: CbcLevel[] = [
+  {
+    code: "EE",
+    label: "Exceeding Expectation",
+    description: "Demonstrates competency beyond the expected level.",
+    tone: "mint",
+  },
+  {
+    code: "ME",
+    label: "Meeting Expectation",
+    description: "Demonstrates the expected competency.",
+    tone: "teal",
+  },
+  {
+    code: "AE",
+    label: "Approaching Expectation",
+    description: "Approaching the expected competency.",
+    tone: "gold",
+  },
+  {
+    code: "BE",
+    label: "Below Expectation",
+    description: "Requires targeted support to reach the expected level.",
+    tone: "rose",
+  },
+];
+
 export type ClassMeansOption = {
   value: string;
   label: string;
@@ -10,6 +47,7 @@ export type ClassMeansStrand = {
   subject: string;
   icon: ClassMeansIcon;
   score: number | null;
+  cbcLevel: CbcLevelCode | null;
   studentCount: number | null;
   trendLabel: string | null;
   trendPoints: number[];
@@ -19,8 +57,10 @@ export type ClassMeansRow = {
   id: string;
   subject: string;
   assessment: string;
+  cbcLevel: CbcLevelCode | null;
   term1: number | null;
   term2: number | null;
+  term3: number | null;
   studentCount: number | null;
 };
 
@@ -53,6 +93,11 @@ export function formatMetric(value: number | null) {
   return value === null || value === undefined
     ? "—"
     : value.toLocaleString("en-GB");
+}
+
+/** Returns the display metadata for a CBC level code. */
+export function getCbcLevel(code: CbcLevelCode | null) {
+  return code ? CBC_LEVELS.find((level) => level.code === code) ?? null : null;
 }
 
 export function buildSparklinePoints(values: number[]) {
