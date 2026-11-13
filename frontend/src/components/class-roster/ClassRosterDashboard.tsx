@@ -332,7 +332,7 @@ function SidebarContent({
           </span>
           <div>
             <p className="text-[15px] font-bold tracking-tight text-slate-900">
-              Ikonex <span className="text-brand-600">Academy</span>
+              Bridge <span className="text-brand-600">Portal</span>
             </p>
             <div className="mt-0.5 flex items-center gap-1.5">
               <p className="max-w-[112px] truncate text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
