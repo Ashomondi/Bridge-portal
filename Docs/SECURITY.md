@@ -98,9 +98,20 @@ This is the section most specific to this project's AI features — see also
 
 ## Retention
 
-> Fill in per data category once policy is set: how long results, attendance,
-> financial records, and consent records are kept after a student leaves,
-> and the deletion process.
+Policy is per record type. Periods are to be set with a Kenyan data
+protection lawyer; the rules below are the starting point.
+
+| Record | Rule | Status |
+|---|---|---|
+| Biometric templates | Deleted when the student leaves | Settled |
+| Uploaded verification documents | Deleted after approval; only a verification record (who, when, document type) stays | Agreed |
+| Rejected or never-verified applications | Deleted automatically after a fixed number of days (number to be agreed) | Agreed |
+| Health (nurse) records | Deleted at exit | Proposed |
+| Consent records | Deleted at exit | Proposed |
+| Results | Archived for a set period | Proposed; period open |
+| Financial ledger | Kept as the law requires | Proposed; period open |
+
+What happens to a leftover ledger credit when a student leaves is undecided.
 
 ## Breach response
 
@@ -116,3 +127,45 @@ This is the section most specific to this project's AI features — see also
   is an offence under the Act. Confirm registration status before
   processing real student data — this is a business/legal task, not a
   coding task, but it blocks going live.
+
+## Release 1 and launch gates (added 2026-10-29)
+
+- **Release 1 uses synthetic data only.** No real student, parent, or staff
+  data enters any environment. It runs against the Daraja sandbox and a test
+  WhatsApp number.
+- **Gates before the first release with real data:**
+  1. `whatsapp` consent purpose in the consent centre (purposes are now
+     biometrics, photos, SMS, and WhatsApp)
+  2. Data protection impact assessment for the WhatsApp channel
+  3. Processing agreement with Meta
+  4. ODPC notification of the transfer
+  5. Minimal WhatsApp message content (see below)
+  6. Review by a Kenyan data protection lawyer, including whether a child's
+     fee data falls under a sensitive category
+  7. ODPC registration
+  8. The hosting decision (Kenya only vs regional Africa; where the AI model
+     runs) — unresolved
+  9. Retention periods and the breach process
+
+## WhatsApp exception to Kenya-only hosting
+
+WhatsApp messages pass through Meta, which counts as a transfer under the
+rules above. This is a deliberate, documented exception, limited by content:
+WhatsApp carries only fee balances, attendance status, and payment prompts.
+Results, report comments, health, and discipline information are never sent on
+WhatsApp; the chat sends a link to the app instead.
+
+## Parent identity, OTP, and sessions
+
+- Chats identify a student by admission number inside the school whose bot
+  received the message; the OTP goes only to a number registered for that
+  student, chosen by the sender from masked numbers.
+- OTPs: one request per minute; more than five in thirty minutes blocks the
+  requesting number for 24 hours (not the guardian's account). How this applies
+  to app login is undecided.
+- A verified WhatsApp session lasts 6 hours.
+- Changing a registered number needs 2FA (an OTP to the new number), notifies
+  the old number by SMS, and pauses chat payments for 24 hours.
+- Pending registrations are not active records and grant no access until a
+  staff verifier confirms them in person. Verification can be delegated only
+  to staff, only while the QR is active (12 hours).
