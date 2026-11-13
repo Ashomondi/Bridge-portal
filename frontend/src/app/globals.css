@@ -16,7 +16,7 @@
     @apply bg-brand-100 text-brand-900;
   }
 
-  :focus-visible {
+  *:focus-visible {
     outline: 2px solid #007a78;
     outline-offset: 2px;
   }
