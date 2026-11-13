@@ -26,6 +26,7 @@ export type RollCallData = {
   students: RollCallStudent[];
 };
 
+/** Returns the stored initials or derives them from the student's name. */
 export function getStudentInitials(student: RollCallStudent) {
   if (student.initials?.trim()) {
     return student.initials.trim();

@@ -49,17 +49,20 @@ const SIDEBAR_ITEMS: NavItem[] = [
 ];
 
 const BOTTOM_NAV = [
-  { label: "Classes", icon: UsersRound, href: "/teacher/class", active: true },
-  { label: "Attendance", icon: ClipboardCheck, href: "/teacher/roll-call" },
+  { label: "Classes", icon: UsersRound, href: "/teacher/class" },
+  { label: "Attendance", icon: ClipboardCheck, href: "/teacher/roll-call", active: true },
   { label: "Marks", icon: ClipboardList, href: "#" },
   { label: "Guardians", icon: Users, href: "#" },
   { label: "Staff ID", icon: BadgeCheck, href: "#" },
 ];
 
+/** Renders the teacher roll-call workspace for a resolved class roster. */
 export default function RollCallDashboard({
   data,
+  isPreview = true,
 }: {
   data: RollCallData | null;
+  isPreview?: boolean;
 }) {
   const students = data?.students ?? [];
   const session = data?.session ?? null;
@@ -100,6 +103,22 @@ export default function RollCallDashboard({
     };
   }, [menuOpen]);
 
+  useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", closeOnDesktop);
+
+    return () => {
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+    };
+  }, []);
+
+  /** Sets or clears one learner's attendance mark. */
   function toggleStatus(id: string, status: RollCallStatus) {
     setStatuses((current) => {
       const next = { ...current };
@@ -114,6 +133,7 @@ export default function RollCallDashboard({
     });
   }
 
+  /** Marks every learner in the loaded roster as present. */
   function markAllPresent() {
     setStatuses(
       Object.fromEntries(students.map((student) => [student.id, "present"])) as Record<
@@ -184,6 +204,7 @@ export default function RollCallDashboard({
         total={students.length}
         registryRef={context.registryRef}
         termLabel={context.termLabel}
+        isPreview={isPreview}
       />
       <BottomNav />
 
@@ -200,6 +221,7 @@ export default function RollCallDashboard({
   );
 }
 
+/** Shared navigation and identity panel for the sidebar and mobile drawer. */
 function SidebarContent({
   teacherName,
   teacherRole,
@@ -288,7 +310,9 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            title="Sign out is not available in this preview."
+            className="mt-3 inline-flex h-9 w-full cursor-not-allowed items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-400 opacity-70 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out
@@ -299,6 +323,7 @@ function SidebarContent({
   );
 }
 
+/** Mobile top bar with the menu trigger and portal identity. */
 function MobileAppBar({
   portalName,
   teacherInitials,
@@ -355,6 +380,7 @@ function MobileAppBar({
   );
 }
 
+/** Sticky desktop header with breadcrumb and teacher identity. */
 function DesktopHeader({
   portalName,
   teacherName,
@@ -410,6 +436,7 @@ function DesktopHeader({
   );
 }
 
+/** Shows the class, date and term metadata when the loader provides it. */
 function PageHeader({ context }: { context: RollCallData["context"] }) {
   const metadata = [
     context.streamName,
@@ -440,6 +467,7 @@ function PageHeader({ context }: { context: RollCallData["context"] }) {
   );
 }
 
+/** Summarises marked, present and absent totals with the completion bar. */
 function ProgressCard({
   marked,
   total,
@@ -504,6 +532,7 @@ function ProgressCard({
   );
 }
 
+/** Lists the enrolled learners with accessible P/A attendance toggles. */
 function StudentList({
   students,
   statuses,
@@ -599,6 +628,7 @@ function StudentList({
   );
 }
 
+/** Explains the guardian in-app notification sent after submission. */
 function GuardianDispatchNotice() {
   return (
     <section className="mt-4 flex gap-3 rounded-2xl border border-brand-100 bg-[#E2F0ED] p-4">
@@ -618,16 +648,19 @@ function GuardianDispatchNotice() {
   );
 }
 
+/** Fixed submission summary and save action for the roll-call preview. */
 function SubmissionCard({
   marked,
   total,
   registryRef,
   termLabel,
+  isPreview,
 }: {
   marked: number;
   total: number;
   registryRef: string | null;
   termLabel: string | null;
+  isPreview: boolean;
 }) {
   const ready = total > 0 && marked === total;
   const complete = marked > 0;
@@ -673,17 +706,24 @@ function SubmissionCard({
 
         <button
           type="button"
-          disabled={!complete}
+          disabled={isPreview || !complete}
+          title={isPreview ? "Saving is not connected in this preview." : undefined}
           className="mt-2.5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand-500 text-[11px] font-bold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
         >
           <UserCheck className="h-4 w-4" />
           Save roll-call
         </button>
+        {isPreview && (
+          <p className="mt-2 text-center text-[8px] font-medium text-slate-400">
+            Preview only — saving roll-call is not connected yet.
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
+/** Fixed five-tab mobile navigation with Attendance marked as current. */
 function BottomNav() {
   return (
     <nav
@@ -719,6 +759,7 @@ function BottomNav() {
   );
 }
 
+/** Accessible mobile drawer that traps focus and closes on Escape. */
 function MobileDrawer({
   teacherName,
   teacherRole,
@@ -783,6 +824,7 @@ function MobileDrawer({
   );
 }
 
+/** Derives up to two uppercase initials from a display name. */
 function initialsFromName(name: string) {
   const parts = name
     .trim()
