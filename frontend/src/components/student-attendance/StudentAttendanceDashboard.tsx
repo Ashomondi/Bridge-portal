@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -35,21 +36,21 @@ import {
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  href: string;
+  href?: string;
   active?: boolean;
 };
 
 const SIDEBAR_ITEMS: NavItem[] = [
-  { label: "Home", icon: Home, href: "#" },
-  { label: "Results", icon: Award, href: "/parent/results" },
+  { label: "Home", icon: Home, href: "/parent" },
+  { label: "Results", icon: Award },
   {
     label: "Attendance",
     icon: CalendarCheck,
     href: "/parent/attendance",
     active: true,
   },
-  { label: "Fees", icon: Wallet, href: "#" },
-  { label: "AI assistant", icon: Sparkles, href: "#" },
+  { label: "Fees", icon: Wallet },
+  { label: "AI assistant", icon: Sparkles },
 ];
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -141,8 +142,8 @@ export default function StudentAttendanceDashboard({
           tabIndex={-1}
           className="mx-auto w-full max-w-[1440px] px-4 pb-10 pt-20 sm:px-6 lg:px-8 lg:pb-10 lg:pt-7"
         >
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <h1 className="min-w-0 text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
               {termName ? `${termName} Roll-Call` : "Roll-Call"}
             </h1>
             <span
@@ -204,7 +205,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
@@ -220,19 +221,15 @@ function SidebarContent({
       <nav className="mt-6 space-y-0.5" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               <Icon
                 className={cn(
                   "h-[17px] w-[17px] shrink-0",
@@ -245,7 +242,30 @@ function SidebarContent({
               {item.active && (
                 <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -270,7 +290,10 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="Sign out will be available once authentication is connected."
+            className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out
@@ -286,13 +309,13 @@ function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <a
+          <Link
             href="/parent"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
             aria-label="Back to student profile"
           >
             <ArrowLeft className="h-5 w-5" />
-          </a>
+          </Link>
           <p className="truncate text-lg font-bold tracking-tight text-slate-900">
             Student Profile
           </p>
@@ -300,8 +323,11 @@ function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
 
         <button
           type="button"
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-          aria-label="Open user profile"
+          disabled
+          aria-disabled="true"
+          title="Profile menu is unavailable until authentication is connected."
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+          aria-label="User profile unavailable"
         >
           {guardianInitials}
         </button>
@@ -334,7 +360,12 @@ function DesktopHeader({
 
         <button
           type="button"
-          className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          aria-expanded={false}
+          aria-label="Open guardian profile unavailable"
+          title="Profile menu is unavailable until authentication is connected."
+          className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
         >
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
             {guardianInitials}
@@ -343,9 +374,9 @@ function DesktopHeader({
             <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
               {guardianName}
             </p>
-            <p className="text-[10px] text-slate-400">{relationship}</p>
+            <p className="text-[10px] text-slate-600">{relationship}</p>
           </div>
-          <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+          <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
         </button>
       </div>
     </header>
@@ -380,7 +411,7 @@ function StudentFilter({
                 aria-selected={active}
                 onClick={() => onSelect(student.id)}
                 className={cn(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                  "inline-flex min-h-11 items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                   active
                     ? "border-brand-600 bg-[#E8F5F3] text-brand-700 shadow-sm"
                     : "border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
@@ -493,7 +524,7 @@ function CalendarCard({
           <button
             type="button"
             onClick={onPrevious}
-            className="grid h-8 w-8 place-items-center rounded-full border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-11 w-11 place-items-center rounded-full border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
             aria-label="Previous month"
           >
             <ChevronLeft className="h-4 w-4" />
@@ -501,7 +532,7 @@ function CalendarCard({
           <button
             type="button"
             onClick={onNext}
-            className="grid h-8 w-8 place-items-center rounded-full border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-11 w-11 place-items-center rounded-full border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
             aria-label="Next month"
           >
             <ChevronRight className="h-4 w-4" />
@@ -557,7 +588,7 @@ function CalendarDay({
 
   if (!cell.currentMonth || status === null) {
     return (
-      <div className="flex min-h-9 flex-col items-center justify-center rounded-lg text-[10px] font-medium text-slate-300">
+      <div className="flex min-h-9 flex-col items-center justify-center rounded-lg text-[10px] font-medium text-slate-500">
         {cell.day}
       </div>
     );
@@ -601,7 +632,7 @@ function AbsenceRecordsCard({ records }: { records: AbsenceRecord[] }) {
           </h2>
         </div>
         <span className="rounded-full bg-[#FEF3D6] px-2.5 py-1 text-[9px] font-semibold text-[#8A6A25] ring-1 ring-[#EBD7A5]">
-          {records.length} Records
+          {records.length === 1 ? "1 Record" : `${records.length} Records`}
         </span>
       </div>
 
