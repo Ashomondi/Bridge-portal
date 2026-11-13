@@ -14,6 +14,7 @@ CREATE OR REPLACE FUNCTION current_user_id() RETURNS uuid AS $$
     SELECT NULLIF(current_setting('app.user_id', true), '')::uuid;
 $$ LANGUAGE sql STABLE;
 
+DROP POLICY IF EXISTS memberships_self_read ON memberships;
 CREATE POLICY memberships_self_read ON memberships
     FOR SELECT USING (user_id = current_user_id());
 
@@ -45,15 +46,19 @@ CREATE TABLE otp_requests (
     otp_hash TEXT NOT NULL,
     purpose VARCHAR(30) NOT NULL
         CHECK (purpose IN ('app_login', 'whatsapp_session', 'phone_change')),
+    request_ip VARCHAR(45),
     expires_at TIMESTAMPTZ NOT NULL,
     consumed_at TIMESTAMPTZ,
+    failed_attempts INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_otp_requests_phone_created
     ON otp_requests (phone_number, purpose, created_at DESC);
 CREATE INDEX idx_otp_requests_sender_created
-    ON otp_requests (sender_identifier, created_at DESC);
+    ON otp_requests (sender_identifier, purpose, created_at DESC);
+CREATE INDEX idx_otp_requests_ip_created
+    ON otp_requests (request_ip, purpose, created_at DESC);
 
 -- ------------------------------------------------------------------------------
 -- Sender rate blocks (C18-C20, AC-10)
@@ -84,7 +89,6 @@ CREATE TABLE parent_qr_codes (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_parent_qr_codes_token ON parent_qr_codes (qr_token);
 CREATE INDEX idx_parent_qr_codes_valid ON parent_qr_codes (school_id, valid_until);
 
 -- ------------------------------------------------------------------------------
@@ -154,6 +158,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_changed_at TIMESTAMPTZ;
 ALTER TABLE consents DROP CONSTRAINT IF EXISTS consents_purpose_check;
 ALTER TABLE consents ADD CONSTRAINT consents_purpose_check
     CHECK (purpose IN ('biometric_attendance', 'photo', 'sms', 'whatsapp'));
+
+-- One current consent row per child, guardian and purpose. History of changes
+-- stays in audit_log; the consent record itself is updated in place.
+CREATE UNIQUE INDEX consents_school_student_guardian_purpose_key
+    ON consents (school_id, student_id, guardian_user_id, purpose);
 
 -- ------------------------------------------------------------------------------
 -- Row-Level Security on every new tenant-owned table (AC-27)

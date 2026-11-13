@@ -85,6 +85,13 @@ func QueryScope(key string) ScopeFunc {
 	}
 }
 
+// PathScope reads a scope id from a Go 1.22 path value, e.g. /classes/{id}.
+func PathScope(key string) ScopeFunc {
+	return func(r *http.Request) string {
+		return r.PathValue(key)
+	}
+}
+
 // RequirePermission rejects requests where the caller lacks perm before the
 // handler runs.
 func (m *AuthMiddleware) RequirePermission(perm string, scopeExtractors ...ScopeFunc) func(http.Handler) http.Handler {

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -28,6 +29,7 @@ const (
 	blockWindow       = 30 * time.Minute
 	blockThreshold    = 5
 	blockDuration     = 24 * time.Hour
+	maxOTPAttempts    = 5
 	otpCodeLength     = 6
 	otpSMSMessage     = "Your Ikonex Academy login code is %s. It expires in 5 minutes."
 	otpRequestPurpose = "app_login"
@@ -90,6 +92,17 @@ func (m *TokenManager) Verify(token string) (*middleware.Claims, error) {
 		return nil, errInvalidToken
 	}
 
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, errInvalidToken
+	}
+	var header struct {
+		Algorithm string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil || header.Algorithm != "HS256" {
+		return nil, errInvalidToken
+	}
+
 	providedSignature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
 		return nil, errInvalidToken
@@ -124,15 +137,33 @@ func (m *TokenManager) sign(input string) []byte {
 
 // Service implements phone + SMS OTP authentication.
 type Service struct {
-	db     *sql.DB
-	tokens *TokenManager
-	sms    SMSDispatcher
-	audit  *database.AuditLogger
+	db                *sql.DB
+	tokens            *TokenManager
+	sms               SMSDispatcher
+	audit             *database.AuditLogger
+	trustProxyHeaders bool
 }
 
 // NewService builds the auth service.
-func NewService(db *sql.DB, tokens *TokenManager, sms SMSDispatcher, audit *database.AuditLogger) *Service {
-	return &Service{db: db, tokens: tokens, sms: sms, audit: audit}
+func NewService(db *sql.DB, tokens *TokenManager, sms SMSDispatcher, audit *database.AuditLogger, trustProxyHeaders bool) *Service {
+	return &Service{db: db, tokens: tokens, sms: sms, audit: audit, trustProxyHeaders: trustProxyHeaders}
+}
+
+// rateLimitError describes a request that was refused by the OTP rate limiter.
+type rateLimitError struct {
+	Code    string
+	Message string
+	Details map[string]any
+}
+
+func (e *rateLimitError) Error() string {
+	return "auth: " + e.Code
+}
+
+// sqlQuerier is satisfied by both *sql.DB and *sql.Tx.
+type sqlQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // RegisterRoutes mounts the authentication endpoints.
@@ -161,47 +192,19 @@ func (s *Service) handleRequestOTP(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondError(w, http.StatusServiceUnavailable, "SMS_UNAVAILABLE", "SMS delivery is not configured.")
 		return
 	}
-	if retryAfter, blocked, err := s.activeBlock(ctx, phone); err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to check rate limits.")
-		return
-	} else if blocked {
-		middleware.RespondErrorDetails(w, http.StatusTooManyRequests, "SENDER_BLOCKED", "Too many requests. Try again later.",
-			map[string]any{"retry_after_seconds": int(retryAfter.Seconds())})
-		return
-	}
-
-	recent, err := s.recentRequestCount(ctx, phone)
-	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to check rate limits.")
-		return
-	}
-	if recent >= blockThreshold {
-		if err := s.blockSender(ctx, phone); err != nil {
-			middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to apply rate limit.")
-			return
-		}
-		middleware.RespondErrorDetails(w, http.StatusTooManyRequests, "SENDER_BLOCKED", "Too many requests. Try again later.",
-			map[string]any{"retry_after_seconds": int(blockDuration.Seconds())})
-		return
-	}
-
-	if cooldown, waiting, err := s.cooldownRemaining(ctx, phone); err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to check rate limits.")
-		return
-	} else if waiting {
-		middleware.RespondErrorDetails(w, http.StatusTooManyRequests, "OTP_COOLDOWN", "Please wait before requesting another OTP.",
-			map[string]any{"cooldown_seconds": int(cooldown.Seconds())})
-		return
-	}
-
 	otp, err := GenerateOTP()
 	if err != nil {
 		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to generate an OTP.")
 		return
 	}
-	requestID, err := s.storeOTP(ctx, phone, HashOTP(otp))
+	requestID, err := s.reserveOTP(ctx, phone, s.clientIP(r), HashOTP(otp))
 	if err != nil {
-		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to store the OTP.")
+		var limit *rateLimitError
+		if errors.As(err, &limit) {
+			middleware.RespondErrorDetails(w, http.StatusTooManyRequests, limit.Code, limit.Message, limit.Details)
+			return
+		}
+		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to process the OTP request.")
 		return
 	}
 
@@ -259,6 +262,17 @@ func (s *Service) handleVerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(HashOTP(otp))) != 1 {
+		attempts, err := s.recordFailedAttempt(ctx, requestID)
+		if err != nil {
+			middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to verify the OTP.")
+			return
+		}
+		if attempts >= maxOTPAttempts {
+			middleware.RespondErrorDetails(w, http.StatusTooManyRequests, "OTP_ATTEMPTS_EXCEEDED",
+				"Too many incorrect attempts. Request a new code.",
+				map[string]any{"max_attempts": maxOTPAttempts})
+			return
+		}
 		middleware.RespondError(w, http.StatusUnauthorized, "INVALID_OTP", "The OTP is invalid or has expired.")
 		return
 	}
@@ -298,7 +312,7 @@ func (s *Service) handleVerifyOTP(w http.ResponseWriter, r *http.Request) {
 			Action:       "auth.login",
 			ResourceType: "user",
 			ResourceID:   user.ID,
-			IPAddress:    clientIP(r),
+			IPAddress:    s.clientIP(r),
 			UserAgent:    r.UserAgent(),
 		})
 	}
@@ -331,9 +345,135 @@ func HashOTP(otp string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Service) activeBlock(ctx context.Context, sender string) (time.Duration, bool, error) {
-	var blockedUntil time.Time
+// reserveOTP checks the per-phone and per-IP rate limits and stores a new OTP
+// in one transaction. Advisory locks serialise concurrent requests so two
+// callers cannot both pass the cooldown or threshold checks.
+func (s *Service) reserveOTP(ctx context.Context, phone, requestIP, otpHash string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	// Always take the phone lock first and the IP lock second so concurrent
+	// requests cannot deadlock each other.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "otp:"+phone); err != nil {
+		return "", err
+	}
+	ipBlockKey := ""
+	if requestIP != "" {
+		ipBlockKey = "ip:" + requestIP
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "otp-ip:"+requestIP); err != nil {
+			return "", err
+		}
+	}
+
+	if retryAfter, blocked, err := activeBlock(ctx, tx, phone); err != nil {
+		return "", err
+	} else if blocked {
+		return "", &rateLimitError{
+			Code:    "SENDER_BLOCKED",
+			Message: "Too many requests. Try again later.",
+			Details: map[string]any{"retry_after_seconds": int(retryAfter.Seconds())},
+		}
+	}
+	if ipBlockKey != "" {
+		if retryAfter, blocked, err := activeBlock(ctx, tx, ipBlockKey); err != nil {
+			return "", err
+		} else if blocked {
+			return "", &rateLimitError{
+				Code:    "IP_BLOCKED",
+				Message: "Too many requests from this network. Try again later.",
+				Details: map[string]any{"retry_after_seconds": int(retryAfter.Seconds())},
+			}
+		}
+	}
+
+	recentPhone, err := recentRequestCount(ctx, tx, phone)
+	if err != nil {
+		return "", err
+	}
+	recentIP := 0
+	if requestIP != "" {
+		recentIP, err = recentRequestCountByIP(ctx, tx, requestIP)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	phoneBlocked := recentPhone >= blockThreshold
+	ipBlocked := ipBlockKey != "" && recentIP >= blockThreshold
+	if phoneBlocked || ipBlocked {
+		if phoneBlocked {
+			if err := blockSender(ctx, tx, phone); err != nil {
+				return "", err
+			}
+		}
+		if ipBlocked {
+			if err := blockSender(ctx, tx, ipBlockKey); err != nil {
+				return "", err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return "", err
+		}
+		if phoneBlocked {
+			return "", &rateLimitError{
+				Code:    "SENDER_BLOCKED",
+				Message: "Too many requests. Try again later.",
+				Details: map[string]any{"retry_after_seconds": int(blockDuration.Seconds())},
+			}
+		}
+		return "", &rateLimitError{
+			Code:    "IP_BLOCKED",
+			Message: "Too many requests from this network. Try again later.",
+			Details: map[string]any{"retry_after_seconds": int(blockDuration.Seconds())},
+		}
+	}
+
+	if cooldown, waiting, err := cooldownRemaining(ctx, tx, phone); err != nil {
+		return "", err
+	} else if waiting {
+		return "", &rateLimitError{
+			Code:    "OTP_COOLDOWN",
+			Message: "Please wait before requesting another OTP.",
+			Details: map[string]any{"cooldown_seconds": int(cooldown.Seconds())},
+		}
+	}
+
+	var id string
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, request_ip, expires_at)
+		 VALUES ($1, $1, $2, $3, NULLIF($4, ''), NOW() + INTERVAL '5 minutes')
+		 RETURNING id::text`,
+		phone, otpHash, otpRequestPurpose, requestIP).Scan(&id); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// recordFailedAttempt increments the failed-attempt counter and invalidates the
+// OTP once the maximum is reached. It returns the new attempt count.
+func (s *Service) recordFailedAttempt(ctx context.Context, requestID string) (int, error) {
+	var attempts int
 	err := s.db.QueryRowContext(ctx,
+		`UPDATE otp_requests
+		    SET failed_attempts = failed_attempts + 1,
+		        consumed_at = CASE WHEN failed_attempts + 1 >= $2 THEN NOW() ELSE consumed_at END
+		  WHERE id = $1 AND consumed_at IS NULL
+		  RETURNING failed_attempts`, requestID, maxOTPAttempts).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return attempts, err
+}
+
+func activeBlock(ctx context.Context, q sqlQuerier, sender string) (time.Duration, bool, error) {
+	var blockedUntil time.Time
+	err := q.QueryRowContext(ctx,
 		`SELECT blocked_until FROM sender_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW()`,
 		sender).Scan(&blockedUntil)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -345,16 +485,26 @@ func (s *Service) activeBlock(ctx context.Context, sender string) (time.Duration
 	return time.Until(blockedUntil), true, nil
 }
 
-func (s *Service) recentRequestCount(ctx context.Context, sender string) (int, error) {
+func recentRequestCount(ctx context.Context, q sqlQuerier, sender string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM otp_requests WHERE sender_identifier = $1 AND created_at >= NOW() - INTERVAL '30 minutes'`,
-		sender).Scan(&count)
+	err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM otp_requests
+		  WHERE sender_identifier = $1 AND purpose = $2 AND created_at >= NOW() - INTERVAL '30 minutes'`,
+		sender, otpRequestPurpose).Scan(&count)
 	return count, err
 }
 
-func (s *Service) blockSender(ctx context.Context, sender string) error {
-	_, err := s.db.ExecContext(ctx,
+func recentRequestCountByIP(ctx context.Context, q sqlQuerier, requestIP string) (int, error) {
+	var count int
+	err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM otp_requests
+		  WHERE request_ip = $1 AND purpose = $2 AND created_at >= NOW() - INTERVAL '30 minutes'`,
+		requestIP, otpRequestPurpose).Scan(&count)
+	return count, err
+}
+
+func blockSender(ctx context.Context, q sqlQuerier, sender string) error {
+	_, err := q.ExecContext(ctx,
 		`INSERT INTO sender_rate_blocks (sender_identifier, blocked_until, reason)
 		 VALUES ($1, NOW() + INTERVAL '24 hours', 'otp_request_threshold')
 		 ON CONFLICT (sender_identifier) DO UPDATE
@@ -365,9 +515,9 @@ func (s *Service) blockSender(ctx context.Context, sender string) error {
 	return err
 }
 
-func (s *Service) cooldownRemaining(ctx context.Context, phone string) (time.Duration, bool, error) {
+func cooldownRemaining(ctx context.Context, q sqlQuerier, phone string) (time.Duration, bool, error) {
 	var last time.Time
-	err := s.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT created_at FROM otp_requests
 		  WHERE phone_number = $1 AND purpose = $2
 		  ORDER BY created_at DESC LIMIT 1`,
@@ -383,16 +533,6 @@ func (s *Service) cooldownRemaining(ctx context.Context, phone string) (time.Dur
 		return 0, false, nil
 	}
 	return remaining, true, nil
-}
-
-func (s *Service) storeOTP(ctx context.Context, phone, otpHash string) (string, error) {
-	var id string
-	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, expires_at)
-		 VALUES ($1, $1, $2, $3, NOW() + INTERVAL '5 minutes')
-		 RETURNING id::text`,
-		phone, otpHash, otpRequestPurpose).Scan(&id)
-	return id, err
 }
 
 func (s *Service) latestOTP(ctx context.Context, phone string) (string, string, error) {
@@ -477,12 +617,18 @@ func (s *Service) badgesForMembership(ctx context.Context, schoolID, membershipI
 	return badges, err
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if first, _, ok := strings.Cut(forwarded, ","); ok {
-			return strings.TrimSpace(first)
+func (s *Service) clientIP(r *http.Request) string {
+	if s.trustProxyHeaders {
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			first, _, _ := strings.Cut(forwarded, ",")
+			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
+				return ip.String()
+			}
 		}
-		return strings.TrimSpace(forwarded)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
 	}
 	return r.RemoteAddr
 }

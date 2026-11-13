@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -86,11 +87,7 @@ func (m *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 
 		identity, err := m.resolveIdentity(r, claims)
 		if err != nil {
-			if err == errSchoolRequired {
-				RespondError(w, http.StatusBadRequest, "SCHOOL_REQUIRED", "X-School-ID is required when the caller belongs to multiple schools.")
-				return
-			}
-			RespondError(w, http.StatusForbidden, "FORBIDDEN", "No active membership for this user and school.")
+			respondAuthError(w, err)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), identity)))
@@ -122,11 +119,28 @@ func RequireInternalService(expectedToken string) func(http.Handler) http.Handle
 	}
 }
 
-var errSchoolRequired = &membershipError{"school required"}
+var (
+	errSchoolRequired     = &membershipError{"school required"}
+	errMembershipRequired = &membershipError{"membership required"}
+	errNoMembership       = &membershipError{"no membership"}
+)
 
 type membershipError struct{ msg string }
 
 func (e *membershipError) Error() string { return e.msg }
+
+func respondAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errSchoolRequired):
+		RespondError(w, http.StatusBadRequest, "SCHOOL_REQUIRED", "X-School-ID is required when the caller belongs to multiple schools.")
+	case errors.Is(err, errMembershipRequired):
+		RespondError(w, http.StatusBadRequest, "MEMBERSHIP_REQUIRED", "X-Membership-ID is required when the caller holds multiple roles in one school.")
+	case errors.Is(err, errNoMembership):
+		RespondError(w, http.StatusForbidden, "FORBIDDEN", "No active membership for this user and school.")
+	default:
+		RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to resolve the caller's membership.")
+	}
+}
 
 type membershipRow struct {
 	id       string
@@ -136,10 +150,15 @@ type membershipRow struct {
 
 func (m *AuthMiddleware) resolveIdentity(r *http.Request, claims *Claims) (Identity, error) {
 	requestedSchool := strings.TrimSpace(r.Header.Get("X-School-ID"))
-	if requestedSchool != "" {
-		membership, err := m.membershipForSchool(r.Context(), claims.UserID, requestedSchool)
+	requestedMembership := strings.TrimSpace(r.Header.Get("X-Membership-ID"))
+
+	if requestedMembership != "" {
+		membership, err := m.membershipByID(r.Context(), claims.UserID, requestedMembership)
 		if err != nil {
 			return Identity{}, err
+		}
+		if requestedSchool != "" && membership.schoolID != requestedSchool {
+			return Identity{}, errNoMembership
 		}
 		return m.buildIdentity(r.Context(), claims, membership)
 	}
@@ -149,14 +168,42 @@ func (m *AuthMiddleware) resolveIdentity(r *http.Request, claims *Claims) (Ident
 		return Identity{}, err
 	}
 
+	if requestedSchool != "" {
+		matching := filterMemberships(memberships, requestedSchool)
+		switch len(matching) {
+		case 0:
+			return Identity{}, errNoMembership
+		case 1:
+			return m.buildIdentity(r.Context(), claims, matching[0])
+		default:
+			return Identity{}, errMembershipRequired
+		}
+	}
+
 	switch len(memberships) {
 	case 0:
-		return Identity{}, &membershipError{"no memberships"}
+		return Identity{}, errNoMembership
 	case 1:
 		return m.buildIdentity(r.Context(), claims, memberships[0])
-	default:
-		return Identity{}, errSchoolRequired
 	}
+
+	schoolID := memberships[0].schoolID
+	for _, membership := range memberships[1:] {
+		if membership.schoolID != schoolID {
+			return Identity{}, errSchoolRequired
+		}
+	}
+	return Identity{}, errMembershipRequired
+}
+
+func filterMemberships(memberships []membershipRow, schoolID string) []membershipRow {
+	matching := make([]membershipRow, 0, len(memberships))
+	for _, membership := range memberships {
+		if membership.schoolID == schoolID {
+			matching = append(matching, membership)
+		}
+	}
+	return matching
 }
 
 func (m *AuthMiddleware) membershipsForUser(ctx context.Context, userID string) ([]membershipRow, error) {
@@ -183,14 +230,18 @@ func (m *AuthMiddleware) membershipsForUser(ctx context.Context, userID string) 
 	return memberships, err
 }
 
-func (m *AuthMiddleware) membershipForSchool(ctx context.Context, userID, schoolID string) (membershipRow, error) {
+func (m *AuthMiddleware) membershipByID(ctx context.Context, userID, membershipID string) (membershipRow, error) {
 	var membership membershipRow
-	err := database.WithTenantTx(ctx, m.db, schoolID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx,
+	err := database.WithUserTx(ctx, m.db, userID, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx,
 			`SELECT id::text, school_id::text, role
 			   FROM memberships
-			  WHERE user_id = $1 AND school_id = $2 AND status = 'active'`,
-			userID, schoolID).Scan(&membership.id, &membership.schoolID, &membership.role)
+			  WHERE id::text = $1 AND user_id = $2 AND status = 'active'`,
+			membershipID, userID).Scan(&membership.id, &membership.schoolID, &membership.role)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errNoMembership
+		}
+		return err
 	})
 	return membership, err
 }

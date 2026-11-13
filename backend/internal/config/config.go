@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+var allowedEnvironments = map[string]bool{
+	"development": true,
+	"test":        true,
+	"staging":     true,
+	"production":  true,
+}
+
 // Config is the fully resolved runtime configuration for the backend.
 type Config struct {
 	Environment string
@@ -19,9 +26,17 @@ type Config struct {
 	Redis RedisConfig
 	JWT   JWTConfig
 
-	Server               ServerConfig
+	Server            ServerConfig
+	CORS              CORSConfig
+	TrustProxyHeaders bool
+
 	InternalServiceToken string
 	RetentionDays        int
+}
+
+// CORSConfig describes which browser origins may call the API.
+type CORSConfig struct {
+	AllowedOrigins []string
 }
 
 // DBConfig describes the PostgreSQL connection and pool sizing.
@@ -87,8 +102,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	environment := strings.ToLower(strings.TrimSpace(env("ENVIRONMENT", "")))
+	if environment == "" {
+		return nil, fmt.Errorf("config: ENVIRONMENT is required")
+	}
+	if !allowedEnvironments[environment] {
+		return nil, fmt.Errorf("config: ENVIRONMENT must be one of development, test, staging or production")
+	}
+
 	cfg := &Config{
-		Environment: env("ENVIRONMENT", "development"),
+		Environment: environment,
 		LogLevel:    env("LOG_LEVEL", "debug"),
 		DB: DBConfig{
 			Host:         env("DB_HOST", "localhost"),
@@ -113,6 +136,10 @@ func Load() (*Config, error) {
 			Host: env("BACKEND_HOST", "0.0.0.0"),
 			Port: env("BACKEND_PORT", "8080"),
 		},
+		CORS: CORSConfig{
+			AllowedOrigins: envList("CORS_ALLOWED_ORIGINS", []string{"http://localhost:3000"}),
+		},
+		TrustProxyHeaders:    envBool("TRUST_PROXY_HEADERS", false),
 		InternalServiceToken: env("INTERNAL_SERVICE_TOKEN", ""),
 		RetentionDays:        retentionDays,
 	}
@@ -122,6 +149,9 @@ func Load() (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.JWT.Secret) == "" {
 		return nil, fmt.Errorf("config: JWT_SECRET is required")
+	}
+	if len(strings.TrimSpace(cfg.JWT.Secret)) < 32 {
+		return nil, fmt.Errorf("config: JWT_SECRET must be at least 32 characters")
 	}
 	if cfg.JWT.Expiry <= 0 {
 		return nil, fmt.Errorf("config: JWT_EXPIRY_HOURS must be positive")
@@ -146,4 +176,34 @@ func envInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("config: %s must be an integer: %w", key, err)
 	}
 	return n, nil
+}
+
+func envList(key string, fallback []string) []string {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			values = append(values, value)
+		}
+	}
+	if len(values) == 0 {
+		return fallback
+	}
+	return values
+}
+
+func envBool(key string, fallback bool) bool {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }

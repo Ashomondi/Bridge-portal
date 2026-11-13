@@ -42,10 +42,10 @@ func run(logger *log.Logger) error {
 
 	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.Expiry)
 	audit := database.NewAuditLogger(db.DB)
-	allowDevelopmentSMS := !strings.EqualFold(cfg.Environment, "production")
+	allowDevelopmentSMS := cfg.Environment == "development" || cfg.Environment == "test"
 	smsDispatcher := devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}
 
-	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit)
+	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit, cfg.TrustProxyHeaders)
 	consentService := consent.NewService(db.DB, audit)
 	onboardingService := onboarding.NewService(db.DB, audit, smsDispatcher, nil, cfg.RetentionDays)
 	authMiddleware := middleware.NewAuthMiddleware(db.DB, tokens)
@@ -64,7 +64,7 @@ func run(logger *log.Logger) error {
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Host, cfg.Server.Port),
-		Handler:           mux,
+		Handler:           middleware.CORS(cfg.CORS.AllowedOrigins)(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -108,6 +108,13 @@ func (d devSMSDispatcher) SendTransactionalSMS(_ context.Context, toPhoneNumber,
 	if !d.enabled {
 		return errors.New("sms: no dispatcher configured")
 	}
-	d.logger.Printf("sms to=%s body=%q", toPhoneNumber, message)
+	d.logger.Printf("sms to=%s body=%q", maskPhone(toPhoneNumber), message)
 	return nil
+}
+
+func maskPhone(phone string) string {
+	if len(phone) <= 7 {
+		return "***"
+	}
+	return phone[:4] + strings.Repeat("*", len(phone)-7) + phone[len(phone)-3:]
 }
