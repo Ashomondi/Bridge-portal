@@ -553,7 +553,7 @@ function DesktopSidebar({ schoolName }: { schoolName: string }) {
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <p className="text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-400">
             School portal
@@ -1522,7 +1522,7 @@ function MobileDrawer({
             </span>
             <div>
               <p className="text-sm font-bold tracking-tight text-slate-900">
-                Ikonex <span className="text-brand-600">Academy</span>
+                Bridge <span className="text-brand-600">Portal</span>
               </p>
               <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                 School portal

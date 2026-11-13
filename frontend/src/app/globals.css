@@ -17,10 +17,22 @@
   }
 
   *:focus-visible {
-    outline-style: solid;
-    outline-width: 2px;
+    outline: 2px solid #007a78;
     outline-offset: 2px;
-    outline-color: #007a78;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

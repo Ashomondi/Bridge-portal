@@ -8,7 +8,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "My Class Roster (Preview) | Ikonex Academy",
+  title: "My Class Roster (Preview) | Bridge Portal",
 };
 
 export default async function ClassRosterPage() {
