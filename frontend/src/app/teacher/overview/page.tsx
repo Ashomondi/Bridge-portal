@@ -1,10 +1,10 @@
-import TeacherComingSoon from "@/components/teacher/TeacherComingSoon";
+import TeacherOverviewDashboard from "@/components/teacher-overview/TeacherOverviewDashboard";
+import { loadTeacherOverview } from "@/components/teacher-overview/teacher-overview-source";
 
-export default function TeacherOverviewPage() {
-  return (
-    <TeacherComingSoon
-      title="Teacher overview coming soon"
-      description="The overview dashboard is being prepared. Use the timetable in the meantime."
-    />
-  );
+export const dynamic = "force-dynamic";
+
+export default async function TeacherOverviewPage() {
+  const overview = await loadTeacherOverview();
+
+  return <TeacherOverviewDashboard overview={overview} />;
 }
