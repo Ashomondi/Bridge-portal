@@ -30,6 +30,7 @@ import {
   formatTermAttendance,
   type AbsenceRecord,
   type AttendanceStatus,
+  type AttendanceSummary,
   type StudentAttendanceData,
 } from "./student-attendance-data";
 
@@ -62,6 +63,17 @@ const STATUS_STYLES: Record<AttendanceStatus, string> = {
   "no-school": "bg-[#F1F5F4] text-slate-400",
 };
 
+const STATUS_LABELS: Record<AttendanceStatus, string> = {
+  present: "Present",
+  absent: "Absent",
+  "not-marked": "Not marked",
+  "no-school": "No school",
+};
+
+/**
+ * Renders the selected child's attendance summary, calendar and absence records.
+ * Every attendance section is derived from the student-keyed payload.
+ */
 export default function StudentAttendanceDashboard({
   data,
   initialMonth,
@@ -77,30 +89,34 @@ export default function StudentAttendanceDashboard({
     session?.initials?.trim() || initialsFromName(guardianName);
   const portalName = data?.portal?.name?.trim() || "Parent portal";
   const termName = data?.termLabel?.trim() || null;
-  const summary = data?.summary ?? {
-    presentDays: null,
-    absentDays: null,
-    recordedDays: null,
-    liveSync: false,
-  };
-  const absenceRecords = data?.absenceRecords ?? [];
-  const complianceNote =
-    data?.complianceNote?.trim() ||
-    "Attendance records are retained and accessed under school policy and data-protection rules.";
 
   const [selectedStudentId, setSelectedStudentId] = useState(
     data?.selectedStudentId ?? students[0]?.id ?? "",
   );
   const [viewMonth, setViewMonth] = useState(initialMonth);
 
+  const attendanceByStudent = data?.attendanceByStudent ?? {};
+  const attendance = attendanceByStudent[selectedStudentId] ?? null;
+  const termAttendancePercent = attendance?.termAttendancePercent ?? null;
+  const summary = attendance?.summary ?? {
+    presentDays: null,
+    absentDays: null,
+    recordedDays: null,
+    liveSync: false,
+  };
+  const absenceRecords = attendance?.absenceRecords ?? [];
+  const complianceNote =
+    attendance?.complianceNote?.trim() ||
+    "Attendance records are retained and accessed under school policy and data-protection rules.";
+
   const cells = useMemo(
     () =>
       buildCalendarMonth(
         viewMonth.year,
         viewMonth.month,
-        data?.statusByDate ?? {},
+        attendance?.statusByDate ?? {},
       ),
-    [viewMonth, data?.statusByDate],
+    [viewMonth, attendance?.statusByDate],
   );
 
   function changeMonth(offset: number) {
@@ -149,14 +165,14 @@ export default function StudentAttendanceDashboard({
             <span
               className={cn(
                 "inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ring-1",
-                data?.termAttendancePercent !== null &&
-                  data?.termAttendancePercent !== undefined
+                termAttendancePercent !== null &&
+                  termAttendancePercent !== undefined
                   ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
                   : "bg-slate-100 text-slate-500 ring-slate-200",
               )}
             >
               <CalendarCheck className="h-3.5 w-3.5" />
-              {formatTermAttendance(data?.termAttendancePercent ?? null)}
+              {formatTermAttendance(termAttendancePercent ?? null)}
             </span>
           </div>
 
@@ -188,6 +204,7 @@ export default function StudentAttendanceDashboard({
   );
 }
 
+/** Renders the parent navigation and guardian summary. */
 function SidebarContent({
   guardianName,
   relationship,
@@ -304,6 +321,7 @@ function SidebarContent({
   );
 }
 
+/** Renders the mobile back link and guardian identity. */
 function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
@@ -321,21 +339,19 @@ function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
           </p>
         </div>
 
-        <button
-          type="button"
-          disabled
-          aria-disabled="true"
-          title="Profile menu is unavailable until authentication is connected."
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-          aria-label="User profile unavailable"
+        <span
+          role="img"
+          aria-label="Guardian profile"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
         >
           {guardianInitials}
-        </button>
+        </span>
       </div>
     </header>
   );
 }
 
+/** Renders the desktop breadcrumb and guardian identity. */
 function DesktopHeader({
   portalName,
   guardianName,
@@ -358,15 +374,7 @@ function DesktopHeader({
           <span>Student Profile</span>
         </div>
 
-        <button
-          type="button"
-          disabled
-          aria-disabled="true"
-          aria-expanded={false}
-          aria-label="Open guardian profile unavailable"
-          title="Profile menu is unavailable until authentication is connected."
-          className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
-        >
+        <div className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
             {guardianInitials}
           </span>
@@ -376,13 +384,13 @@ function DesktopHeader({
             </p>
             <p className="text-[10px] text-slate-600">{relationship}</p>
           </div>
-          <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
-        </button>
+        </div>
       </div>
     </header>
   );
 }
 
+/** Renders the linked-student selector. */
 function StudentFilter({
   students,
   selectedStudentId,
@@ -437,10 +445,11 @@ function StudentFilter({
   );
 }
 
+/** Renders present, absent and recorded-day totals. */
 function SummaryCard({
   summary,
 }: {
-  summary: StudentAttendanceData["summary"];
+  summary: AttendanceSummary;
 }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card sm:p-4">
@@ -498,6 +507,7 @@ function SummaryCard({
   );
 }
 
+/** Renders the monthly attendance calendar and legend. */
 function CalendarCard({
   cells,
   monthLabel,
@@ -579,6 +589,7 @@ function CalendarCard({
   );
 }
 
+/** Renders one calendar date with a screen-reader status label. */
 function CalendarDay({
   cell,
 }: {
@@ -605,20 +616,35 @@ function CalendarDay({
       )}
     >
       <span className="text-[10px] font-semibold">{cell.day}</span>
-      {status === "present" && <Check className="mt-0.5 h-2.5 w-2.5" />}
+      {status === "present" && (
+        <Check className="mt-0.5 h-2.5 w-2.5" aria-hidden="true" />
+      )}
       {status === "absent" && (
-        <AlertTriangle className="mt-0.5 h-2.5 w-2.5" />
+        <AlertTriangle className="mt-0.5 h-2.5 w-2.5" aria-hidden="true" />
       )}
       {status === "not-marked" && (
-        <span className="mt-0.5 h-1 w-1 rounded-full bg-slate-400" />
+        <span
+          className="mt-0.5 h-1 w-1 rounded-full bg-slate-400"
+          aria-hidden="true"
+        />
       )}
       {status === "no-school" && (
-        <span className="mt-0.5 h-px w-2 bg-slate-400" />
+        <span className="mt-0.5 h-px w-2 bg-slate-400" aria-hidden="true" />
       )}
+      <span className="sr-only">
+        {cell.date.toLocaleDateString("en-GB", {
+          weekday: "long",
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+        })}
+        : {STATUS_LABELS[status]}
+      </span>
     </div>
   );
 }
 
+/** Renders the selected child's absence records. */
 function AbsenceRecordsCard({ records }: { records: AbsenceRecord[] }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
@@ -673,6 +699,7 @@ function AbsenceRecordsCard({ records }: { records: AbsenceRecord[] }) {
   );
 }
 
+/** Renders the attendance data-protection notice. */
 function ComplianceCard({ note }: { note: string }) {
   return (
     <section className="flex gap-3 rounded-2xl border border-brand-100 bg-[#E2F0ED] p-4">
@@ -695,6 +722,7 @@ function ComplianceCard({ note }: { note: string }) {
   );
 }
 
+/** Builds up to two uppercase initials from a display name. */
 function initialsFromName(name: string) {
   const parts = name
     .trim()

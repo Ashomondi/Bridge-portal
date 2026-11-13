@@ -6,7 +6,8 @@ import type { StudentAttendanceData } from "./student-attendance-data";
  * Integration point:
  *  - Resolve the guardian, children and selected academic term from the session.
  *  - Call the attendance summary, calendar-status and absence-record endpoints.
- *  - Map the real response into `StudentAttendanceData`.
+ *  - Map each child's summary, calendar and absence records into the
+ *    student-keyed `attendanceByStudent` map.
  *
  * The loader returns `null` until that context is available. The dashboard
  * keeps its calendar and record structure and renders honest empty states
