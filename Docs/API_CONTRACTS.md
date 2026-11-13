@@ -64,21 +64,43 @@ be added later.
 
 ### Auth & onboarding
 - `POST /auth/otp/request`, `POST /auth/otp/verify`
-- `POST /staff-invites` (permission: `staff.invites.create`)
+- `POST /admin/schools` (Ikonex team; `X-Internal-Service-Token`). Creates the
+  school, principal user and membership, school contact profile, and the
+  default `class_teacher` / `delegated_verifier` badges; returns `school_id`
+  and `principal_user_id`.
+- `POST /schools/setup-wizard` (permission: `school.setup`; principal, deputy).
+  One transaction creates the academic year, Terms 1–3, Grade 7–12 levels,
+  classes, dormitories and the initial grading scale, then sets
+  `school_profile.wizard_completed = true`.
+- `POST /staff-invites` (permission: `staff.invites.create`; default window
+  08:00–18:00, adjustable) and `POST /staff-invites/{id}/revoke`
 - `POST /staff-applications/{id}/review` (permission:
   `staff.applications.review`; verifier checks documents in person)
-- `POST /parent-qr` (generate, valid 12 hours) and
+- `POST /parent-qr` (generate, valid 12 hours; token embeds the school id) and
   `POST /parent-qr/{id}/revoke` (permission: `parents.qr.manage`; dean,
-  principal, deputy)
-- `POST /registrations` (parent or staff submission via QR; creates a
-  *pending* record with no data access)
+  principal, deputy; revoking expires any linked delegated verifier badges)
+- `POST /registrations` (public; parent or staff submission via a QR token;
+  creates a *pending* record with no data access and no student link). An
+  invalid, expired or revoked QR returns `410 Gone`; an existing admission
+  number sets `is_duplicate_flag`.
 - `POST /registrations/{id}/verify` (permission: `registrations.verify`;
-  held by staff verifiers, delegable for the QR's active window)
-- `POST /verifier-grants` (permission: `verifier.grant`; staff only,
-  expires with the QR)
-- `POST /students/admit` (permission: `students.admit`)
-- `POST /guardians/me/phone-change` (2FA; notifies the old number; pauses
-  chat payments for 24 hours)
+  held by staff verifiers, delegable for the QR's active window). `approve`
+  creates the user/student/enrolment/guardian records, deletes the uploaded
+  document bytes, keeps a `verification_records` row and triggers the billing
+  hook; `reject` deletes the document and schedules the submission for purge.
+- `POST /verifier-grants` (permission: `verifier.grant`; staff memberships
+  only — a parent target returns `422`; the grant expires with the QR)
+- `POST /students/admit` (permission: `students.admit`; manual first-load
+  admission, duplicate admission numbers return `409`)
+- `POST /students/re-enrol` (permission: `students.admit`; carries active
+  students into a target academic year's enrolments)
+- `POST /guardians/me/phone-change/request-otp` and
+  `POST /guardians/me/phone-change/confirm` (2FA to the new number; updates
+  the phone, sends an alert to the old number, pauses chat payments for 24
+  hours and invalidates active chat sessions)
+- Unverified/rejected submissions are purged after
+  `UNVERIFIED_SUBMISSION_RETENTION_DAYS` by the worker via
+  `onboarding.PurgeExpiredUnverifiedSubmissions`.
 
 ### WhatsApp & parent sessions
 - `POST /whatsapp/webhook` (receiving number resolves the school)
