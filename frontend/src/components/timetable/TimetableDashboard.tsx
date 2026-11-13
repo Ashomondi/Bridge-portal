@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Bell,
@@ -69,21 +70,21 @@ type SyncState = "idle" | "syncing" | "done";
 const SIDEBAR_ITEMS: {
   label: string;
   icon: LucideIcon;
-  href: string;
+  href?: string;
   active?: boolean;
 }[] = [
-  { label: "Dashboard", icon: LayoutDashboard, href: "#" },
+  { label: "Dashboard", icon: LayoutDashboard },
   { label: "My Timetable", icon: CalendarDays, href: "/teacher", active: true },
-  { label: "My Classes", icon: UsersRound, href: "#" },
-  { label: "Attendance", icon: ClipboardCheck, href: "#" },
-  { label: "Resources", icon: Library, href: "#" },
-  { label: "Settings", icon: Settings, href: "#" },
+  { label: "My Classes", icon: UsersRound, href: "/teacher/class" },
+  { label: "Attendance", icon: ClipboardCheck },
+  { label: "Resources", icon: Library },
+  { label: "Settings", icon: Settings },
 ];
 
 const BOTTOM_NAV = [
   { label: "Home", icon: DashboardNavIcon },
-  { label: "Timetable", icon: TimetableNavIcon, active: true },
-  { label: "Classes", icon: ClassesNavIcon },
+  { label: "Timetable", icon: TimetableNavIcon, href: "/teacher", active: true },
+  { label: "Classes", icon: ClassesNavIcon, href: "/teacher/class" },
   { label: "Library", icon: ResourcesNavIcon },
   { label: "More", icon: MoreNavIcon },
 ];
@@ -578,19 +579,15 @@ function DesktopSidebar({ schoolName }: { schoolName: string }) {
       <nav className="mt-6 space-y-1" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition-all",
-                item.active
-                  ? "bg-brand-500 text-white shadow-lg shadow-brand-500/15"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition-all",
+            item.active
+              ? "bg-brand-500 text-white shadow-lg shadow-brand-500/15"
+              : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               <Icon
                 className={cn(
                   "h-[18px] w-[18px]",
@@ -603,7 +600,30 @@ function DesktopSidebar({ schoolName }: { schoolName: string }) {
               {item.active && (
                 <span className="h-1.5 w-1.5 rounded-full bg-white/80" />
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -1434,25 +1454,44 @@ function BottomNav() {
       <div className="grid grid-cols-5 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.active ? "/teacher" : "#"}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition",
-                item.active
-                  ? "text-brand-600"
-                  : "text-slate-400 hover:text-slate-600",
-              )}
-            >
+          const className = cn(
+            "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition",
+            item.active
+              ? "text-brand-600"
+              : "text-slate-400 hover:text-slate-600",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               {item.active && (
                 <span className="absolute -top-1 h-0.5 w-8 rounded-full bg-brand-500" />
               )}
               <Icon className="h-5 w-5" />
               <span>{item.label}</span>
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </div>
@@ -1515,23 +1554,38 @@ function MobileDrawer({
         <nav className="mt-5 space-y-1" aria-label="Mobile primary">
           {SIDEBAR_ITEMS.slice(0, 5).map((item) => {
             const Icon = item.icon;
+            const className = cn(
+              "flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition",
+              item.active
+                ? "bg-brand-500 text-white shadow-lg shadow-brand-500/15"
+                : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+              !item.href && "cursor-default opacity-60",
+            );
+
+            if (!item.href) {
+              return (
+                <span
+                  key={item.label}
+                  aria-disabled="true"
+                  className={className}
+                >
+                  <Icon className="h-[18px] w-[18px]" />
+                  {item.label}
+                </span>
+              );
+            }
 
             return (
-              <a
+              <Link
                 key={item.label}
                 href={item.href}
                 aria-current={item.active ? "page" : undefined}
                 onClick={onClose}
-                className={cn(
-                  "flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition",
-                  item.active
-                    ? "bg-brand-500 text-white shadow-lg shadow-brand-500/15"
-                    : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-                )}
+                className={className}
               >
                 <Icon className="h-[18px] w-[18px]" />
                 {item.label}
-              </a>
+              </Link>
             );
           })}
         </nav>
