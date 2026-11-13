@@ -1,7 +1,7 @@
 .PHONY: help dev up down test backend-run frontend-run ai-run migrate-up migrate-down clean
 
 help:
-	@echo "Ikonex Academy - Development Commands:"
+	@echo "Bridge Portal - Development Commands:"
 	@echo "  make dev          - Run all services via Docker Compose"
 	@echo "  make up           - Start Postgres and Redis containers in the background"
 	@echo "  make down         - Stop all Docker containers"
