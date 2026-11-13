@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import AssistantWidget from "@/components/assistant/AssistantWidget";
 
 export const metadata: Metadata = {
   title: "Bridge Portal | School Portal",
@@ -20,7 +21,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        {children}
+        <AssistantWidget />
+      </body>
     </html>
   );
 }
