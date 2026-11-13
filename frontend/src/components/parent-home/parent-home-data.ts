@@ -81,6 +81,10 @@ export type ParentHomeData = {
   events: HomeEvent[];
 };
 
+/**
+ * Formats a nullable amount using the school's currency, falling back to KES.
+ * Returns an em dash when the amount is unknown.
+ */
 export function formatCurrency(
   amount: number | null,
   currency: string | null | undefined,
@@ -100,8 +104,21 @@ export function formatCurrency(
   }
 }
 
-export function getFeeProgress(paid: number | null, total: number | null) {
-  if (paid === null || total === null || total <= 0) {
+/**
+ * Calculates the paid percentage of a fee balance.
+ *
+ * Returns `null` when either amount is unknown so the UI can preserve an
+ * unknown-progress state. Nonpositive totals report zero progress.
+ */
+export function getFeeProgress(
+  paid: number | null,
+  total: number | null,
+): number | null {
+  if (paid === null || total === null) {
+    return null;
+  }
+
+  if (total <= 0) {
     return 0;
   }
 

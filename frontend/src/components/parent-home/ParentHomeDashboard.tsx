@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useTransition } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   Award,
   BarChart3,
   Bell,
-  BookOpen,
   Bot,
   Bus,
   CalendarCheck,
@@ -39,7 +40,7 @@ import {
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  href: string;
+  href?: string;
   active?: boolean;
 };
 
@@ -47,15 +48,16 @@ const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Home", icon: Home, href: "/parent", active: true },
   { label: "Results", icon: Award, href: "/parent/results" },
   { label: "Attendance", icon: CalendarCheck, href: "/parent/attendance" },
-  { label: "Fees", icon: Wallet, href: "#" },
-  { label: "AI assistant", icon: Bot, href: "#" },
+  { label: "Fees", icon: Wallet },
+  { label: "AI assistant", icon: Bot },
 ];
 
-const BOTTOM_NAV = [
+const BOTTOM_NAV: NavItem[] = [
   { label: "Home", icon: Home, href: "/parent", active: true },
   { label: "Results", icon: GraduationCap, href: "/parent/results" },
-  { label: "Fees", icon: Wallet, href: "#" },
-  { label: "Assistant", icon: Bot, href: "#" },
+  { label: "Attendance", icon: CalendarCheck, href: "/parent/attendance" },
+  { label: "Fees", icon: Wallet },
+  { label: "Assistant", icon: Bot },
 ];
 
 const QUICK_ACCESS = [
@@ -65,6 +67,12 @@ const QUICK_ACCESS = [
   { id: "transport", label: "Transport", icon: Bus },
 ];
 
+/**
+ * Renders the parent home dashboard for the selected linked student.
+ *
+ * Student selection is driven through the URL so the server reloads that
+ * student's fee, attendance, lesson, results and event records together.
+ */
 export default function ParentHomeDashboard({
   data,
 }: {
@@ -80,9 +88,25 @@ export default function ParentHomeDashboard({
   const fee = data?.fee ?? null;
   const results = data?.results ?? null;
   const events = data?.events ?? [];
-  const [selectedStudentId, setSelectedStudentId] = useState(
-    data?.selectedStudentId ?? students[0]?.id ?? "",
-  );
+  const selectedStudentId = data?.selectedStudentId ?? students[0]?.id ?? "";
+
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [isPending, startTransition] = useTransition();
+
+  const selectStudent = (studentId: string) => {
+    if (studentId === selectedStudentId) {
+      return;
+    }
+
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("studentId", studentId);
+
+    startTransition(() => {
+      router.push(`${pathname}?${params.toString()}`, { scroll: false });
+    });
+  };
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -122,10 +146,17 @@ export default function ParentHomeDashboard({
           <StudentFilter
             students={students}
             selectedStudentId={selectedStudentId}
-            onSelect={setSelectedStudentId}
+            onSelect={selectStudent}
+            isPending={isPending}
           />
 
-          <div className="mt-4 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]">
+          <div
+            aria-busy={isPending}
+            className={cn(
+              "mt-4 grid grid-cols-1 gap-6 transition-opacity xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]",
+              isPending && "opacity-60",
+            )}
+          >
             <div className="min-w-0 space-y-4">
               <FeeHero fee={fee} />
               <QuickStats
@@ -148,6 +179,7 @@ export default function ParentHomeDashboard({
   );
 }
 
+/** Renders the persistent desktop portal navigation and guardian card. */
 function SidebarContent({
   guardianName,
   relationship,
@@ -181,19 +213,15 @@ function SidebarContent({
       <nav className="mt-6 space-y-0.5" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               <Icon
                 className={cn(
                   "h-[17px] w-[17px] shrink-0",
@@ -203,10 +231,40 @@ function SidebarContent({
                 )}
               />
               <span className="flex-1">{item.label}</span>
-              {item.active && (
-                <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+              {!item.href ? (
+                <span className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
+                  Soon
+                </span>
+              ) : (
+                item.active && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+                )
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                title={`${item.label} is coming soon.`}
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -231,7 +289,10 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="Sign out will be available once authentication is connected."
+            className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out
@@ -242,6 +303,7 @@ function SidebarContent({
   );
 }
 
+/** Renders the compact mobile app bar. */
 function MobileAppBar({
   portalName,
   guardianInitials,
@@ -283,6 +345,7 @@ function MobileAppBar({
   );
 }
 
+/** Renders the sticky desktop header with breadcrumb and guardian profile. */
 function DesktopHeader({
   portalName,
   guardianName,
@@ -336,20 +399,24 @@ function DesktopHeader({
   );
 }
 
+/** Renders the linked-student tabs that scope the dashboard to one child. */
 function StudentFilter({
   students,
   selectedStudentId,
   onSelect,
+  isPending,
 }: {
   students: ParentHomeData["students"];
   selectedStudentId: string;
   onSelect: (id: string) => void;
+  isPending: boolean;
 }) {
   return (
     <div
       className="-mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0"
       role="tablist"
       aria-label="Linked students"
+      aria-busy={isPending}
     >
       {students.length > 0 ? (
         <div className="flex min-w-max gap-2">
@@ -394,10 +461,18 @@ function StudentFilter({
   );
 }
 
+/** Renders the term fee balance, payment progress and fee actions. */
 function FeeHero({ fee }: { fee: ParentHomeData["fee"] }) {
   const progress = fee
     ? getFeeProgress(fee.paidAmount, fee.totalAmount)
     : null;
+  const feeMeta =
+    [
+      fee?.dueDate ? `Due ${fee.dueDate}` : null,
+      fee?.visibilityNote ?? null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "No due date or visibility information";
 
   return (
     <section className="rounded-2xl bg-gradient-to-br from-[#005E5D] to-[#007A78] p-5 text-white shadow-lg shadow-brand-900/20 sm:p-6">
@@ -424,9 +499,7 @@ function FeeHero({ fee }: { fee: ParentHomeData["fee"] }) {
 
       <p className="mt-3 flex items-center gap-1.5 text-[10px] text-white/70">
         <Clock3 className="h-3.5 w-3.5" />
-        {fee?.dueDate
-          ? `Due ${fee.dueDate}${fee.visibilityNote ? ` · ${fee.visibilityNote}` : ""}`
-          : "No due date or visibility information"}
+        {feeMeta}
       </p>
 
       <div className="mt-5">
@@ -471,6 +544,7 @@ function FeeHero({ fee }: { fee: ParentHomeData["fee"] }) {
   );
 }
 
+/** Renders the attendance and next-lesson summary cards. */
 function QuickStats({
   attendance,
   nextLesson,
@@ -542,6 +616,7 @@ function QuickStats({
   );
 }
 
+/** Renders the released results summary, level key and correction notice. */
 function ResultsSummary({
   results,
 }: {
@@ -643,6 +718,7 @@ function ResultsSummary({
   );
 }
 
+/** Renders one subject's performance level and mastery bar. */
 function ResultSubjectRow({ row }: { row: ResultRow }) {
   const width = row.masteryPercent === null ? 0 : Math.min(100, Math.max(0, row.masteryPercent));
 
@@ -671,6 +747,7 @@ function ResultSubjectRow({ row }: { row: ResultRow }) {
   );
 }
 
+/** Renders upcoming calendar events for the selected student's term. */
 function EventsCard({
   events,
   termLabel,
@@ -684,22 +761,18 @@ function EventsCard({
         <h2 className="text-sm font-bold tracking-tight text-slate-900">
           Coming up
         </h2>
-        <a
-          href="#"
-          className="text-[9px] font-semibold text-brand-700 transition hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+        <span
+          className="text-[9px] font-semibold text-slate-400"
+          title="The calendar view is coming soon."
         >
           {termLabel ? `${termLabel} Calendar` : "Calendar"}
-        </a>
+        </span>
       </div>
 
       {events.length > 0 ? (
         <div className="mt-3 divide-y divide-slate-100">
           {events.map((event) => (
-            <a
-              key={event.id}
-              href="#"
-              className="flex items-center gap-3 py-3 first:pt-0 last:pb-0 transition hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            >
+            <div key={event.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
               <span className="grid h-11 w-10 shrink-0 place-items-center rounded-xl bg-[#F0EBF9] text-[#6D4FA3]">
                 <span className="text-[7px] font-semibold uppercase tracking-wide">
                   {event.month}
@@ -714,8 +787,7 @@ function EventsCard({
                   {event.meta || "Time and location not provided"}
                 </p>
               </div>
-              <ChevronRight className="h-4 w-4 shrink-0 text-slate-300" />
-            </a>
+            </div>
           ))}
         </div>
       ) : (
@@ -730,6 +802,7 @@ function EventsCard({
   );
 }
 
+/** Renders structural shortcuts that are not yet connected. */
 function QuickAccessGrid() {
   return (
     <section>
@@ -768,6 +841,7 @@ function QuickAccessGrid() {
   );
 }
 
+/** Renders a consistent empty state for a dashboard section. */
 function EmptyState({
   icon: Icon,
   title,
@@ -799,34 +873,55 @@ function EmptyState({
   );
 }
 
+/** Renders the fixed mobile navigation with real and coming-soon entries. */
 function BottomNav() {
   return (
     <nav
       aria-label="Mobile navigation"
       className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200/70 bg-white/95 backdrop-blur-xl lg:hidden print:hidden"
     >
-      <div className="grid grid-cols-4 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
+      <div className="grid grid-cols-5 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "text-brand-600"
-                  : "text-slate-400 hover:text-slate-600",
-              )}
-            >
+          const className = cn(
+            "relative flex min-h-11 flex-col items-center justify-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+            item.active
+              ? "text-brand-600"
+              : "text-slate-400 hover:text-slate-600",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               {item.active && (
                 <span className="absolute -top-1 h-0.5 w-8 rounded-full bg-brand-500" />
               )}
               <Icon className="h-5 w-5" />
               <span>{item.label}</span>
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                title={`${item.label} is coming soon.`}
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </div>
@@ -834,6 +929,7 @@ function BottomNav() {
   );
 }
 
+/** Builds up to two uppercase initials from a guardian's display name. */
 function initialsFromName(name: string) {
   const parts = name
     .trim()
