@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import {
   ArrowLeft,
@@ -33,16 +34,16 @@ import {
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  href: string;
+  href?: string;
   active?: boolean;
 };
 
 const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Home", icon: Home, href: "/parent" },
-  { label: "Results", icon: Award, href: "/parent/results" },
+  { label: "Results", icon: Award },
   { label: "Attendance", icon: CalendarCheck, href: "/parent/attendance" },
-  { label: "Fees", icon: Wallet, href: "#", active: true },
-  { label: "AI assistant", icon: Bot, href: "#" },
+  { label: "Fees", icon: Wallet, href: "/parent/fees/pay", active: true },
+  { label: "AI assistant", icon: Bot },
 ];
 
 export default function PaymentCheckoutDashboard({
@@ -71,11 +72,15 @@ export default function PaymentCheckoutDashboard({
   const [customAmount, setCustomAmount] = useState("");
   const selectedOption =
     options.find((option) => option.id === selectedOptionId) ?? options[0];
+  const customAmountValue = Number(customAmount.trim());
+  const paymentServiceAvailable = false;
   const canSubmit = Boolean(
-    hasLiveOptions &&
+    paymentServiceAvailable &&
+      hasLiveOptions &&
       selectedOption &&
       phone?.verified &&
-      (!selectedOption.custom || customAmount.trim().length > 0),
+      (!selectedOption.custom ||
+        (Number.isInteger(customAmountValue) && customAmountValue > 0)),
   );
 
   return (
@@ -163,7 +168,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
@@ -179,19 +184,15 @@ function SidebarContent({
       <nav className="mt-6 space-y-0.5" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               <Icon
                 className={cn(
                   "h-[17px] w-[17px] shrink-0",
@@ -204,7 +205,30 @@ function SidebarContent({
               {item.active && (
                 <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -229,7 +253,10 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="Sign out will be available once authentication is connected."
+            className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out
@@ -245,25 +272,25 @@ function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <a
+          <Link
             href="/parent"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
             aria-label="Back to fees"
           >
             <ArrowLeft className="h-5 w-5" />
-          </a>
+          </Link>
           <p className="truncate text-lg font-bold tracking-tight text-slate-900">
             Make Payment
           </p>
         </div>
 
-        <button
-          type="button"
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-          aria-label="Open user profile"
+        <span
+          role="img"
+          aria-label="Guardian profile"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
         >
           {guardianInitials}
-        </button>
+        </span>
       </div>
     </header>
   );
@@ -293,10 +320,7 @@ function DesktopHeader({
           <span>Make Payment</span>
         </div>
 
-        <button
-          type="button"
-          className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-        >
+        <div className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
             {guardianInitials}
           </span>
@@ -304,10 +328,9 @@ function DesktopHeader({
             <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
               {guardianName}
             </p>
-            <p className="text-[10px] text-slate-400">{relationship}</p>
+            <p className="text-[10px] text-slate-600">{relationship}</p>
           </div>
-          <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
-        </button>
+        </div>
       </div>
     </header>
   );
@@ -383,7 +406,7 @@ function AmountCard({
                       onCustomAmountChange(event.target.value)
                     }
                     placeholder="Enter amount"
-                    className="h-9 min-w-0 flex-1 rounded-lg border border-slate-200/80 bg-white px-2.5 text-xs font-semibold text-slate-700 outline-none placeholder:text-slate-400 focus:border-brand-300 focus:ring-4 focus:ring-brand-500/10"
+                    className="h-9 min-w-0 flex-1 rounded-lg border border-slate-200/80 bg-white px-2.5 text-xs font-semibold text-slate-700 outline-none placeholder:text-slate-400 focus:border-brand-300 focus:ring-4 focus:ring-brand-500/10 focus-visible:ring-2 focus-visible:ring-brand-600"
                   />
                 </div>
               )}
@@ -437,11 +460,11 @@ function PaymentOptionRow({
           value={option.id}
           checked={selected}
           onChange={onSelect}
-          className="sr-only"
+          className="peer sr-only"
         />
         <span
           className={cn(
-            "grid h-4 w-4 shrink-0 place-items-center rounded-full border-2",
+            "grid h-4 w-4 shrink-0 place-items-center rounded-full border-2 peer-focus-visible:ring-2 peer-focus-visible:ring-brand-600 peer-focus-visible:ring-offset-2",
             selected
               ? "border-brand-500 bg-white"
               : "border-slate-300 bg-white",
@@ -538,7 +561,7 @@ function SandboxNotice() {
   return (
     <div className="flex items-center gap-2 px-1 text-[9px] font-medium text-slate-400">
       <FlaskConical className="h-3 w-3 shrink-0" />
-      Demo environment · Daraja sandbox. No real money moves.
+Payment service not connected · No money moves.
     </div>
   );
 }
@@ -549,18 +572,22 @@ function PaymentActions({ canSubmit }: { canSubmit: boolean }) {
       <button
         type="button"
         disabled={!canSubmit}
-        className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand-500 text-[11px] font-bold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+        title="M-Pesa checkout is unavailable until the payment service is connected."
+        className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand-500 text-[11px] font-bold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
       >
         <CreditCard className="h-4 w-4" />
         Send M-Pesa prompt
         <ArrowRight className="h-4 w-4" />
       </button>
-      <a
+      <p className="mt-2 text-center text-[9px] font-medium text-slate-600">
+        M-Pesa checkout is unavailable until the payment service is connected.
+      </p>
+      <Link
         href="/parent"
-        className="mt-3 flex items-center justify-center text-[10px] font-semibold text-slate-500 transition hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+        className="mt-3 flex min-h-11 items-center justify-center text-[10px] font-semibold text-slate-600 transition hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
       >
         Cancel and return to fees
-      </a>
+      </Link>
       <p className="mt-3 flex items-center justify-center gap-1 text-[8px] font-medium text-slate-400">
         <ShieldCheck className="h-3 w-3" />
         Secure checkout · 256-bit encryption
