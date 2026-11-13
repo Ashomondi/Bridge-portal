@@ -17,7 +17,10 @@
   }
 
   *:focus-visible {
-    @apply outline-2 outline-offset-2 outline-brand-500;
+    outline-style: solid;
+    outline-width: 2px;
+    outline-offset: 2px;
+    outline-color: #007a78;
   }
 }
 
