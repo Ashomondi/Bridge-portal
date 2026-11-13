@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Ikonex Academy | School Portal",
+  title: "Bridge Portal | School Portal",
   description:
     "Multi-school portal for Kenyan secondary schools, with role-based access for staff, teachers and parents.",
 };
