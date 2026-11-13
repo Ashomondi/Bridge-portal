@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   ArrowRight,
@@ -42,7 +43,7 @@ import {
 type NavItem = {
   label: string;
   icon: LucideIcon;
-  href: string;
+  href?: string;
   active?: boolean;
 };
 
@@ -55,17 +56,28 @@ const SIDEBAR_ITEMS: NavItem[] = [
   },
   { label: "Timetable", icon: CalendarDays, href: "/teacher" },
   { label: "My class", icon: UsersRound, href: "/teacher/class" },
-  { label: "Attendance", icon: ClipboardCheck, href: "#" },
-  { label: "Marks", icon: ClipboardList, href: "#" },
-  { label: "Resources", icon: Library, href: "#" },
+  { label: "Attendance", icon: ClipboardCheck },
+  { label: "Marks", icon: ClipboardList },
+  { label: "Resources", icon: Library },
 ];
 
-const BOTTOM_NAV = [
-  { label: "Overview", icon: LayoutDashboard, active: true },
-  { label: "Timetable", icon: CalendarDays },
-  { label: "Class", icon: UsersRound },
+const BOTTOM_NAV: {
+  label: string;
+  icon: LucideIcon;
+  href?: string;
+  active?: boolean;
+  opensDrawer?: boolean;
+}[] = [
+  {
+    label: "Overview",
+    icon: LayoutDashboard,
+    href: "/teacher/overview",
+    active: true,
+  },
+  { label: "Timetable", icon: CalendarDays, href: "/teacher" },
+  { label: "Class", icon: UsersRound, href: "/teacher/class" },
   { label: "Tasks", icon: CheckCircle2 },
-  { label: "More", icon: MoreHorizontal },
+  { label: "More", icon: MoreHorizontal, opensDrawer: true },
 ];
 
 const TODO_ICON: Record<TodoItem["kind"], LucideIcon> = {
@@ -117,6 +129,21 @@ export default function TeacherOverviewDashboard({
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const handleBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", handleBreakpointChange);
+
+    return () => {
+      desktopQuery.removeEventListener("change", handleBreakpointChange);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -183,7 +210,7 @@ export default function TeacherOverviewDashboard({
         </main>
       </div>
 
-      <BottomNav />
+      <BottomNav onOpenMenu={() => setMenuOpen(true)} />
 
       {menuOpen && (
         <MobileDrawer
@@ -219,10 +246,10 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+            <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-600">
               Teacher portal
             </p>
             <span className="rounded-full bg-brand-50 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wide text-brand-700 ring-1 ring-brand-100">
@@ -235,33 +262,52 @@ function SidebarContent({
       <nav className="mt-6 space-y-0.5" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.href}
-              onClick={onNavigate}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+            !item.href && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               <Icon
                 className={cn(
                   "h-[17px] w-[17px] shrink-0",
                   item.active
                     ? "text-brand-600"
-                    : "text-slate-400 group-hover:text-brand-600",
+                    : "text-slate-600 group-hover:text-brand-600",
                 )}
               />
               <span className="flex-1">{item.label}</span>
               {item.active && (
                 <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <span
+                key={item.label}
+                aria-disabled="true"
+                className={className}
+              >
+                {content}
+              </span>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              onClick={onNavigate}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -285,7 +331,7 @@ function SidebarContent({
             <p className="truncate text-xs font-semibold text-slate-800">
               {userFullName}
             </p>
-            <p className="text-[10px] text-slate-400">{userRole}</p>
+            <p className="text-[10px] text-slate-600">{userRole}</p>
             <p className="truncate text-[9px] font-medium text-brand-600">
               {userSubject}
             </p>
@@ -315,14 +361,14 @@ function MobileAppBar({
           onClick={onOpenMenu}
           aria-expanded={menuOpen}
           aria-controls="overview-navigation-drawer"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           aria-label="Open navigation menu"
         >
           <Menu className="h-5 w-5" />
         </button>
 
         <div className="min-w-0 flex-1 text-center">
-          <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+          <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-600">
             {organizationName}
           </p>
           <p className="truncate text-sm font-bold tracking-tight text-slate-900">
@@ -333,16 +379,24 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            aria-pressed={false}
+            title="Notifications are unavailable until the notifications service is connected."
+            className="relative grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="Notifications unavailable"
           >
             <Bell className="h-5 w-5" />
             <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <span className="sr-only">Unread notifications</span>
           </button>
           <button
             type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+            disabled
+            aria-disabled="true"
+            title="Profile menu is unavailable until authentication is connected."
+            className="grid h-11 w-11 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="User profile unavailable"
           >
             {userInitials}
           </button>
@@ -366,7 +420,7 @@ function DesktopHeader({
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
-        <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
           <span className="max-w-[220px] truncate text-slate-700">
             {organizationName}
           </span>
@@ -377,16 +431,25 @@ function DesktopHeader({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            aria-pressed={false}
+            title="Notifications are unavailable until the notifications service is connected."
+            className="relative grid h-11 w-11 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="Notifications unavailable"
           >
             <Bell className="h-[18px] w-[18px]" />
             <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <span className="sr-only">Unread notifications</span>
           </button>
 
           <button
             type="button"
-            className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            aria-expanded={false}
+            title="Profile menu is unavailable until authentication is connected."
+            className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
               {userInitials}
@@ -395,9 +458,9 @@ function DesktopHeader({
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
                 {userFullName}
               </p>
-              <p className="text-[10px] text-slate-400">{userRole}</p>
+              <p className="text-[10px] text-slate-600">{userRole}</p>
             </div>
-            <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+            <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
           </button>
         </div>
       </div>
@@ -425,7 +488,7 @@ function Greeting({
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-brand-500 shadow-[0_0_0_4px_rgba(0,122,120,0.10)]" />
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
             Teacher overview
           </p>
         </div>
@@ -438,7 +501,7 @@ function Greeting({
               <span key={`${value}-${index}`} className="flex items-center gap-2">
                 {index > 0 && <span className="text-slate-300">•</span>}
                 {index === 0 && (
-                  <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
+                  <CalendarDays className="h-3.5 w-3.5 text-slate-600" />
                 )}
                 {value}
               </span>
@@ -453,8 +516,11 @@ function Greeting({
 
       <button
         type="button"
-        className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-        aria-label="Change overview view"
+        disabled
+        aria-disabled="true"
+        title="Overview view settings are unavailable until the preference service is connected."
+        className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+        aria-label="Overview view settings unavailable"
       >
         <SlidersHorizontal className="h-4 w-4" />
       </button>
@@ -463,19 +529,23 @@ function Greeting({
 }
 
 function NextLessonCard({ lesson }: { lesson: NextLesson | null }) {
+  const now = useCurrentTime();
+  const countdown = lesson ? getCountdownLabel(lesson, now) : null;
+  const safePlanHref = sanitizeHref(lesson?.planHref);
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-card sm:p-6">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+        <p className="text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-600">
           Next lesson
         </p>
-        {lesson && lesson.countdownMinutes !== null && (
+        {lesson && countdown && (
           <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-[10px] font-semibold text-brand-700 ring-1 ring-brand-100">
             <span className="relative flex h-1.5 w-1.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-400 opacity-70 motion-reduce:animate-none" />
               <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-brand-500" />
             </span>
-            in {lesson.countdownMinutes} min
+            {countdown}
           </span>
         )}
       </div>
@@ -490,20 +560,20 @@ function NextLessonCard({ lesson }: { lesson: NextLesson | null }) {
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-slate-500">
               {lesson.group && (
                 <span className="inline-flex items-center gap-1.5">
-                  <UsersRound className="h-3.5 w-3.5 text-slate-400" />
+                  <UsersRound className="h-3.5 w-3.5 text-slate-600" />
                   {lesson.group}
                 </span>
               )}
               {lesson.startTime && (
                 <span className="inline-flex items-center gap-1.5">
-                  <Clock3 className="h-3.5 w-3.5 text-slate-400" />
+                  <Clock3 className="h-3.5 w-3.5 text-slate-600" />
                   {lesson.startTime}
                 </span>
               )}
             </div>
           )}
 
-          {(lesson.unitTopic || lesson.planHref) && (
+          {(lesson.unitTopic || safePlanHref) && (
             <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-[#E8F5F3] px-3.5 py-3">
               <div className="min-w-0">
                 <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-brand-600">
@@ -513,10 +583,11 @@ function NextLessonCard({ lesson }: { lesson: NextLesson | null }) {
                   {lesson.unitTopic || "Not provided"}
                 </p>
               </div>
-              {lesson.planHref && (
+              {safePlanHref && (
                 <a
-                  href={lesson.planHref}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold text-brand-700 transition hover:bg-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+                  href={safePlanHref}
+                  rel="noreferrer noopener"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold text-brand-700 transition hover:bg-white/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
                 >
                   Plan
                   <ArrowRight className="h-3.5 w-3.5" />
@@ -541,6 +612,11 @@ function TodoSection({
 }: {
   todo: TeacherOverviewData["todo"];
 }) {
+  const pendingCount =
+    todo.items.length > 0
+      ? todo.items.filter((item) => item.kind !== "done").length
+      : todo.pendingCount;
+
   return (
     <section>
       <div className="flex items-center justify-between gap-3">
@@ -548,9 +624,7 @@ function TodoSection({
           To do
         </h2>
         <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600 shadow-sm ring-1 ring-slate-200/80">
-          {todo.pendingCount === null
-            ? "Pending"
-            : `${todo.pendingCount} pending`}
+          {pendingCount === null ? "Pending" : `${pendingCount} pending`}
         </span>
       </div>
 
@@ -577,9 +651,10 @@ function TodoCard({ item }: { item: TodoItem }) {
   const tone = TODO_TONE_BY_KIND[item.kind];
 
   return (
-    <a
-      href="#"
-      className="group flex items-center gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card transition hover:-translate-y-px hover:shadow-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2 motion-reduce:transition-none"
+    <div
+      aria-disabled="true"
+      title="Task details are unavailable until the tasks service is connected."
+      className="flex items-center gap-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card"
     >
       <span
         className={cn(
@@ -598,7 +673,7 @@ function TodoCard({ item }: { item: TodoItem }) {
           {item.title}
         </p>
         {item.meta && (
-          <p className="mt-0.5 truncate text-[10px] text-slate-400">
+          <p className="mt-0.5 truncate text-[10px] text-slate-600">
             {item.meta}
           </p>
         )}
@@ -619,8 +694,8 @@ function TodoCard({ item }: { item: TodoItem }) {
         </span>
       </div>
 
-      <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-brand-500" />
-    </a>
+      <ChevronRight className="h-4 w-4 shrink-0 text-slate-600" />
+    </div>
   );
 }
 
@@ -662,10 +737,10 @@ function TimetableRowCard({ row }: { row: TimetableRow }) {
     return (
       <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2.5">
         <span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-slate-500">
-          <Coffee className="h-3.5 w-3.5 text-slate-400" />
+          <Coffee className="h-3.5 w-3.5 text-slate-600" />
           {row.label?.trim() || "Break"}
         </span>
-        <span className="text-[10px] font-semibold text-slate-400">
+        <span className="text-[10px] font-semibold text-slate-600">
           {formatTimeRange(row.startTime, row.endTime)}
         </span>
       </div>
@@ -698,7 +773,7 @@ function TimetableRowCard({ row }: { row: TimetableRow }) {
         <p
           className={cn(
             "text-[10px] font-medium",
-            active ? "text-[#8A6DBC]" : "text-slate-400",
+            active ? "text-[#8A6DBC]" : "text-slate-600",
           )}
         >
           {row.endTime || "—"}
@@ -723,7 +798,7 @@ function TimetableRowCard({ row }: { row: TimetableRow }) {
       <span
         className={cn(
           "grid h-6 w-6 shrink-0 place-items-center rounded-full bg-white/80",
-          active ? "text-[#6D4FA3]" : completed ? "text-brand-600" : "text-slate-400",
+          active ? "text-[#6D4FA3]" : completed ? "text-brand-600" : "text-slate-600",
         )}
       >
         <StatusIcon className="h-3.5 w-3.5" />
@@ -791,13 +866,14 @@ function AnnouncementsCard({
         />
       )}
 
-      <a
-        href="#"
-        className="mt-3 flex items-center justify-center gap-1.5 border-t border-slate-100 pt-3 text-[10px] font-semibold text-brand-700 transition hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+      <span
+        aria-disabled="true"
+        title="Notification history is unavailable until the notifications service is connected."
+        className="mt-3 flex cursor-default items-center justify-center gap-1.5 border-t border-slate-100 pt-3 text-[10px] font-semibold text-slate-500 opacity-70"
       >
-        See all notifications
+        See all notifications unavailable
         <ArrowRight className="h-3.5 w-3.5" />
-      </a>
+      </span>
     </section>
   );
 }
@@ -820,7 +896,7 @@ function EmptyState({
         className,
       )}
     >
-      <span className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-white text-slate-400 shadow-sm">
+      <span className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-white text-slate-600 shadow-sm">
         <Icon className="h-4 w-4" />
       </span>
       <p className="mt-2.5 text-xs font-semibold text-slate-700">{title}</p>
@@ -831,7 +907,7 @@ function EmptyState({
   );
 }
 
-function BottomNav() {
+function BottomNav({ onOpenMenu }: { onOpenMenu: () => void }) {
   return (
     <nav
       aria-label="Mobile navigation"
@@ -840,25 +916,57 @@ function BottomNav() {
       <div className="grid grid-cols-5 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
-
-          return (
-            <a
-              key={item.label}
-              href={item.active ? "/teacher/overview" : "#"}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "text-brand-600"
-                  : "text-slate-400 hover:text-slate-600",
-              )}
-            >
+          const className = cn(
+            "relative flex min-h-11 flex-col items-center justify-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "text-brand-600"
+              : "text-slate-500 hover:text-slate-700",
+            !item.href && !item.opensDrawer && "cursor-default opacity-60",
+          );
+          const content = (
+            <>
               {item.active && (
                 <span className="absolute -top-1 h-0.5 w-8 rounded-full bg-brand-500" />
               )}
               <Icon className="h-5 w-5" />
               <span>{item.label}</span>
-            </a>
+            </>
+          );
+
+          if (item.opensDrawer) {
+            return (
+              <button
+                key={item.label}
+                type="button"
+                onClick={onOpenMenu}
+                className={className}
+              >
+                {content}
+              </button>
+            );
+          }
+
+          if (item.href) {
+            return (
+              <Link
+                key={item.label}
+                href={item.href}
+                aria-current={item.active ? "page" : undefined}
+                className={className}
+              >
+                {content}
+              </Link>
+            );
+          }
+
+          return (
+            <span
+              key={item.label}
+              aria-disabled="true"
+              className={className}
+            >
+              {content}
+            </span>
           );
         })}
       </div>
@@ -902,7 +1010,7 @@ function MobileDrawer({
         <div className="flex items-center justify-between px-5 pt-5">
           <h2
             id="overview-menu-title"
-            className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400"
+            className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600"
           >
             Navigation
           </h2>
@@ -910,7 +1018,7 @@ function MobileDrawer({
             type="button"
             onClick={onClose}
             data-autofocus
-            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
             aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />
@@ -928,6 +1036,76 @@ function MobileDrawer({
       </div>
     </div>
   );
+}
+
+/** Returns a client clock that refreshes the countdown without hydration drift. */
+function useCurrentTime() {
+  const [now, setNow] = useState<number | null>(null);
+
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  return now;
+}
+
+/** Builds a guarded countdown from timestamps, falling back to supplied minutes. */
+function getCountdownLabel(lesson: NextLesson, now: number | null) {
+  if (lesson.startAt) {
+    const start = Date.parse(lesson.startAt);
+
+    if (!Number.isNaN(start)) {
+      if (now === null) {
+        return null;
+      }
+
+      const difference = start - now;
+
+      if (difference > 60_000) {
+        return `in ${Math.ceil(difference / 60_000)} min`;
+      }
+
+      if (difference > -60_000) {
+        return "Starting now";
+      }
+
+      return `Started ${Math.max(1, Math.floor(-difference / 60_000))} min ago`;
+    }
+  }
+
+  if (lesson.countdownMinutes === null) {
+    return null;
+  }
+
+  if (lesson.countdownMinutes > 0) {
+    return `in ${lesson.countdownMinutes} min`;
+  }
+
+  if (lesson.countdownMinutes === 0) {
+    return "Starting now";
+  }
+
+  return "Lesson in progress";
+}
+
+/** Allows only same-origin relative paths and HTTP(S) destinations. */
+function sanitizeHref(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const href = value.trim();
+
+  if (/^\/(?!\/)/.test(href) || /^https?:\/\//i.test(href)) {
+    return href;
+  }
+
+  return null;
 }
 
 function formatTimeRange(start: string | null, end: string | null) {

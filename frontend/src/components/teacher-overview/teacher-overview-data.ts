@@ -33,6 +33,8 @@ export type NextLesson = {
   title: string;
   group: string | null;
   startTime: string | null;
+  /** ISO timestamp used for a live countdown. */
+  startAt: string | null;
   countdownMinutes: number | null;
   unitTopic: string | null;
   planHref: string | null;
