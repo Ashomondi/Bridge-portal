@@ -24,6 +24,9 @@ func New(t *testing.T, applyOwned bool) *DB {
 	t.Helper()
 	dsn := os.Getenv("DEV05_TEST_DATABASE_URL")
 	if dsn == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("DEV05_TEST_DATABASE_URL must be set in CI; PostgreSQL tests cannot be skipped")
+		}
 		t.Skip("DEV05_TEST_DATABASE_URL is required for real PostgreSQL verification")
 	}
 	ctx := context.Background()
@@ -66,6 +69,7 @@ func New(t *testing.T, applyOwned bool) *DB {
 	t.Cleanup(pool.Close)
 	db := &DB{Admin: pool, role: ident}
 	db.Apply(t, "000001_init_schema.up.sql")
+	db.Apply(t, "000003_r1_academics.up.sql")
 	if applyOwned {
 		db.Apply(t, "000004_r1_billing_whatsapp_notifications.up.sql")
 	}

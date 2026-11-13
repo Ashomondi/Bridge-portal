@@ -1,5 +1,6 @@
 // Package contracts contains Developer 05's consumer boundaries. The application
-// supplies authenticated identities, tenant transactions and audit logging.
+// supplies authenticated identities and tenant transactions. AuditLogger is an
+// integration interface only; it does not implement or satisfy AC-29 logging.
 package contracts
 
 import (
@@ -15,18 +16,20 @@ import (
 )
 
 type TenantDB interface {
-	WithTenantTx(context.Context, string, func(pgx.Tx) error) error
+	WithTenantTx(context.Context, Principal, func(pgx.Tx) error) error
 }
 
 // TenantTxFunc adapts the application's WithTenantTx without creating another
-// connection pool or taking ownership of transaction commit/rollback.
+// connection pool or taking ownership of transaction commit/rollback. The
+// principal must come from RequireIdentity with trusted authentication middleware;
+// callers cannot select a separate school from a URL, header, or request body.
 type TenantTxFunc func(context.Context, string, func(pgx.Tx) error) error
 
-func (f TenantTxFunc) WithTenantTx(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error {
-	if !ValidID(schoolID) {
-		return Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school is required.")
+func (f TenantTxFunc) WithTenantTx(ctx context.Context, principal Principal, fn func(pgx.Tx) error) error {
+	if !principal.valid() {
+		return Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
 	}
-	return f(ctx, schoolID, fn)
+	return f(ctx, principal.SchoolID, fn)
 }
 
 type AuditEvent struct {
@@ -45,6 +48,10 @@ type Principal struct {
 	Role         string `json:"role"`
 }
 
+func (p Principal) valid() bool {
+	return ValidID(p.UserID) && ValidID(p.SchoolID) && ValidID(p.MembershipID) && p.Role != ""
+}
+
 // Identity must be supplied from trusted authentication middleware, never from
 // unchecked request headers or request JSON.
 type Identity func(*http.Request) (Principal, error)
@@ -57,7 +64,7 @@ func RequireIdentity(r *http.Request, identity Identity) (Principal, error) {
 	if err != nil {
 		return Principal{}, Fail(401, "UNAUTHENTICATED", "Authentication is required.")
 	}
-	if !ValidID(p.UserID) || !ValidID(p.SchoolID) || !ValidID(p.MembershipID) || p.Role == "" {
+	if !p.valid() {
 		return Principal{}, Fail(401, "UNAUTHENTICATED", "Authentication is required.")
 	}
 	return p, nil

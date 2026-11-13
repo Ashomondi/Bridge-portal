@@ -50,11 +50,38 @@ func TestTenantAdapterPropagatesTransactionFailure(t *testing.T) {
 		}
 		return fn(nil)
 	})
-	if err := db.WithTenantTx(context.Background(), "invalid", nil); err == nil || called != 0 {
-		t.Fatal("invalid tenant reached adapter")
+	for _, principal := range []Principal{{}, {SchoolID: syntheticID}, {UserID: syntheticID, SchoolID: "invalid", MembershipID: syntheticID, Role: "parent"}} {
+		var apiError *APIError
+		if err := db.WithTenantTx(context.Background(), principal, nil); !errors.As(err, &apiError) || apiError.Code != "UNAUTHENTICATED" || called != 0 {
+			t.Fatalf("invalid principal reached adapter: %v", err)
+		}
 	}
-	if err := db.WithTenantTx(context.Background(), syntheticID, func(pgx.Tx) error { return failure }); !errors.Is(err, failure) || called != 1 {
+	p := Principal{syntheticID, syntheticID, syntheticID, "parent"}
+	if err := db.WithTenantTx(context.Background(), p, func(pgx.Tx) error { return failure }); !errors.Is(err, failure) || called != 1 {
 		t.Fatalf("transaction error lost: %v", err)
+	}
+}
+
+func TestTenantAdapterUsesAuthenticatedSchool(t *testing.T) {
+	const otherSchool = "20000000-0000-0000-0000-000000000002"
+	r := httptest.NewRequest("POST", "/?school_id="+otherSchool, strings.NewReader(`{"school_id":"`+otherSchool+`"}`))
+	r.Header.Set("X-School-ID", otherSchool)
+	p, err := RequireIdentity(r, func(*http.Request) (Principal, error) {
+		return Principal{syntheticID, syntheticID, syntheticID, "parent"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usedSchool string
+	db := TenantTxFunc(func(ctx context.Context, school string, fn func(pgx.Tx) error) error {
+		usedSchool = school
+		return fn(nil)
+	})
+	if err := db.WithTenantTx(r.Context(), p, func(pgx.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if usedSchool != syntheticID {
+		t.Fatalf("request-selected tenant reached transaction: %s", usedSchool)
 	}
 }
 

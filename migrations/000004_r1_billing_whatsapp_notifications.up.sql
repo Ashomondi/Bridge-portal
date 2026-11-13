@@ -15,8 +15,21 @@ ALTER TABLE payments ADD CONSTRAINT r1_c_payment_school_id UNIQUE (school_id, id
 ALTER TABLE fee_ledgers ADD COLUMN credit_balance NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     ADD COLUMN credit_applied NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     ADD COLUMN credit_transferred NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    ADD COLUMN due_date DATE,
-    ADD CONSTRAINT r1_c_ledger_nonnegative CHECK (current_balance >= 0 AND credit_balance >= 0 AND credit_applied >= 0 AND credit_transferred >= 0);
+    ADD COLUMN due_date DATE;
+
+-- Preserve legacy overpayments before enforcing nonnegative receivables.
+-- Keep data changes tenant-scoped even when run by the migration owner.
+DO $$
+DECLARE tenant UUID;
+BEGIN
+    FOR tenant IN SELECT id FROM schools LOOP
+        PERFORM set_config('app.school_id', tenant::text, true);
+        UPDATE fee_ledgers SET credit_balance = -current_balance, current_balance = 0
+        WHERE school_id = tenant AND current_balance < 0;
+    END LOOP;
+END $$;
+ALTER TABLE fee_ledgers ADD CONSTRAINT r1_c_ledger_nonnegative
+    CHECK (current_balance >= 0 AND credit_balance >= 0 AND credit_applied >= 0 AND credit_transferred >= 0);
 
 CREATE TABLE school_mpesa_configs (
     school_id UUID PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
@@ -178,7 +191,7 @@ CREATE TABLE chat_sessions (
     payment_init_count INT NOT NULL DEFAULT 0 CHECK (payment_init_count >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CHECK (state <> 'VERIFIED' OR (guardian_user_id IS NOT NULL AND verified_at IS NOT NULL AND expires_at > verified_at)),
+    CHECK (state <> 'VERIFIED' OR (guardian_user_id IS NOT NULL AND verified_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at > verified_at)),
     UNIQUE (school_id, id),
     FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id)
 );
