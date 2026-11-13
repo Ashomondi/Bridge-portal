@@ -13,11 +13,31 @@ export type ResultsStudent = {
 
 export type SubjectResultTerm = "T1" | "T2" | "T3";
 
+export type CbcLevelCode = "EE" | "ME" | "AE" | "BE";
+
+/** CBC levels are ordered from 1 (BE) to 4 (EE) for trend plotting. */
+export const CBC_LEVEL_VALUE: Record<CbcLevelCode, number> = {
+  BE: 1,
+  AE: 2,
+  ME: 3,
+  EE: 4,
+};
+
+export type CbcTrendPoint = {
+  term: SubjectResultTerm;
+  label: string;
+  level: CbcLevelCode | null;
+  value: number | null;
+  released: boolean;
+};
+
 export type SubjectResult = {
   id: string;
   subject: string;
   performanceLevel: string;
+  cbcLevel: CbcLevelCode | null;
   corrected: boolean;
+  amendmentNote: string | null;
   activeTerms: SubjectResultTerm[];
 };
 
@@ -34,7 +54,9 @@ export type TeacherComment = {
   teacherName: string;
   role: string;
   initials: string;
+  attribution: string | null;
   verified: boolean;
+  verifiedAt: string | null;
 };
 
 export type PerformanceLevel = {
@@ -60,6 +82,7 @@ export type StudentResultsData = {
   terms: ResultsTerm[];
   selectedTermId: string | null;
   results: SubjectResult[];
+  trend: CbcTrendPoint[];
   adjustment: AdjustmentNotice | null;
   teacherComment: TeacherComment | null;
   levels: PerformanceLevel[];

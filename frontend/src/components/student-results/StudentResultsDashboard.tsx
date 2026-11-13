@@ -1,6 +1,8 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { useTransition, type KeyboardEvent } from "react";
 import {
   Award,
   BarChart3,
@@ -16,14 +18,18 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
-import type {
-  AdjustmentNotice,
-  PerformanceLevel,
-  ResultsTerm,
-  StudentResultsData,
-  SubjectResult,
-  TeacherComment,
+import {
+  CBC_LEVEL_VALUE,
+  type AdjustmentNotice,
+  type CbcLevelCode,
+  type CbcTrendPoint,
+  type PerformanceLevel,
+  type ResultsTerm,
+  type StudentResultsData,
+  type SubjectResult,
+  type TeacherComment,
 } from "./student-results-data";
+import type { StudentResultsError } from "./student-results-source";
 
 type NavItem = {
   label: string;
@@ -51,12 +57,15 @@ const LEVEL_TONES: Record<PerformanceLevel["tone"], string> = {
 
 export default function StudentResultsDashboard({
   data,
+  error,
 }: {
   data: StudentResultsData | null;
+  error: StudentResultsError | null;
 }) {
   const students = data?.students ?? [];
   const terms = data?.terms ?? [];
   const results = data?.results ?? [];
+  const trend = data?.trend ?? [];
   const levels = data?.levels ?? [];
   const adjustment = data?.adjustment ?? null;
   const teacherComment = data?.teacherComment ?? null;
@@ -71,10 +80,18 @@ export default function StudentResultsDashboard({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const [isPending, startTransition] = useTransition();
+  const releasedTerms = terms.filter((term) => term.released);
   // Selection and cards commit together when the server loader returns.
   const selectedStudentId = data?.selectedStudentId ?? students[0]?.id ?? "";
   const selectedTermId =
-    data?.selectedTermId ?? terms.find((term) => term.released)?.id ?? "";
+    data?.selectedTermId ?? releasedTerms[0]?.id ?? "";
+  const selectedTerm =
+    releasedTerms.find((term) => term.id === selectedTermId) ?? null;
+  const visibleResults = selectedTerm ? results : [];
+  const visibleAdjustment = selectedTerm ? adjustment : null;
+  const visibleTeacherComment = selectedTerm ? teacherComment : null;
+  const visibleTrend = selectedTerm ? trend : [];
 
   const selectResults = (studentId: string, termId?: string) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -84,21 +101,16 @@ export default function StudentResultsDashboard({
     } else {
       params.delete("termId");
     }
-    router.push(`${pathname}?${params.toString()}`, { scroll: false });
+    startTransition(() => {
+      router.push(`${pathname}?${params.toString()}`, { scroll: false });
+    });
   };
 
-  const selectedTerm =
-    terms.find((term) => term.id === selectedTermId) ??
-    terms.find((term) => term.released) ??
-    terms[0] ??
-    null;
   const releaseInfo = selectedTerm?.released
     ? selectedTerm.releaseDate
-      ? `Released ${selectedTerm.releaseDate} · ${results.length} learning areas`
-      : `Released · ${results.length} learning areas`
-    : results.length > 0
-      ? `${results.length} learning areas`
-      : "No release information";
+      ? `Released ${selectedTerm.releaseDate} · ${visibleResults.length} learning areas`
+      : `Released · ${visibleResults.length} learning areas`
+    : "No released term selected";
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -134,36 +146,60 @@ export default function StudentResultsDashboard({
         <main
           id="results-main"
           tabIndex={-1}
+          aria-busy={isPending}
           className="mx-auto w-full max-w-[1440px] px-4 pb-28 pt-20 sm:px-6 lg:px-8 lg:pb-10 lg:pt-7"
         >
-          <StudentFilter
-            students={students}
-            selectedStudentId={selectedStudentId}
-            onSelect={(id) => selectResults(id)}
-          />
-          <TermSelector
-            terms={terms}
-            selectedTermId={selectedTerm?.id ?? ""}
-            onSelect={(id) => selectResults(selectedStudentId, id)}
-          />
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+            Student results
+          </h1>
+          <p className="mt-1 text-xs text-slate-600">
+            Released CBC performance for your linked children.
+          </p>
 
-          <div className="mt-4 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]">
-            <div className="min-w-0 space-y-4">
-              <SubjectPerformanceCard
-                results={results}
-                releaseInfo={releaseInfo}
-              />
-              <AdjustmentNoticeCard
-                adjustment={adjustment}
-                available={data !== null}
-              />
-              <TeacherCommentCard comment={teacherComment} />
-            </div>
+          {isPending && (
+            <p role="status" className="mt-2 text-[11px] font-medium text-brand-700">
+              Loading the selected student and term…
+            </p>
+          )}
 
-            <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
-              <LevelsCard levels={levels} />
-            </div>
-          </div>
+          {error ? (
+            <ResultsErrorState error={error} />
+          ) : (
+            <>
+              <StudentFilter
+                students={students}
+                selectedStudentId={selectedStudentId}
+                onSelect={(id) => selectResults(id)}
+              />
+              <TermSelector
+                terms={terms}
+                selectedTermId={selectedTerm?.id ?? ""}
+                onSelect={(id) => selectResults(selectedStudentId, id)}
+              />
+
+              <div className="mt-4 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,1fr)]">
+                <div className="min-w-0 space-y-4">
+                  <SubjectPerformanceCard
+                    results={visibleResults}
+                    releaseInfo={releaseInfo}
+                  />
+                  <CbcPerformanceGraph
+                    points={visibleTrend}
+                    hasReleasedTerm={Boolean(selectedTerm)}
+                  />
+                  <AdjustmentNoticeCard
+                    adjustment={visibleAdjustment}
+                    available={data !== null}
+                  />
+                  <TeacherCommentCard comment={visibleTeacherComment} />
+                </div>
+
+                <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
+                  <LevelsCard levels={levels} />
+                </div>
+              </div>
+            </>
+          )}
         </main>
       </div>
 
@@ -191,7 +227,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
@@ -209,12 +245,12 @@ function SidebarContent({
           const Icon = item.icon;
 
           return (
-            <a
+            <Link
               key={item.label}
               href={item.href}
               aria-current={item.active ? "page" : undefined}
               className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                 item.active
                   ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
                   : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
@@ -232,7 +268,7 @@ function SidebarContent({
               {item.active && (
                 <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
               )}
-            </a>
+            </Link>
           );
         })}
       </nav>
@@ -283,16 +319,24 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            aria-pressed={false}
+            title="Notifications are unavailable until the notifications service is connected."
+            className="relative grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="Notifications unavailable"
           >
             <Bell className="h-5 w-5" />
             <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <span className="sr-only">Unread notifications</span>
           </button>
           <button
             type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+            disabled
+            aria-disabled="true"
+            title="Profile menu is unavailable until authentication is connected."
+            className="grid h-11 w-11 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="User profile unavailable"
           >
             {guardianInitials}
           </button>
@@ -327,16 +371,26 @@ function DesktopHeader({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            aria-pressed={false}
+            title="Notifications are unavailable until the notifications service is connected."
+            className="relative grid h-11 w-11 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
+            aria-label="Notifications unavailable"
           >
             <Bell className="h-[18px] w-[18px]" />
             <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <span className="sr-only">Unread notifications</span>
           </button>
 
           <button
             type="button"
-            className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            aria-expanded={false}
+            aria-label="Open guardian profile unavailable"
+            title="Profile menu is unavailable until authentication is connected."
+            className="flex min-h-11 items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           >
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
               {guardianInitials}
@@ -345,13 +399,54 @@ function DesktopHeader({
               <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
                 {guardianName}
               </p>
-              <p className="text-[10px] text-slate-400">{relationship}</p>
+              <p className="text-[10px] text-slate-600">{relationship}</p>
             </div>
-            <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+            <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
           </button>
         </div>
       </div>
     </header>
+  );
+}
+
+function ResultsErrorState({ error }: { error: StudentResultsError }) {
+  const copy: Record<StudentResultsError, { title: string; body: string }> = {
+    unauthorized: {
+      title: "Sign in required",
+      body: "Your parent session has expired. Sign in again to view released results.",
+    },
+    forbidden: {
+      title: "Results not available",
+      body: "This account is not authorized to view results for the selected child.",
+    },
+    server: {
+      title: "Results service unavailable",
+      body: "The school results service could not respond. Please try again shortly.",
+    },
+    network: {
+      title: "Connection problem",
+      body: "Results could not be loaded. Check your connection and try again.",
+    },
+  };
+  const message = copy[error];
+
+  return (
+    <section
+      role="alert"
+      className="mt-6 rounded-2xl border border-[#EBD7A5] bg-[#FEF3D6] p-5 text-center"
+    >
+      <p className="text-sm font-bold text-[#6B521C]">{message.title}</p>
+      <p className="mx-auto mt-1 max-w-md text-[11px] leading-relaxed text-[#7A5A16]">
+        {message.body}
+      </p>
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        className="mt-4 inline-flex h-11 items-center justify-center rounded-xl bg-[#7A5A16] px-4 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
+      >
+        Retry
+      </button>
+    </section>
   );
 }
 
@@ -365,12 +460,13 @@ function StudentFilter({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div
-      className="-mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0"
-      role="tablist"
-      aria-label="Student records"
-    >
-      {students.length > 0 ? (
+    <div>
+      <div
+        className="-mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0"
+        role="tablist"
+        aria-label="Student records"
+      >
+        {students.length > 0 ? (
         <div className="flex min-w-max gap-2">
           {students.map((student) => {
             const active = student.id === selectedStudentId;
@@ -381,9 +477,11 @@ function StudentFilter({
                 type="button"
                 role="tab"
                 aria-selected={active}
+                tabIndex={active ? 0 : -1}
                 onClick={() => onSelect(student.id)}
+                onKeyDown={handleRovingTabKeyDown}
                 className={cn(
-                  "inline-flex items-center gap-2 rounded-full px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                  "inline-flex min-h-11 items-center gap-2 rounded-full px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                   active
                     ? "bg-brand-500 text-white shadow-md shadow-brand-500/20"
                     : "border border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
@@ -404,10 +502,16 @@ function StudentFilter({
             );
           })}
         </div>
-      ) : (
-        <span className="inline-flex items-center rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-500">
-          No student records available
-        </span>
+        ) : (
+          <span className="inline-flex items-center rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-500">
+            No student records available
+          </span>
+        )}
+      </div>
+      {students.length > 1 && (
+        <p className="mt-1 text-[9px] font-medium text-slate-600 lg:hidden">
+          Swipe horizontally to view more children.
+        </p>
       )}
     </div>
   );
@@ -442,15 +546,17 @@ function TermSelector({
                 type="button"
                 role="tab"
                 aria-selected={active}
+                tabIndex={active ? 0 : -1}
                 disabled={!term.released}
                 onClick={() => onSelect(term.id)}
+                onKeyDown={handleRovingTabKeyDown}
                 className={cn(
-                  "rounded-full px-2 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                  "min-h-11 rounded-full px-2 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600",
                   active
                     ? "bg-white text-brand-700 shadow-sm"
-                    : "text-slate-400",
+                    : "text-slate-600",
                   !term.released &&
-                    "cursor-not-allowed font-medium text-slate-400 opacity-70",
+                    "cursor-not-allowed font-medium text-slate-600 opacity-70",
                 )}
               >
                 {term.label}
@@ -507,10 +613,16 @@ function SubjectPerformanceCard({
                     </span>
                   )}
                 </div>
-                <p className="mt-0.5 flex items-center gap-1 text-[9px] font-medium text-slate-400">
+                <p className="mt-0.5 flex items-center gap-1 text-[9px] font-medium text-slate-600">
                   <TrendingUp className="h-3 w-3 text-brand-500" />
                   {row.performanceLevel}
+                  {row.cbcLevel ? ` · ${row.cbcLevel}` : ""}
                 </p>
+                {row.amendmentNote && (
+                  <p className="mt-1 text-[9px] leading-relaxed text-[#7A5A16]">
+                    {row.amendmentNote}
+                  </p>
+                )}
               </div>
 
               <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-slate-50 p-0.5 ring-1 ring-slate-200/80">
@@ -545,12 +657,167 @@ function SubjectPerformanceCard({
   );
 }
 
+function CbcPerformanceGraph({
+  points,
+  hasReleasedTerm,
+}: {
+  points: CbcTrendPoint[];
+  hasReleasedTerm: boolean;
+}) {
+  const termOrder: Record<CbcTrendPoint["term"], number> = {
+    T1: 1,
+    T2: 2,
+    T3: 3,
+  };
+  const ordered = [...points].sort(
+    (a, b) => termOrder[a.term] - termOrder[b.term],
+  );
+  const plotted = ordered.filter(
+    (point) =>
+      point.released && point.level !== null && point.value !== null,
+  );
+  const chartWidth = 360;
+  const chartHeight = 190;
+  const padding = 34;
+  const step =
+    plotted.length > 1
+      ? (chartWidth - padding * 2) / (plotted.length - 1)
+      : 0;
+  const coordinates = plotted.map((point, index) => ({
+    ...point,
+    x: padding + index * step,
+    y:
+      chartHeight -
+      padding -
+      (((point.value ?? 1) - 1) / 3) * (chartHeight - padding * 2),
+  }));
+  const polyline = coordinates.map((point) => `${point.x},${point.y}`).join(" ");
+
+  return (
+    <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-bold tracking-tight text-slate-900">
+            CBC performance trend
+          </h2>
+          <p className="mt-1 text-[10px] text-slate-600">
+            BE = 1 · AE = 2 · ME = 3 · EE = 4 across released terms
+          </p>
+        </div>
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-600">
+          <TrendingUp className="h-4 w-4" />
+        </span>
+      </div>
+
+      {plotted.length > 0 ? (
+        <>
+          <svg
+            viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+            className="mt-3 h-52 w-full"
+            role="img"
+            aria-label="CBC performance level trend across released terms"
+          >
+            {[1, 2, 3, 4].map((level) => {
+              const y =
+                chartHeight -
+                padding -
+                ((level - 1) / 3) * (chartHeight - padding * 2);
+
+              return (
+                <g key={level}>
+                  <line
+                    x1={padding}
+                    x2={chartWidth - padding}
+                    y1={y}
+                    y2={y}
+                    stroke="#E2E8F0"
+                    strokeWidth="1"
+                  />
+                  <text
+                    x={padding - 8}
+                    y={y + 3}
+                    textAnchor="end"
+                    className="fill-slate-600 text-[8px]"
+                  >
+                    {level}
+                  </text>
+                </g>
+              );
+            })}
+            {polyline && (
+              <polyline
+                points={polyline}
+                fill="none"
+                stroke="#007A78"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+            {coordinates.map((point) => (
+              <g key={point.term}>
+                <circle
+                  cx={point.x}
+                  cy={point.y}
+                  r="4"
+                  fill="#007A78"
+                  stroke="white"
+                  strokeWidth="2"
+                />
+                <text
+                  x={point.x}
+                  y={chartHeight - 10}
+                  textAnchor="middle"
+                  className="fill-slate-600 text-[8px]"
+                >
+                  {point.label}
+                </text>
+              </g>
+            ))}
+          </svg>
+
+          <table className="sr-only">
+            <caption>CBC performance levels by released term</caption>
+            <thead>
+              <tr>
+                <th scope="col">Term</th>
+                <th scope="col">CBC level</th>
+                <th scope="col">Level value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {coordinates.map((point) => (
+                <tr key={point.term}>
+                  <td>{point.label}</td>
+                  <td>{point.level}</td>
+                  <td>{point.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <EmptyState
+          icon={TrendingUp}
+          title={
+            hasReleasedTerm
+              ? "No released trend data"
+              : "No released term selected"
+          }
+          body="CBC performance history will appear when released term results are available."
+          className="mt-3"
+        />
+      )}
+    </section>
+  );
+}
+
 function TermPill({ label, active = false }: { label: string; active?: boolean }) {
   return (
     <span
       className={cn(
         "grid h-6 min-w-7 place-items-center rounded-full px-1.5 text-[8px] font-bold",
-        active ? "bg-brand-500 text-white" : "text-slate-300",
+        active ? "bg-brand-500 text-white" : "text-slate-600",
       )}
     >
       {label}
@@ -565,6 +832,8 @@ function AdjustmentNoticeCard({
   adjustment: AdjustmentNotice | null;
   available: boolean;
 }) {
+  const safeNoteHref = sanitizeHref(adjustment?.noteHref);
+
   return (
     <section className="rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
       <div className="flex gap-3">
@@ -581,10 +850,11 @@ function AdjustmentNoticeCard({
                 {adjustment.description}
               </p>
               <div className="mt-3 flex items-center justify-between gap-3">
-                {adjustment.noteHref ? (
+                {safeNoteHref ? (
                   <a
-                    href={adjustment.noteHref}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D7C8F2] bg-white px-2.5 text-[9px] font-semibold text-[#6D4FA3] transition hover:bg-[#F7F3FD] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+                    href={safeNoteHref}
+                    rel="noreferrer noopener"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-[#D7C8F2] bg-white px-2.5 text-[9px] font-semibold text-[#6D4FA3] transition hover:bg-[#F7F3FD] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
                   >
                     <FileText className="h-3 w-3" />
                     Read note
@@ -645,10 +915,22 @@ function TeacherCommentCard({ comment }: { comment: TeacherComment | null }) {
               <p className="truncate text-[11px] font-bold text-slate-800">
                 {comment.teacherName}
               </p>
-              <p className="text-[9px] text-slate-400">{comment.role}</p>
+              <p className="text-[9px] text-slate-600">{comment.role}</p>
+              {comment.attribution && (
+                <p className="truncate text-[9px] text-slate-600">
+                  {comment.attribution}
+                </p>
+              )}
             </div>
             {comment.verified && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[#E2F0ED] px-2 py-0.5 text-[8px] font-semibold text-brand-700 ring-1 ring-brand-100">
+              <span
+                title={
+                  comment.verifiedAt
+                    ? `Verified ${comment.verifiedAt}`
+                    : "Verified teacher comment"
+                }
+                className="inline-flex min-h-8 items-center gap-1 rounded-full bg-[#E2F0ED] px-2 py-0.5 text-[8px] font-semibold text-brand-700 ring-1 ring-brand-100"
+              >
                 <ShieldCheck className="h-3 w-3" />
                 Verified
               </span>
@@ -763,12 +1045,12 @@ function BottomNav() {
           const Icon = item.icon;
 
           return (
-            <a
+            <Link
               key={item.label}
               href={item.href}
               aria-current={item.active ? "page" : undefined}
               className={cn(
-                "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                "relative flex min-h-11 flex-col items-center justify-center gap-1 rounded-xl py-2 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                 item.active
                   ? "text-brand-600"
                   : "text-slate-400 hover:text-slate-600",
@@ -779,12 +1061,63 @@ function BottomNav() {
               )}
               <Icon className="h-5 w-5" />
               <span>{item.label}</span>
-            </a>
+            </Link>
           );
         })}
       </div>
     </nav>
   );
+}
+
+/** Implements roving focus for the student and term tablists. */
+function handleRovingTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+  if (
+    !["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)
+  ) {
+    return;
+  }
+
+  const tabs = Array.from(
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+      '[role="tab"]:not([disabled])',
+    ) ?? [],
+  );
+
+  if (tabs.length === 0) {
+    return;
+  }
+
+  const currentIndex = tabs.indexOf(event.currentTarget);
+  let nextIndex = currentIndex;
+
+  if (event.key === "ArrowRight") {
+    nextIndex = (currentIndex + 1) % tabs.length;
+  } else if (event.key === "ArrowLeft") {
+    nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = tabs.length - 1;
+  }
+
+  event.preventDefault();
+  tabs[nextIndex]?.focus();
+  tabs[nextIndex]?.click();
+}
+
+/** Allows only relative paths and HTTP(S) adjustment-note links. */
+function sanitizeHref(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const href = value.trim();
+
+  if (/^\/(?!\/)/.test(href) || /^https?:\/\//i.test(href)) {
+    return href;
+  }
+
+  return null;
 }
 
 function initialsFromName(name: string) {

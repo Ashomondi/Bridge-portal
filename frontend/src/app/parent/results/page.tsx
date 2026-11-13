@@ -8,12 +8,14 @@ export default async function ParentResultsPage({
 }: {
   searchParams: { studentId?: string | string[]; termId?: string | string[] };
 }) {
-  const data = await loadStudentResults({
+  const result = await loadStudentResults({
     studentId:
       typeof searchParams.studentId === "string" ? searchParams.studentId : undefined,
     termId:
       typeof searchParams.termId === "string" ? searchParams.termId : undefined,
   });
 
-  return <StudentResultsDashboard data={data} />;
+  return (
+    <StudentResultsDashboard data={result.data} error={result.error} />
+  );
 }
