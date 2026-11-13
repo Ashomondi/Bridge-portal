@@ -48,6 +48,13 @@ const SIDEBAR_ITEMS: NavItem[] = [
   { label: "Fees", icon: Wallet, href: "#" },
 ];
 
+/**
+ * Renders the responsive parent timetable and key term dates dashboard.
+ *
+ * The guardian's selected student and weekday are the source of truth for the
+ * periods shown, so changing either control always filters the displayed
+ * records rather than only moving the highlight.
+ */
 export default function ParentTimetableDashboard({
   data,
   week,
@@ -62,7 +69,7 @@ export default function ParentTimetableDashboard({
   const guardianInitials =
     session?.initials?.trim() || initialsFromName(guardianName);
   const portalName = data?.portal?.name?.trim() || "Parent portal";
-  const periods = data?.periods ?? [];
+  const allPeriods = data?.periods ?? [];
   const keyDates = data?.keyDates ?? [];
   const notice = data?.notice ?? null;
   const initialDay = week.find((day) => day.isToday) ?? week[0];
@@ -72,6 +79,10 @@ export default function ParentTimetableDashboard({
   );
   const [selectedDay, setSelectedDay] = useState(initialDay?.id ?? "");
   const [view, setView] = useState<"timetable" | "calendar">("timetable");
+  const periods = allPeriods.filter(
+    (period) =>
+      period.studentId === selectedStudentId && period.date === selectedDay,
+  );
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -90,7 +101,10 @@ export default function ParentTimetableDashboard({
         />
       </aside>
 
-      <MobileAppBar guardianInitials={guardianInitials} />
+      <MobileAppBar
+        guardianName={guardianName}
+        guardianInitials={guardianInitials}
+      />
 
       <div className="lg:pl-[260px]">
         <DesktopHeader
@@ -143,6 +157,7 @@ export default function ParentTimetableDashboard({
   );
 }
 
+/** Renders the persistent desktop portal navigation and guardian card. */
 function SidebarContent({
   guardianName,
   relationship,
@@ -183,7 +198,7 @@ function SidebarContent({
               href={item.href}
               aria-current={item.active ? "page" : undefined}
               className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition",
                 item.active
                   ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
                   : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
@@ -226,7 +241,10 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="Sign out will be available once authentication is connected."
+            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition disabled:cursor-not-allowed disabled:opacity-50"
           >
             <LogOut className="h-3.5 w-3.5" />
             Sign out
@@ -237,14 +255,21 @@ function SidebarContent({
   );
 }
 
-function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
+/** Renders the compact mobile app bar with the guardian identity. */
+function MobileAppBar({
+  guardianName,
+  guardianInitials,
+}: {
+  guardianName: string;
+  guardianInitials: string;
+}) {
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
         <div className="flex min-w-0 items-center gap-2">
           <a
             href="/parent"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50"
             aria-label="Back to parent home"
           >
             <ArrowLeft className="h-5 w-5" />
@@ -254,18 +279,18 @@ function MobileAppBar({ guardianInitials }: { guardianInitials: string }) {
           </p>
         </div>
 
-        <button
-          type="button"
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-          aria-label="Open user profile"
+        <span
+          title={`Signed in as ${guardianName}`}
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
         >
           {guardianInitials}
-        </button>
+        </span>
       </div>
     </header>
   );
 }
 
+/** Renders the sticky desktop header with breadcrumb and guardian identity. */
 function DesktopHeader({
   portalName,
   guardianName,
@@ -288,10 +313,7 @@ function DesktopHeader({
           <span>Timetable &amp; Events</span>
         </div>
 
-        <button
-          type="button"
-          className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-        >
+        <div className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white py-1.5 pl-1.5 pr-3 shadow-sm">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-500 text-[10px] font-bold text-white">
             {guardianInitials}
           </span>
@@ -301,13 +323,13 @@ function DesktopHeader({
             </p>
             <p className="text-[10px] text-slate-400">{relationship}</p>
           </div>
-          <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
-        </button>
+        </div>
       </div>
     </header>
   );
 }
 
+/** Renders the guardian's linked-student selector. */
 function StudentFilter({
   students,
   selectedStudentId,
@@ -336,7 +358,7 @@ function StudentFilter({
                 aria-selected={active}
                 onClick={() => onSelect(student.id)}
                 className={cn(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition",
                   active
                     ? "border-brand-600 bg-[#E8F5F3] text-brand-700 shadow-sm"
                     : "border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
@@ -362,6 +384,7 @@ function StudentFilter({
   );
 }
 
+/** Renders the timetable/calendar view switcher. */
 function ViewToggle({
   view,
   onChange,
@@ -378,7 +401,7 @@ function ViewToggle({
           aria-selected={view === "timetable"}
           onClick={() => onChange("timetable")}
           className={cn(
-            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
             view === "timetable"
               ? "bg-white text-brand-700 shadow-sm"
               : "text-slate-400",
@@ -393,7 +416,7 @@ function ViewToggle({
           aria-selected={view === "calendar"}
           onClick={() => onChange("calendar")}
           className={cn(
-            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
             view === "calendar"
               ? "bg-white text-brand-700 shadow-sm"
               : "text-slate-400",
@@ -407,6 +430,7 @@ function ViewToggle({
   );
 }
 
+/** Renders the academic office notice or its empty state. */
 function OfficialNotice({
   notice,
 }: {
@@ -429,6 +453,7 @@ function OfficialNotice({
   );
 }
 
+/** Renders the Monday-to-Friday week selector. */
 function WeekSelector({
   week,
   weekLabel,
@@ -467,7 +492,7 @@ function WeekSelector({
                   aria-pressed={active}
                   aria-label={`${day.label} ${day.date}${day.isToday ? ", today" : ""}`}
                   className={cn(
-                    "relative flex flex-col items-center rounded-xl px-1 py-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
+                    "relative flex flex-col items-center rounded-xl px-1 py-2 transition",
                     active
                       ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20"
                       : "bg-white/70 text-slate-500 hover:bg-white hover:text-brand-700",
@@ -510,6 +535,7 @@ function WeekSelector({
   );
 }
 
+/** Renders the selected student's periods for the selected weekday. */
 function PeriodsSection({
   periods,
   streamLabel,
@@ -546,6 +572,7 @@ function PeriodsSection({
   );
 }
 
+/** Renders one lesson, break or active period. */
 function PeriodCard({ period }: { period: TimetablePeriod }) {
   if (period.kind === "break") {
     return (
@@ -628,6 +655,7 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
   );
 }
 
+/** Renders the structural calendar placeholder. */
 function CalendarEmpty() {
   return (
     <section>
@@ -652,6 +680,7 @@ function CalendarEmpty() {
   );
 }
 
+/** Renders the key term dates card or its empty state. */
 function KeyDatesCard({ dates }: { dates: KeyDate[] }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
@@ -682,6 +711,7 @@ function KeyDatesCard({ dates }: { dates: KeyDate[] }) {
   );
 }
 
+/** Renders one key term date row. */
 function KeyDateItem({ date }: { date: KeyDate }) {
   if (date.kind === "notice") {
     return (
@@ -737,6 +767,7 @@ function KeyDateItem({ date }: { date: KeyDate }) {
   );
 }
 
+/** Renders a consistent empty state for a timetable section. */
 function EmptyState({
   icon: Icon,
   title,
@@ -768,6 +799,7 @@ function EmptyState({
   );
 }
 
+/** Formats a period's start and end time without inventing missing values. */
 function formatTimeRange(start: string | null, end: string | null) {
   if (!start && !end) {
     return "Time not provided";
@@ -776,6 +808,7 @@ function formatTimeRange(start: string | null, end: string | null) {
   return `${start || "—"} – ${end || "—"}`;
 }
 
+/** Derives up to two initials from a guardian's display name. */
 function initialsFromName(name: string) {
   const parts = name
     .trim()

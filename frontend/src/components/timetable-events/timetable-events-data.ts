@@ -9,6 +9,8 @@ export type TimetablePeriodKind = "completed" | "break" | "active" | "upcoming";
 
 export type TimetablePeriod = {
   id: string;
+  studentId: string;
+  date: string;
   kind: TimetablePeriodKind;
   subject: string;
   teacher: string | null;
@@ -62,31 +64,67 @@ export type ParentTimetableData = {
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 
+/**
+ * School timezone used for week and day boundaries. Kenya does not observe
+ * daylight saving, so a fixed IANA zone keeps the parent timetable stable
+ * regardless of where the Next.js server is running.
+ */
+export const SCHOOL_TIME_ZONE = "Africa/Nairobi";
+
+/**
+ * Builds the Monday-to-Friday teaching week that contains `reference`.
+ *
+ * Calendar dates are resolved in the school's timezone first, then the week is
+ * calculated in UTC so a server running in another timezone cannot shift the
+ * selected day or week near midnight.
+ */
 export function buildWeek(reference: Date): WeekDay[] {
-  const monday = new Date(
-    reference.getFullYear(),
-    reference.getMonth(),
-    reference.getDate(),
-  );
-  const dayOfWeek = monday.getDay();
-  monday.setDate(monday.getDate() + (dayOfWeek === 0 ? -6 : 1 - dayOfWeek));
-  const todayId = toDateId(reference);
+  const { year, month, day } = toSchoolDateParts(reference);
+  const today = Date.UTC(year, month - 1, day);
+  const dayOfWeek = new Date(today).getUTCDay();
+  const monday = new Date(today);
+  monday.setUTCDate(monday.getUTCDate() + (dayOfWeek === 0 ? -6 : 1 - dayOfWeek));
+  const todayId = toDateId(new Date(today));
 
   return WEEKDAY_LABELS.map((label, index) => {
     const date = new Date(monday);
-    date.setDate(monday.getDate() + index);
+    date.setUTCDate(monday.getUTCDate() + index);
+    const id = toDateId(date);
 
     return {
-      id: toDateId(date),
+      id,
       label,
-      date: date.getDate(),
-      isToday: toDateId(date) === todayId,
+      date: date.getUTCDate(),
+      isToday: id === todayId,
     };
   });
 }
 
+/** Resolves a date to its year, month and day in the school's timezone. */
+function toSchoolDateParts(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: SCHOOL_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const values = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)]),
+  );
+
+  return {
+    year: values.year,
+    month: values.month,
+    day: values.day,
+  };
+}
+
+/** Formats a UTC calendar date as a `YYYY-MM-DD` identifier. */
 function toDateId(date: Date) {
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
+  const month = `${date.getUTCMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getUTCDate()}`.padStart(2, "0");
+  return `${date.getUTCFullYear()}-${month}-${day}`;
 }

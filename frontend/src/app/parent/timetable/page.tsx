@@ -4,6 +4,11 @@ import { loadParentTimetable } from "@/components/timetable-events/timetable-eve
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Loads the authenticated parent timetable and renders it for the current
+ * school week. Week boundaries are resolved in the school's timezone by
+ * `buildWeek`, not the frontend server's local timezone.
+ */
 export default async function ParentTimetablePage() {
   const data = await loadParentTimetable();
 
