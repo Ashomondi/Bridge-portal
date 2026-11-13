@@ -1,4 +1,4 @@
-# Ikonex Academy
+# Bridge Portal
 
 A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) portal for Kenyan secondary schools.
 
