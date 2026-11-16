@@ -31,12 +31,15 @@ export type KeyDate = {
   title: string;
   meta: string | null;
   badge: string | null;
+  /** When set, the key date only applies to that linked student. */
+  studentId?: string | null;
 };
 
 export type TimetableStudent = {
   id: string;
   name: string;
   initials: string;
+  stream?: string | null;
 };
 
 export type AcademicNotice = {
@@ -77,9 +80,24 @@ export const SCHOOL_TIME_ZONE = "Africa/Nairobi";
  * Calendar dates are resolved in the school's timezone first, then the week is
  * calculated in UTC so a server running in another timezone cannot shift the
  * selected day or week near midnight.
+ *
+ * Invalid dates return an empty week. An invalid or missing timezone falls back
+ * to the school timezone so a bad configuration cannot crash the parent page.
  */
-export function buildWeek(reference: Date): WeekDay[] {
-  const { year, month, day } = toSchoolDateParts(reference);
+export function buildWeek(
+  reference: Date,
+  timeZone: string = SCHOOL_TIME_ZONE,
+): WeekDay[] {
+  if (!(reference instanceof Date) || Number.isNaN(reference.getTime())) {
+    return [];
+  }
+
+  const { year, month, day } = toSchoolDateParts(reference, timeZone);
+
+  if (!year || !month || !day) {
+    return [];
+  }
+
   const today = Date.UTC(year, month - 1, day);
   const dayOfWeek = new Date(today).getUTCDay();
   const monday = new Date(today);
@@ -101,9 +119,9 @@ export function buildWeek(reference: Date): WeekDay[] {
 }
 
 /** Resolves a date to its year, month and day in the school's timezone. */
-function toSchoolDateParts(date: Date) {
+function toSchoolDateParts(date: Date, timeZone: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: SCHOOL_TIME_ZONE,
+    timeZone: resolveTimeZone(timeZone),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -120,6 +138,20 @@ function toSchoolDateParts(date: Date) {
     month: values.month,
     day: values.day,
   };
+}
+
+/** Validates an IANA timezone and falls back to the school timezone. */
+function resolveTimeZone(timeZone: string) {
+  if (typeof timeZone !== "string" || timeZone.trim().length === 0) {
+    return SCHOOL_TIME_ZONE;
+  }
+
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone });
+    return timeZone;
+  } catch {
+    return SCHOOL_TIME_ZONE;
+  }
 }
 
 /** Formats a UTC calendar date as a `YYYY-MM-DD` identifier. */

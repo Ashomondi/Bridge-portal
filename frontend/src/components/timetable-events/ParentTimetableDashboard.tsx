@@ -1,6 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
+import Link from "next/link";
 import {
   ArrowLeft,
   Award,
@@ -45,7 +52,7 @@ const SIDEBAR_ITEMS: NavItem[] = [
   },
   { label: "Results", icon: Award, href: "/parent/results" },
   { label: "Attendance", icon: CalendarCheck, href: "/parent/attendance" },
-  { label: "Fees", icon: Wallet, href: "#" },
+  { label: "Fees", icon: Wallet, href: "/parent/fees/pay" },
 ];
 
 /**
@@ -62,7 +69,7 @@ export default function ParentTimetableDashboard({
   data: ParentTimetableData | null;
   week: WeekDay[];
 }) {
-  const students = data?.students ?? [];
+  const students = useMemo(() => data?.students ?? [], [data?.students]);
   const session = data?.session ?? null;
   const guardianName = session?.fullName?.trim() || "Guardian";
   const relationship = session?.relationship?.trim() || "Parent";
@@ -73,16 +80,52 @@ export default function ParentTimetableDashboard({
   const keyDates = data?.keyDates ?? [];
   const notice = data?.notice ?? null;
   const initialDay = week.find((day) => day.isToday) ?? week[0];
+  const fallbackStudentId =
+    data?.selectedStudentId &&
+    students.some((student) => student.id === data.selectedStudentId)
+      ? data.selectedStudentId
+      : students[0]?.id ?? "";
 
-  const [selectedStudentId, setSelectedStudentId] = useState(
-    data?.selectedStudentId ?? students[0]?.id ?? "",
-  );
+  const [selectedStudentId, setSelectedStudentId] = useState(fallbackStudentId);
   const [selectedDay, setSelectedDay] = useState(initialDay?.id ?? "");
   const [view, setView] = useState<"timetable" | "calendar">("timetable");
+
+  // Keep local selections valid when the guardian's linked students or week
+  // props change (for example after a refresh removes a student).
+  useEffect(() => {
+    setSelectedStudentId((current) =>
+      students.some((student) => student.id === current)
+        ? current
+        : fallbackStudentId,
+    );
+  }, [students, fallbackStudentId]);
+
+  useEffect(() => {
+    setSelectedDay((current) =>
+      week.some((day) => day.id === current) ? current : initialDay?.id ?? "",
+    );
+  }, [week, initialDay?.id]);
+
+  const activeStudentId = students.some(
+    (student) => student.id === selectedStudentId,
+  )
+    ? selectedStudentId
+    : fallbackStudentId;
+  const activeDay = week.some((day) => day.id === selectedDay)
+    ? selectedDay
+    : initialDay?.id ?? "";
+  const selectedStudent =
+    students.find((student) => student.id === activeStudentId) ?? null;
+  const selectedWeekDay = week.find((day) => day.id === activeDay) ?? null;
+  const streamLabel = selectedStudent?.stream?.trim() || null;
   const periods = allPeriods.filter(
     (period) =>
-      period.studentId === selectedStudentId && period.date === selectedDay,
+      period.studentId === activeStudentId && period.date === activeDay,
   );
+  const visibleKeyDates = keyDates.filter(
+    (date) => !date.studentId || date.studentId === activeStudentId,
+  );
+  const panelId = view === "timetable" ? "timetable-panel" : "calendar-panel";
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -125,7 +168,8 @@ export default function ParentTimetableDashboard({
 
           <StudentFilter
             students={students}
-            selectedStudentId={selectedStudentId}
+            selectedStudentId={activeStudentId}
+            panelId={panelId}
             onSelect={setSelectedStudentId}
           />
 
@@ -135,20 +179,31 @@ export default function ParentTimetableDashboard({
             week={week}
             weekLabel={data?.weekLabel?.trim() || null}
             termLabel={data?.termLabel?.trim() || null}
-            selectedDay={selectedDay}
+            selectedDay={activeDay}
             onSelect={setSelectedDay}
           />
 
           <div className="mt-4 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(340px,1fr)]">
-            <div className="min-w-0">
+            <div
+              className="min-w-0"
+              id={panelId}
+              role="tabpanel"
+              aria-labelledby={`view-tab-${view}`}
+              tabIndex={0}
+            >
               {view === "timetable" ? (
-                <PeriodsSection periods={periods} streamLabel={null} />
+                <PeriodsSection
+                  periods={periods}
+                  streamLabel={streamLabel}
+                  dayLabel={selectedWeekDay?.label ?? null}
+                  isToday={selectedWeekDay?.isToday ?? true}
+                />
               ) : (
-                <CalendarEmpty />
+                <CalendarEmpty streamLabel={streamLabel} />
               )}
             </div>
             <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
-              <KeyDatesCard dates={keyDates} />
+              <KeyDatesCard dates={visibleKeyDates} />
             </div>
           </div>
         </main>
@@ -171,14 +226,14 @@ function SidebarContent({
     <div className="flex h-full w-full flex-col overflow-y-auto px-4 py-5">
       <div className="flex items-center gap-2.5 px-1">
         <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-brand-500 text-white shadow-lg shadow-brand-500/20">
-          <GraduationCap className="h-[22px] w-[22px]" />
+          <GraduationCap className="h-[22px] w-[22px]" aria-hidden="true" />
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+            <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Parent portal
             </p>
             <span className="rounded-full bg-brand-50 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wide text-brand-700 ring-1 ring-brand-100">
@@ -193,30 +248,31 @@ function SidebarContent({
           const Icon = item.icon;
 
           return (
-            <a
+            <Link
               key={item.label}
               href={item.href}
               aria-current={item.active ? "page" : undefined}
               className={cn(
-                "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition",
+                "group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[12px] font-medium transition",
                 item.active
                   ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
+                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-800",
               )}
             >
               <Icon
+                aria-hidden="true"
                 className={cn(
                   "h-[17px] w-[17px] shrink-0",
                   item.active
                     ? "text-brand-600"
-                    : "text-slate-400 group-hover:text-brand-600",
+                    : "text-slate-500 group-hover:text-brand-600",
                 )}
               />
               <span className="flex-1">{item.label}</span>
               {item.active && (
                 <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
               )}
-            </a>
+            </Link>
           );
         })}
       </nav>
@@ -231,7 +287,7 @@ function SidebarContent({
               <p className="truncate text-xs font-semibold text-slate-800">
                 {guardianName}
               </p>
-              <p className="truncate text-[10px] text-slate-400">
+              <p className="truncate text-[10px] text-slate-500">
                 {relationship}
               </p>
               <p className="truncate text-[9px] font-medium text-brand-600">
@@ -244,9 +300,9 @@ function SidebarContent({
             disabled
             aria-disabled="true"
             title="Sign out will be available once authentication is connected."
-            className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition disabled:cursor-not-allowed disabled:opacity-50"
+            className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200/80 bg-white text-[11px] font-semibold text-slate-600 transition disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <LogOut className="h-3.5 w-3.5" />
+            <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
             Sign out
           </button>
         </div>
@@ -267,13 +323,13 @@ function MobileAppBar({
     <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl lg:hidden print:hidden">
       <div className="flex h-16 items-center justify-between gap-3 px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <a
+          <Link
             href="/parent"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50"
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50"
             aria-label="Back to parent home"
           >
-            <ArrowLeft className="h-5 w-5" />
-          </a>
+            <ArrowLeft className="h-5 w-5" aria-hidden="true" />
+          </Link>
           <p className="truncate text-lg font-bold tracking-tight text-slate-900">
             Timetable
           </p>
@@ -305,11 +361,11 @@ function DesktopHeader({
   return (
     <header className="sticky top-0 z-30 hidden h-[68px] items-center border-b border-slate-200/60 bg-[#F4F7F6]/85 backdrop-blur-xl lg:flex print:hidden">
       <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between gap-6 px-8">
-        <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
           <span className="max-w-[220px] truncate text-slate-700">
             {portalName}
           </span>
-          <ChevronRight className="h-3.5 w-3.5" />
+          <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
           <span>Timetable &amp; Events</span>
         </div>
 
@@ -321,7 +377,7 @@ function DesktopHeader({
             <p className="max-w-[120px] truncate text-xs font-semibold text-slate-800">
               {guardianName}
             </p>
-            <p className="text-[10px] text-slate-400">{relationship}</p>
+            <p className="text-[10px] text-slate-500">{relationship}</p>
           </div>
         </div>
       </div>
@@ -333,53 +389,95 @@ function DesktopHeader({
 function StudentFilter({
   students,
   selectedStudentId,
+  panelId,
   onSelect,
 }: {
   students: TimetableStudent[];
   selectedStudentId: string;
+  panelId: string;
   onSelect: (id: string) => void;
 }) {
-  return (
-    <div
-      className="mt-4 -mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0"
-      role="tablist"
-      aria-label="Student records"
-    >
-      {students.length > 0 ? (
-        <div className="flex min-w-max gap-2">
-          {students.map((student) => {
-            const active = student.id === selectedStudentId;
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
-            return (
-              <button
-                key={student.id}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => onSelect(student.id)}
-                className={cn(
-                  "inline-flex items-center gap-2 rounded-full border px-3 py-2 text-[11px] font-semibold transition",
-                  active
-                    ? "border-brand-600 bg-[#E8F5F3] text-brand-700 shadow-sm"
-                    : "border-slate-200/80 bg-white text-slate-500 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
-                )}
-              >
-                <span
-                  className={cn(
-                    "h-1.5 w-1.5 rounded-full",
-                    active ? "bg-brand-600" : "bg-slate-300",
-                  )}
-                />
-                {student.name}
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <span className="inline-flex items-center rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-500">
+  function moveFocus(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % students.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + students.length) % students.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = students.length - 1;
+    }
+
+    if (nextIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextStudent = students[nextIndex];
+
+    if (nextStudent) {
+      onSelect(nextStudent.id);
+      tabRefs.current[nextIndex]?.focus();
+    }
+  }
+
+  if (students.length === 0) {
+    return (
+      <div className="mt-4 -mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0">
+        <span className="inline-flex min-h-11 items-center rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-[11px] font-medium text-slate-600">
           No student records available
         </span>
-      )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 -mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:px-0">
+      <div
+        className="flex min-w-max gap-2"
+        role="tablist"
+        aria-label="Student records"
+      >
+        {students.map((student, index) => {
+          const active = student.id === selectedStudentId;
+
+          return (
+            <button
+              key={student.id}
+              ref={(element) => {
+                tabRefs.current[index] = element;
+              }}
+              type="button"
+              role="tab"
+              id={`student-tab-${student.id}`}
+              aria-selected={active}
+              aria-controls={panelId}
+              tabIndex={active ? 0 : -1}
+              onClick={() => onSelect(student.id)}
+              onKeyDown={(event) => moveFocus(event, index)}
+              className={cn(
+                "inline-flex min-h-11 items-center gap-2 rounded-full border px-4 py-2 text-[11px] font-semibold transition",
+                active
+                  ? "border-brand-600 bg-[#E8F5F3] text-brand-700 shadow-sm"
+                  : "border-slate-200/80 bg-white text-slate-600 hover:border-brand-200 hover:bg-brand-50/40 hover:text-brand-700",
+              )}
+            >
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "h-1.5 w-1.5 rounded-full",
+                  active ? "bg-brand-600" : "bg-slate-300",
+                )}
+              />
+              {student.name}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -392,39 +490,71 @@ function ViewToggle({
   view: "timetable" | "calendar";
   onChange: (view: "timetable" | "calendar") => void;
 }) {
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const views = [
+    { id: "timetable" as const, label: "Timetable", icon: CalendarDays },
+    { id: "calendar" as const, label: "Calendar", icon: CalendarRange },
+  ];
+
+  function moveFocus(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % views.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + views.length) % views.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = views.length - 1;
+    }
+
+    if (nextIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextView = views[nextIndex];
+
+    if (nextView) {
+      onChange(nextView.id);
+      tabRefs.current[nextIndex]?.focus();
+    }
+  }
+
   return (
     <div className="mt-3 rounded-full bg-[#E8F5F3] p-1">
       <div className="grid grid-cols-2 gap-1" role="tablist" aria-label="View">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "timetable"}
-          onClick={() => onChange("timetable")}
-          className={cn(
-            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
-            view === "timetable"
-              ? "bg-white text-brand-700 shadow-sm"
-              : "text-slate-400",
-          )}
-        >
-          <CalendarDays className="h-3.5 w-3.5" />
-          Timetable
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "calendar"}
-          onClick={() => onChange("calendar")}
-          className={cn(
-            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
-            view === "calendar"
-              ? "bg-white text-brand-700 shadow-sm"
-              : "text-slate-400",
-          )}
-        >
-          <CalendarRange className="h-3.5 w-3.5" />
-          Calendar
-        </button>
+        {views.map((item, index) => {
+          const Icon = item.icon;
+          const active = item.id === view;
+
+          return (
+            <button
+              key={item.id}
+              ref={(element) => {
+                tabRefs.current[index] = element;
+              }}
+              type="button"
+              role="tab"
+              id={`view-tab-${item.id}`}
+              aria-selected={active}
+              aria-controls={`${item.id}-panel`}
+              tabIndex={active ? 0 : -1}
+              onClick={() => onChange(item.id)}
+              onKeyDown={(event) => moveFocus(event, index)}
+              className={cn(
+                "inline-flex min-h-11 items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
+                active
+                  ? "bg-white text-brand-700 shadow-sm"
+                  : "text-slate-600 hover:text-brand-700",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+              {item.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -439,10 +569,10 @@ function OfficialNotice({
   return (
     <section className="mt-3 flex gap-3 rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
       <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-[#6D4FA3] shadow-sm">
-        <ShieldCheck className="h-4 w-4" />
+        <ShieldCheck className="h-4 w-4" aria-hidden="true" />
       </span>
       <div className="min-w-0">
-        <p className="text-[8px] font-semibold uppercase tracking-[0.16em] text-[#8A6DBC]">
+        <p className="text-[8px] font-semibold uppercase tracking-[0.16em] text-[#6D4FA3]">
           {notice?.authority?.trim() || "Academic office"}
         </p>
         <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
@@ -470,10 +600,10 @@ function WeekSelector({
   return (
     <section className="mt-3">
       <div className="flex items-center justify-between gap-3 px-1">
-        <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+        <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-600">
           {weekLabel || "Week schedule"}
         </p>
-        <p className="text-[9px] font-medium text-slate-400">
+        <p className="text-[9px] font-medium text-slate-600">
           {termLabel || "No active term"}
         </p>
       </div>
@@ -492,10 +622,10 @@ function WeekSelector({
                   aria-pressed={active}
                   aria-label={`${day.label} ${day.date}${day.isToday ? ", today" : ""}`}
                   className={cn(
-                    "relative flex flex-col items-center rounded-xl px-1 py-2 transition",
+                    "relative flex min-h-11 flex-col items-center rounded-xl px-1 py-2 transition",
                     active
                       ? "bg-brand-500 text-white shadow-lg shadow-brand-500/20"
-                      : "bg-white/70 text-slate-500 hover:bg-white hover:text-brand-700",
+                      : "bg-white/70 text-slate-600 hover:bg-white hover:text-brand-700",
                   )}
                 >
                   <span
@@ -513,7 +643,7 @@ function WeekSelector({
                   <span
                     className={cn(
                       "text-[8px] font-semibold uppercase tracking-wide",
-                      active ? "text-white/70" : "text-slate-400",
+                      active ? "text-white/80" : "text-slate-600",
                     )}
                   >
                     {day.label}
@@ -539,15 +669,22 @@ function WeekSelector({
 function PeriodsSection({
   periods,
   streamLabel,
+  dayLabel,
+  isToday,
 }: {
   periods: TimetablePeriod[];
   streamLabel: string | null;
+  dayLabel: string | null;
+  isToday: boolean;
 }) {
+  const heading =
+    isToday || !dayLabel ? "Today's Periods" : `${dayLabel}'s Periods`;
+
   return (
     <section>
       <div className="flex items-center justify-between gap-3 px-1">
         <h2 className="text-sm font-bold tracking-tight text-slate-900">
-          Today&apos;s Periods
+          {heading}
         </h2>
         <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
           {streamLabel || "No stream assigned"}
@@ -578,13 +715,13 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
     return (
       <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200/80 bg-[#F1F5F4] px-3.5 py-3">
         <span className="inline-flex items-center gap-2 text-[10px] font-semibold text-slate-600">
-          <Coffee className="h-4 w-4 text-slate-400" />
+          <Coffee className="h-4 w-4 text-slate-500" aria-hidden="true" />
           {period.label}
         </span>
-        <span className="text-[9px] font-medium text-slate-500">
+        <span className="text-[9px] font-medium text-slate-600">
           {formatTimeRange(period.start, period.end)}
           {period.duration && (
-            <span className="ml-2 rounded-full bg-white px-1.5 py-0.5 text-[8px] font-semibold text-slate-400">
+            <span className="ml-2 rounded-full bg-white px-1.5 py-0.5 text-[8px] font-semibold text-slate-500">
               {period.duration}
             </span>
           )}
@@ -613,7 +750,7 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
             : "bg-[#E8F5F3] text-brand-600",
         )}
       >
-        <Icon className="h-4 w-4" />
+        <Icon className="h-4 w-4" aria-hidden="true" />
       </span>
 
       <div className="min-w-0 flex-1">
@@ -627,7 +764,7 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
             </span>
           )}
         </div>
-        <p className="mt-0.5 truncate text-[9px] text-slate-400">
+        <p className="mt-0.5 truncate text-[9px] text-slate-500">
           {[period.teacher, period.room].filter(Boolean).join(" · ") ||
             "Teacher and room not provided"}
         </p>
@@ -645,7 +782,7 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
         <p
           className={cn(
             "mt-0.5 text-[8px] font-medium",
-            active ? "text-[#8A6DBC]" : "text-slate-400",
+            active ? "text-[#6D4FA3]" : "text-slate-500",
           )}
         >
           {period.label}
@@ -656,7 +793,7 @@ function PeriodCard({ period }: { period: TimetablePeriod }) {
 }
 
 /** Renders the structural calendar placeholder. */
-function CalendarEmpty() {
+function CalendarEmpty({ streamLabel }: { streamLabel: string | null }) {
   return (
     <section>
       <div className="flex items-center justify-between gap-3 px-1">
@@ -664,15 +801,18 @@ function CalendarEmpty() {
           Calendar view
         </h2>
         <span className="rounded-full bg-brand-50 px-2.5 py-1 text-[9px] font-semibold text-brand-700 ring-1 ring-brand-100">
-          No stream assigned
+          {streamLabel || "No stream assigned"}
         </span>
       </div>
       <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center">
-        <CalendarRange className="mx-auto h-5 w-5 text-slate-400" />
+        <CalendarRange
+          className="mx-auto h-5 w-5 text-slate-500"
+          aria-hidden="true"
+        />
         <p className="mt-2 text-[11px] font-semibold text-slate-700">
           Calendar view structure
         </p>
-        <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+        <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-600">
           The monthly calendar will appear here when the view is connected.
         </p>
       </div>
@@ -689,7 +829,7 @@ function KeyDatesCard({ dates }: { dates: KeyDate[] }) {
           Key Term Dates
         </h2>
         <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600">
-          <CalendarDays className="h-4 w-4" />
+          <CalendarDays className="h-4 w-4" aria-hidden="true" />
         </span>
       </div>
 
@@ -717,7 +857,7 @@ function KeyDateItem({ date }: { date: KeyDate }) {
     return (
       <article className="flex gap-3 rounded-xl bg-[#E8F5F3] p-3">
         <span className="grid h-11 w-10 shrink-0 place-items-center rounded-xl bg-white text-[#6D4FA3] shadow-sm">
-          <span className="text-[7px] font-semibold uppercase text-slate-400">
+          <span className="text-[7px] font-semibold uppercase text-slate-500">
             {date.month}
           </span>
           <span className="text-sm font-bold leading-none text-[#6D4FA3]">
@@ -726,13 +866,13 @@ function KeyDateItem({ date }: { date: KeyDate }) {
         </span>
         <div className="min-w-0">
           <p className="inline-flex items-center gap-1 text-[7px] font-semibold uppercase tracking-[0.12em] text-brand-700">
-            <Info className="h-2.5 w-2.5" />
+            <Info className="h-2.5 w-2.5" aria-hidden="true" />
             {date.badge || "Notice"}
           </p>
           <p className="mt-0.5 truncate text-[10px] font-bold text-slate-800">
             {date.title}
           </p>
-          <p className="mt-0.5 text-[8px] leading-relaxed text-slate-500">
+          <p className="mt-0.5 text-[8px] leading-relaxed text-slate-600">
             {date.meta || "Details not provided"}
           </p>
         </div>
@@ -743,7 +883,7 @@ function KeyDateItem({ date }: { date: KeyDate }) {
   return (
     <article className="flex items-center gap-3 rounded-xl py-2">
       <span className="grid h-11 w-10 shrink-0 place-items-center rounded-xl bg-[#F0EBF9] text-[#6D4FA3]">
-        <span className="text-[7px] font-semibold uppercase text-slate-400">
+        <span className="text-[7px] font-semibold uppercase text-slate-500">
           {date.month}
         </span>
         <span className="text-sm font-bold leading-none text-[#6D4FA3]">
@@ -754,7 +894,7 @@ function KeyDateItem({ date }: { date: KeyDate }) {
         <p className="truncate text-[10px] font-bold text-slate-800">
           {date.title}
         </p>
-        <p className="mt-0.5 truncate text-[8px] text-slate-400">
+        <p className="mt-0.5 truncate text-[8px] text-slate-500">
           {date.meta || "Details not provided"}
         </p>
       </div>
@@ -786,13 +926,13 @@ function EmptyState({
         className,
       )}
     >
-      <span className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-slate-50 text-slate-400">
-        <Icon className="h-4 w-4" />
+      <span className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-slate-50 text-slate-500">
+        <Icon className="h-4 w-4" aria-hidden="true" />
       </span>
       <p className="mt-2.5 text-[11px] font-semibold text-slate-700">
         {title}
       </p>
-      <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-500">
+      <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-600">
         {body}
       </p>
     </div>

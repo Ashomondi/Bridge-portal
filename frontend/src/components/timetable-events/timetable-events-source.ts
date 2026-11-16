@@ -16,6 +16,11 @@ import type {
  * which resolves the guardian's linked students and returns each student's
  * published periods plus the school's notice, week/term labels and key dates.
  *
+ * Integration note: this expects `GET {NEXT_PUBLIC_API_URL}/parent/timetable`
+ * to exist on the parent BFF alongside `/parent` and `/parent/results`. The
+ * academics service's `/api/v1/timetables` route is not a drop-in substitute
+ * because it returns class slots for staff, not guardian-scoped student data.
+ *
  * Returns `null` when the portal is not configured, the session is not
  * authorized, or the response cannot be used. The dashboard then renders
  * honest empty states instead of sample data.
@@ -43,7 +48,13 @@ export async function loadParentTimetable(): Promise<ParentTimetableData | null>
       return null;
     }
 
-    const payload = (await response.json()) as Partial<ParentTimetableData>;
+    let payload: unknown;
+
+    try {
+      payload = await response.json();
+    } catch {
+      return null;
+    }
 
     return sanitizeParentTimetableData(payload);
   } catch {
@@ -55,74 +66,123 @@ export async function loadParentTimetable(): Promise<ParentTimetableData | null>
  * Validates the portal payload and normalizes it into the dashboard contract.
  *
  * Only records with a usable shape are kept. A linked student is always
- * selected, so the page never shows one student's periods under another
- * student's name.
+ * selected, and periods/key dates belonging to a student outside the
+ * authorized `students` list are stripped before they reach the client.
  */
-function sanitizeParentTimetableData(
-  payload: Partial<ParentTimetableData>,
+export function sanitizeParentTimetableData(
+  payload: unknown,
 ): ParentTimetableData | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
   const students = Array.isArray(payload.students)
-    ? payload.students.filter(isTimetableStudent)
+    ? payload.students
+        .map(normalizeTimetableStudent)
+        .filter((student): student is TimetableStudent => student !== null)
     : [];
 
   if (students.length === 0) {
     return null;
   }
 
+  const authorizedStudentIds = new Set(students.map((student) => student.id));
+  const requestedStudentId = optionalString(payload.selectedStudentId);
   const selectedStudentId =
-    students.find((student) => student.id === payload.selectedStudentId)?.id ??
-    students[0].id;
+    requestedStudentId && authorizedStudentIds.has(requestedStudentId)
+      ? requestedStudentId
+      : students[0].id;
+
+  const periods = Array.isArray(payload.periods)
+    ? payload.periods
+        .map(normalizeTimetablePeriod)
+        .filter(
+          (period): period is TimetablePeriod =>
+            period !== null && authorizedStudentIds.has(period.studentId),
+        )
+    : [];
+
+  const keyDates = Array.isArray(payload.keyDates)
+    ? payload.keyDates
+        .map(normalizeKeyDate)
+        .filter(
+          (date): date is KeyDate =>
+            date !== null &&
+            (!date.studentId || authorizedStudentIds.has(date.studentId)),
+        )
+    : [];
 
   return {
-    portal: isPortal(payload.portal) ? payload.portal : null,
-    session: isSession(payload.session) ? payload.session : null,
+    portal: normalizePortal(payload.portal),
+    session: normalizeSession(payload.session),
     students,
     selectedStudentId,
-    weekLabel: typeof payload.weekLabel === "string" ? payload.weekLabel : null,
-    termLabel: typeof payload.termLabel === "string" ? payload.termLabel : null,
-    notice: isAcademicNotice(payload.notice) ? payload.notice : null,
-    periods: Array.isArray(payload.periods)
-      ? payload.periods.filter(isTimetablePeriod)
-      : [],
-    keyDates: Array.isArray(payload.keyDates)
-      ? payload.keyDates.filter(isKeyDate)
-      : [],
+    weekLabel: optionalString(payload.weekLabel),
+    termLabel: optionalString(payload.termLabel),
+    notice: normalizeAcademicNotice(payload.notice),
+    periods,
+    keyDates,
   };
 }
 
-/** Narrows an unknown payload entry to a usable linked student. */
-function isTimetableStudent(value: unknown): value is TimetableStudent {
+/** Narrows and normalizes an unknown payload entry to a linked student. */
+function normalizeTimetableStudent(value: unknown): TimetableStudent | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
-  return (
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    typeof value.name === "string" &&
-    typeof value.initials === "string"
-  );
+  const id = optionalString(value.id);
+  const name = optionalString(value.name);
+
+  if (!id || !name) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    initials: optionalString(value.initials) ?? initialsFromName(name),
+    stream: optionalString(value.stream),
+  };
 }
 
-/** Narrows an unknown payload entry to a timetable period. */
-function isTimetablePeriod(value: unknown): value is TimetablePeriod {
+/** Narrows and normalizes an unknown payload entry to a timetable period. */
+function normalizeTimetablePeriod(value: unknown): TimetablePeriod | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
+  const id = optionalString(value.id);
+  const studentId = optionalString(value.studentId);
+  const date = optionalString(value.date);
+  const subject = optionalString(value.subject);
+  const label = optionalString(value.label);
   const kind = value.kind;
 
-  return (
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    typeof value.studentId === "string" &&
-    value.studentId.length > 0 &&
-    typeof value.date === "string" &&
-    value.date.length > 0 &&
-    isTimetablePeriodKind(kind) &&
-    typeof value.subject === "string" &&
-    typeof value.label === "string"
-  );
+  if (
+    !id ||
+    !studentId ||
+    !date ||
+    !isTimetablePeriodKind(kind) ||
+    !subject ||
+    !label
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    studentId,
+    date,
+    kind,
+    subject,
+    teacher: optionalString(value.teacher),
+    room: optionalString(value.room),
+    start: optionalString(value.start),
+    end: optionalString(value.end),
+    label,
+    duration: optionalString(value.duration),
+  };
 }
 
 /** Checks a timetable period kind against the supported values. */
@@ -135,22 +195,32 @@ function isTimetablePeriodKind(value: unknown): value is TimetablePeriodKind {
   );
 }
 
-/** Narrows an unknown payload entry to a key term date. */
-function isKeyDate(value: unknown): value is KeyDate {
+/** Narrows and normalizes an unknown payload entry to a key term date. */
+function normalizeKeyDate(value: unknown): KeyDate | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
+  const id = optionalString(value.id);
+  const month = optionalString(value.month);
+  const day = optionalString(value.day);
+  const title = optionalString(value.title);
   const kind = value.kind;
 
-  return (
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    isKeyDateKind(kind) &&
-    typeof value.month === "string" &&
-    typeof value.day === "string" &&
-    typeof value.title === "string"
-  );
+  if (!id || !isKeyDateKind(kind) || !month || !day || !title) {
+    return null;
+  }
+
+  return {
+    id,
+    kind,
+    month,
+    day,
+    title,
+    meta: optionalString(value.meta),
+    badge: optionalString(value.badge),
+    studentId: optionalString(value.studentId),
+  };
 }
 
 /** Checks a key date kind against the supported values. */
@@ -158,44 +228,80 @@ function isKeyDateKind(value: unknown): value is KeyDateKind {
   return value === "standard" || value === "notice" || value === "general";
 }
 
-/** Narrows the payload's portal identity object. */
-function isPortal(
+/** Narrows and normalizes the payload's portal identity object. */
+function normalizePortal(
   value: unknown,
-): value is NonNullable<ParentTimetableData["portal"]> {
+): NonNullable<ParentTimetableData["portal"]> | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
-  return value.name === null || typeof value.name === "string";
+  return { name: optionalString(value.name) };
 }
 
-/** Narrows the payload's guardian session object. */
-function isSession(
+/** Narrows and normalizes the payload's guardian session object. */
+function normalizeSession(
   value: unknown,
-): value is NonNullable<ParentTimetableData["session"]> {
+): NonNullable<ParentTimetableData["session"]> | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
-  return (
-    typeof value.fullName === "string" &&
-    typeof value.relationship === "string" &&
-    typeof value.initials === "string"
-  );
-}
+  const fullName = optionalString(value.fullName);
+  const relationship = optionalString(value.relationship);
+  const initials = optionalString(value.initials);
 
-/** Narrows the payload's academic notice object. */
-function isAcademicNotice(value: unknown): value is AcademicNotice {
-  if (!isRecord(value)) {
-    return false;
+  if (!fullName || !relationship || !initials) {
+    return null;
   }
 
-  return (
-    typeof value.authority === "string" && typeof value.note === "string"
-  );
+  return { fullName, relationship, initials };
 }
 
-/** Checks that an unknown value is a plain object. */
+/** Narrows and normalizes the payload's academic notice object. */
+function normalizeAcademicNotice(value: unknown): AcademicNotice | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const authority = optionalString(value.authority);
+  const note = optionalString(value.note);
+
+  if (!authority && !note) {
+    return null;
+  }
+
+  return {
+    authority: authority ?? "Academic office",
+    note: note ?? "",
+  };
+}
+
+/** Trims a string value and maps blank or non-string values to null. */
+function optionalString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Derives up to two initials from a student's display name. */
+function initialsFromName(name: string) {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.map((part) => part[0]?.toUpperCase()).join("") || "S";
+}
+
+/** Checks that an unknown value is a plain object rather than an array. */
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object";
+  return (
+    Boolean(value) && typeof value === "object" && !Array.isArray(value)
+  );
 }

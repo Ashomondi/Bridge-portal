@@ -1,8 +1,13 @@
+import type { Metadata } from "next";
 import ParentTimetableDashboard from "@/components/timetable-events/ParentTimetableDashboard";
 import { buildWeek } from "@/components/timetable-events/timetable-events-data";
 import { loadParentTimetable } from "@/components/timetable-events/timetable-events-source";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Timetable & Events | Bridge Portal",
+};
 
 /**
  * Loads the authenticated parent timetable and renders it for the current
