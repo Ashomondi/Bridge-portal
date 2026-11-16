@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
@@ -42,11 +43,18 @@ type NavItem = {
   label: string;
   icon: LucideIcon;
   countKey?: "schools" | "connections" | "unmatchedPayments";
+  href?: string;
   active?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Schools", icon: Building2, countKey: "schools", active: true },
+  {
+    label: "Schools",
+    icon: Building2,
+    countKey: "schools",
+    href: "/admin/schools",
+    active: true,
+  },
   { label: "Connections", icon: Link2, countKey: "connections" },
   { label: "Fee Structures", icon: Wallet },
   { label: "Unmatched Payments", icon: AlertTriangle, countKey: "unmatchedPayments" },
@@ -82,6 +90,26 @@ export default function AdminOnboardingDashboard({
     connections: null,
     unmatchedPayments: null,
   };
+  const registry = data?.registry ?? null;
+  const [searchQuery, setSearchQuery] = useState("");
+  const [regionFilter, setRegionFilter] = useState("");
+  const regionOptions = useMemo(() => {
+    const provided = data?.header.regionOptions ?? [];
+
+    if (provided.length > 0) {
+      return provided;
+    }
+
+    const counties = Array.from(
+      new Set(
+        (registry?.rows ?? [])
+          .map((row) => row.county.trim())
+          .filter(Boolean),
+      ),
+    ).sort((left, right) => left.localeCompare(right));
+
+    return counties.map((county) => ({ value: county, label: county }));
+  }, [data?.header.regionOptions, registry?.rows]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -94,6 +122,21 @@ export default function AdminOnboardingDashboard({
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", closeOnDesktop);
+
+    return () => {
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -139,7 +182,12 @@ export default function AdminOnboardingDashboard({
         >
           <PageHeaderCard
             enrolledCount={data?.header.enrolledCount ?? null}
-            regionOptions={data?.header.regionOptions ?? []}
+            regionOptions={regionOptions}
+            searchQuery={searchQuery}
+            regionFilter={regionFilter}
+            searchDisabled={registry === null}
+            onSearchChange={setSearchQuery}
+            onRegionChange={setRegionFilter}
           />
 
           <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(360px,1fr)]">
@@ -153,16 +201,9 @@ export default function AdminOnboardingDashboard({
           </div>
 
           <RegistryTable
-            registry={
-              data?.registry ?? {
-                rows: [],
-                visibleCount: 0,
-                totalCount: 0,
-                countyCount: 0,
-                totalPages: 1,
-                currentPage: 1,
-              }
-            }
+            registry={registry}
+            searchQuery={searchQuery}
+            regionFilter={regionFilter}
           />
         </main>
       </div>
@@ -207,7 +248,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-400">
@@ -220,23 +261,19 @@ function SidebarContent({
         </div>
       </div>
 
-      <button
-        type="button"
-        className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left transition hover:border-brand-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-      >
+      <div className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-brand-600 shadow-sm">
-          <Building2 className="h-3.5 w-3.5" />
+          <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-500">
             Active context
           </span>
           <span className="block truncate text-[11px] font-semibold text-slate-700">
             {activeEntity || "No entity selected"}
           </span>
         </span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-      </button>
+      </div>
 
       <p className="mt-6 px-2 text-[8px] font-semibold uppercase tracking-[0.18em] text-slate-400">
         Operations rail
@@ -246,26 +283,22 @@ function SidebarContent({
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const count = item.countKey ? counts[item.countKey] : null;
-
-          return (
-            <a
-              key={item.label}
-              href="#"
-              onClick={onNavigate}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500",
+            item.href
+              ? "hover:bg-slate-50 hover:text-slate-800"
+              : "cursor-not-allowed opacity-70",
+          );
+          const content = (
+            <>
               <Icon
+                aria-hidden="true"
                 className={cn(
                   "h-4 w-4 shrink-0",
-                  item.active
-                    ? "text-brand-600"
-                    : "text-slate-400 group-hover:text-brand-600",
+                  item.active ? "text-brand-600" : "text-slate-500",
                 )}
               />
               <span className="flex-1">{item.label}</span>
@@ -274,7 +307,32 @@ function SidebarContent({
                   {count.toLocaleString("en-GB")}
                 </span>
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <div
+                key={item.label}
+                aria-disabled="true"
+                title="This operations route is not connected yet."
+                className={className}
+              >
+                {content}
+              </div>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              onClick={onNavigate}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -292,10 +350,13 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Sign out"
+            disabled
+            aria-disabled="true"
+            title="Sign out is not connected yet."
+            className="grid h-8 w-8 cursor-not-allowed place-items-center rounded-lg text-slate-500 opacity-60"
+            aria-label="Sign out unavailable"
           >
-            <LogOut className="h-3.5 w-3.5" />
+            <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -320,7 +381,7 @@ function MobileAppBar({
           onClick={onOpenMenu}
           aria-expanded={menuOpen}
           aria-controls="admin-drawer"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           aria-label="Open navigation menu"
         >
           <Menu className="h-5 w-5" />
@@ -338,19 +399,20 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            title="Notifications are not connected yet."
+            className="grid h-10 w-10 cursor-not-allowed place-items-center rounded-xl text-slate-500 opacity-60"
+            aria-label="Notifications unavailable"
           >
-            <Bell className="h-5 w-5" />
-            <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <Bell className="h-5 w-5" aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -402,13 +464,12 @@ function TopBar({
             />
             {gatewayLive ? "Daraja API Live" : "Gateway status unavailable"}
           </span>
-          <button
-            type="button"
-            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
 
@@ -436,9 +497,19 @@ function TopBar({
 function PageHeaderCard({
   enrolledCount,
   regionOptions,
+  searchQuery,
+  regionFilter,
+  searchDisabled,
+  onSearchChange,
+  onRegionChange,
 }: {
   enrolledCount: number | null;
   regionOptions: { value: string; label: string }[];
+  searchQuery: string;
+  regionFilter: string;
+  searchDisabled: boolean;
+  onSearchChange: (value: string) => void;
+  onRegionChange: (value: string) => void;
 }) {
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
@@ -462,20 +533,32 @@ function PageHeaderCard({
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <label className="relative min-w-0 flex-1 sm:w-56">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <span className="sr-only">Search schools</span>
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
+              aria-hidden="true"
+            />
             <input
               type="search"
-              placeholder="Search schools..."
-              className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8F9FA] pl-8 pr-3 text-[10px] text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10"
+              value={searchQuery}
+              onChange={(event) => onSearchChange(event.target.value)}
+              disabled={searchDisabled}
+              aria-disabled={searchDisabled || undefined}
+              placeholder={
+                searchDisabled ? "Search unavailable" : "Search schools..."
+              }
+              className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8F9FA] pl-8 pr-3 text-[10px] text-slate-700 outline-none transition placeholder:text-slate-500 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20 disabled:cursor-not-allowed disabled:opacity-60"
             />
           </label>
           <label className="relative shrink-0 sm:w-40">
             <span className="sr-only">Region or category</span>
             <select
+              value={regionFilter}
+              onChange={(event) => onRegionChange(event.target.value)}
               disabled={regionOptions.length === 0}
-              className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8F9FA] pl-3 pr-8 text-[10px] font-semibold text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+              className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8F9FA] pl-3 pr-8 text-[10px] font-semibold text-slate-600 outline-none focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <option>
+              <option value="">
                 {regionOptions.length > 0
                   ? "All regions"
                   : "No regions available"}
@@ -486,13 +569,19 @@ function PageHeaderCard({
                 </option>
               ))}
             </select>
-            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <ChevronDown
+              className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500"
+              aria-hidden="true"
+            />
           </label>
           <button
             type="button"
-            className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-brand-500 px-3 text-[10px] font-semibold text-white shadow-sm transition hover:bg-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="School provisioning is not connected yet."
+            className="inline-flex h-9 shrink-0 cursor-not-allowed items-center justify-center gap-1.5 rounded-lg bg-brand-500 px-3 text-[10px] font-semibold text-white opacity-60 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
             Create school
           </button>
         </div>
@@ -535,12 +624,16 @@ function ChecklistCard({
               : "No onboarding steps"}
           </p>
           <div className="mt-2 flex justify-end gap-1">
-            {steps.map((step, index) => (
+            {steps.map((step) => (
               <span
                 key={step.id}
                 className={cn(
                   "h-1.5 w-6 rounded-full",
-                  index < completed ? "bg-brand-500" : "bg-slate-100",
+                  step.kind === "completed" || step.kind === "api"
+                    ? "bg-brand-500"
+                    : step.kind === "progress"
+                      ? "bg-[#D6A84A]"
+                      : "bg-[#B9A3E0]",
                 )}
               />
             ))}
@@ -623,8 +716,11 @@ function StepCard({ step }: { step: OnboardingStep }) {
 
       <button
         type="button"
+        disabled
+        aria-disabled="true"
+        title="Checklist actions are not connected yet."
         className={cn(
-          "inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[8px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+          "inline-flex h-7 cursor-not-allowed shrink-0 items-center gap-1 rounded-lg px-2 text-[8px] font-semibold opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
           completed && "bg-white text-brand-700 ring-1 ring-brand-100",
           progress && "bg-brand-500 text-white",
           step.kind === "pending" && "bg-[#6D4FA3] text-white",
@@ -684,15 +780,34 @@ function ProvisionForm() {
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600">
-            <Building2 className="h-4 w-4" />
+            <Building2 className="h-4 w-4" aria-hidden="true" />
           </span>
           <h2 className="text-sm font-bold tracking-tight text-slate-900">
             Provision School
           </h2>
         </div>
-        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-600">
           Form Drawer
         </span>
+      </div>
+
+      <div
+        role="status"
+        className="mt-4 flex gap-2.5 rounded-xl border border-[#E8C97A] bg-[#FEF3D6] p-3"
+      >
+        <AlertTriangle
+          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#8A6A25]"
+          aria-hidden="true"
+        />
+        <div className="min-w-0">
+          <p className="text-[9px] font-bold text-[#6D4FA3]">
+            Provisioning is unavailable
+          </p>
+          <p className="mt-0.5 text-[8px] leading-relaxed text-slate-600">
+            School creation will be enabled once the backend provisioning
+            endpoint is connected.
+          </p>
+        </div>
       </div>
 
       <div className="mt-4">
@@ -702,16 +817,41 @@ function ProvisionForm() {
           </p>
         </div>
         <div className="mt-2 space-y-2">
-          <FormInput label="School name" placeholder="Enter school name" />
+          <FormInput
+            label="School code"
+            placeholder="Enter school code"
+            maxLength={50}
+            disabled
+          />
+          <FormInput
+            label="School name"
+            placeholder="Enter school name"
+            disabled
+          />
+          <FormSelect label="County" placeholder="Select county" disabled />
           <div className="grid grid-cols-2 gap-2">
-            <FormSelect label="County" placeholder="Select county" />
-            <FormSelect label="Type" placeholder="Select type" />
+            <FormInput
+              label="Contact phone"
+              placeholder="Enter phone"
+              disabled
+            />
+            <FormInput
+              label="Contact email"
+              placeholder="Enter email"
+              type="email"
+              disabled
+            />
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <FormInput label="Contact phone" placeholder="Enter phone" />
-            <FormInput label="Contact email" placeholder="Enter email" />
-          </div>
-          <FormInput label="Physical address" placeholder="Enter address" />
+          <FormInput
+            label="Physical address"
+            placeholder="Enter address"
+            disabled
+          />
+          <FormInput
+            label="Office hours"
+            placeholder="e.g. Mon–Fri, 8:00–17:00"
+            disabled
+          />
         </div>
       </div>
 
@@ -725,41 +865,52 @@ function ProvisionForm() {
           </span>
         </div>
         <div className="mt-2 space-y-2">
-          <FormInput label="Full name" placeholder="Enter full name" />
+          <FormInput
+            label="Full name"
+            placeholder="Enter full name"
+            disabled
+          />
           <label className="block">
             <span className="mb-1 block text-[8px] font-semibold text-slate-500">
               Phone
             </span>
-            <div className="flex h-9 items-center rounded-lg border border-slate-200/80 bg-[#F8FAF9] p-0.5">
+            <div className="flex h-9 items-center rounded-lg border border-slate-200/80 bg-[#F8FAF9] p-0.5 opacity-70">
               <span className="inline-flex h-8 items-center rounded-md bg-white px-2 text-[9px] font-bold text-brand-700 shadow-sm">
                 +254
               </span>
               <input
                 type="tel"
                 placeholder="Enter phone number"
-                className="h-8 min-w-0 flex-1 bg-transparent px-2 text-[10px] text-slate-700 outline-none placeholder:text-slate-400"
+                disabled
+                aria-disabled="true"
+                className="h-8 min-w-0 flex-1 cursor-not-allowed bg-transparent px-2 text-[10px] text-slate-700 outline-none placeholder:text-slate-500"
               />
             </div>
-            <span className="mt-1 block text-[7px] text-slate-400">
+            <span className="mt-1 block text-[7px] text-slate-500">
               An SMS OTP will be sent before the principal account is activated.
             </span>
           </label>
-          <FormInput label="Email" placeholder="Enter email" type="email" />
         </div>
       </div>
 
       <div className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-3">
         <button
           type="button"
-          className="h-9 flex-1 rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          title="Provisioning is not connected yet."
+          className="h-9 flex-1 cursor-not-allowed rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
           Save as draft
         </button>
         <button
           type="button"
-          className="inline-flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white transition hover:bg-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          title="Provisioning is not connected yet."
+          className="inline-flex h-9 flex-1 cursor-not-allowed items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
-          <UserRound className="h-3 w-3" />
+          <UserRound className="h-3 w-3" aria-hidden="true" />
           Create school &amp; principal
         </button>
       </div>
@@ -771,20 +922,27 @@ function FormInput({
   label,
   placeholder,
   type = "text",
+  disabled = false,
+  maxLength,
 }: {
   label: string;
   placeholder: string;
   type?: string;
+  disabled?: boolean;
+  maxLength?: number;
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[8px] font-semibold text-slate-500">
+      <span className="mb-1 block text-[8px] font-semibold text-slate-600">
         {label}
       </span>
       <input
         type={type}
         placeholder={placeholder}
-        className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] px-2.5 text-[10px] text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10"
+        disabled={disabled}
+        aria-disabled={disabled || undefined}
+        maxLength={maxLength}
+        className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] px-2.5 text-[10px] text-slate-700 outline-none transition placeholder:text-slate-500 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:opacity-70"
       />
     </label>
   );
@@ -793,62 +951,144 @@ function FormInput({
 function FormSelect({
   label,
   placeholder,
+  disabled = false,
 }: {
   label: string;
   placeholder: string;
+  disabled?: boolean;
 }) {
   return (
     <label className="relative block">
-      <span className="mb-1 block text-[8px] font-semibold text-slate-500">
+      <span className="mb-1 block text-[8px] font-semibold text-slate-600">
         {label}
       </span>
-      <select className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[10px] text-slate-700 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10">
+      <select
+        disabled={disabled}
+        aria-disabled={disabled || undefined}
+        className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[10px] text-slate-700 outline-none focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:opacity-70"
+      >
         <option>{placeholder}</option>
       </select>
-      <ChevronDown className="pointer-events-none absolute bottom-2.5 right-2 h-3 w-3 text-slate-400" />
+      <ChevronDown
+        className="pointer-events-none absolute bottom-2.5 right-2 h-3 w-3 text-slate-500"
+        aria-hidden="true"
+      />
     </label>
   );
 }
 
+const REGISTRY_PAGE_SIZE = 10;
+
 function RegistryTable({
   registry,
+  searchQuery,
+  regionFilter,
 }: {
-  registry: AdminOnboardingData["registry"];
+  registry: AdminOnboardingData["registry"] | null;
+  searchQuery: string;
+  regionFilter: string;
 }) {
-  const rows = registry.rows;
+  const [page, setPage] = useState(1);
+  const rows = useMemo(() => registry?.rows ?? [], [registry?.rows]);
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const hasFilters = normalizedQuery.length > 0 || regionFilter.length > 0;
+  const filteredRows = useMemo(
+    () =>
+      rows.filter((row) => {
+        const matchesRegion = !regionFilter || row.county === regionFilter;
+        const searchable = [
+          row.school,
+          row.county,
+          row.type,
+          row.principal,
+          row.statusLabel,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return matchesRegion && (!normalizedQuery || searchable.includes(normalizedQuery));
+      }),
+    [rows, normalizedQuery, regionFilter],
+  );
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredRows.length / REGISTRY_PAGE_SIZE),
+  );
+  const currentPage = Math.min(page, totalPages);
+  const visibleRows = filteredRows.slice(
+    (currentPage - 1) * REGISTRY_PAGE_SIZE,
+    currentPage * REGISTRY_PAGE_SIZE,
+  );
+  const loadedCount = hasFilters
+    ? filteredRows.length
+    : registry?.totalCount ?? 0;
+  const loadedCountyCount = hasFilters
+    ? new Set(filteredRows.map((row) => row.county)).size
+    : registry?.countyCount ?? 0;
+  const subtitle =
+    registry === null
+      ? "Live sync · registry data unavailable"
+      : hasFilters
+        ? `Filtered registry · ${filteredRows.length} matching ${
+            filteredRows.length === 1 ? "school" : "schools"
+          }`
+        : rows.length === 0
+          ? "Live sync · no registry records"
+          : `Live sync · ${registry.totalCount.toLocaleString("en-GB")} schools loaded`;
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, regionFilter]);
 
   return (
     <section className="mt-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="flex items-center gap-2 text-sm font-bold tracking-tight text-slate-900">
-            <FileText className="h-4 w-4 text-brand-600" />
+            <FileText className="h-4 w-4 text-brand-600" aria-hidden="true" />
             Master Registry
           </h2>
-          <p className="mt-0.5 text-[8px] text-slate-400">
-            Live sync · no registry data loaded
-          </p>
+          <p className="mt-0.5 text-[8px] text-slate-500">{subtitle}</p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-2.5 text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            onClick={() => exportRegistryCsv(filteredRows)}
+            disabled={filteredRows.length === 0}
+            aria-disabled={filteredRows.length === 0}
+            title={
+              filteredRows.length === 0
+                ? "There are no registry rows to export."
+                : "Export the filtered registry as CSV."
+            }
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-2.5 text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Download className="h-3 w-3" />
+            <Download className="h-3 w-3" aria-hidden="true" />
             Export CSV
           </button>
           <button
             type="button"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-2.5 text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            disabled
+            aria-disabled="true"
+            title="Advanced registry filters are not connected yet."
+            className="inline-flex h-8 cursor-not-allowed items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-2.5 text-[9px] font-semibold text-slate-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           >
-            <Filter className="h-3 w-3" />
+            <Filter className="h-3 w-3" aria-hidden="true" />
             Filters
           </button>
         </div>
       </div>
 
       <div className="mt-2.5 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card">
-        {rows.length > 0 ? (
+        {registry === null ? (
+          <div className="p-4">
+            <EmptyState
+              icon={FileText}
+              title="Registry unavailable"
+              body="Registry data could not be loaded. Try again once the onboarding service is connected."
+            />
+          </div>
+        ) : visibleRows.length > 0 ? (
           <>
             <div className="hidden overflow-x-auto md:block">
               <table className="w-full border-collapse text-left">
@@ -864,7 +1104,7 @@ function RegistryTable({
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row) => (
+                  {visibleRows.map((row) => (
                     <tr
                       key={row.id}
                       className="border-b border-slate-100 transition last:border-0 hover:bg-slate-50/70"
@@ -902,7 +1142,10 @@ function RegistryTable({
                       <td className="px-4 py-3 text-right">
                         <button
                           type="button"
-                          className="text-[9px] font-semibold text-brand-600 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+                          disabled
+                          aria-disabled="true"
+                          title="School management is not connected yet."
+                          className="cursor-not-allowed text-[9px] font-semibold text-brand-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
                         >
                           Manage
                         </button>
@@ -914,7 +1157,7 @@ function RegistryTable({
             </div>
 
             <div className="divide-y divide-slate-100 md:hidden">
-              {rows.map((row) => (
+              {visibleRows.map((row) => (
                 <div key={row.id} className="p-3.5">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
@@ -933,18 +1176,18 @@ function RegistryTable({
                     <StatusBadge row={row} />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-[8px]">
-                    <span className="text-slate-400">
+                    <span className="text-slate-500">
                       County:{" "}
                       <span className="text-slate-600">{row.county}</span>
                     </span>
-                    <span className="text-slate-400">
+                    <span className="text-slate-500">
                       Type: <span className="text-slate-600">{row.type}</span>
                     </span>
-                    <span className="text-slate-400">
+                    <span className="text-slate-500">
                       Principal:{" "}
                       <span className="text-slate-600">{row.principal}</span>
                     </span>
-                    <span className="text-slate-400">
+                    <span className="text-slate-500">
                       Created:{" "}
                       <span className="text-slate-600">{row.created}</span>
                     </span>
@@ -952,7 +1195,10 @@ function RegistryTable({
                   <div className="mt-2 text-right">
                     <button
                       type="button"
-                      className="text-[9px] font-semibold text-brand-600 hover:underline"
+                      disabled
+                      aria-disabled="true"
+                      title="School management is not connected yet."
+                      className="cursor-not-allowed text-[9px] font-semibold text-brand-600 opacity-60"
                     >
                       Manage
                     </button>
@@ -965,67 +1211,136 @@ function RegistryTable({
           <div className="p-4">
             <EmptyState
               icon={FileText}
-              title="No registry records available"
-              body="Onboarded schools will appear here when they are registered."
+              title={
+                hasFilters
+                  ? "No schools match your search"
+                  : "No registry records available"
+              }
+              body={
+                hasFilters
+                  ? "Try a different school name, county or region filter."
+                  : "Onboarded schools will appear here when they are registered."
+              }
             />
           </div>
         )}
 
-        <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-[8px] text-slate-500">
-            Showing{" "}
-            <span className="font-semibold text-slate-700">
-              {registry.visibleCount}
-            </span>{" "}
-            of{" "}
-            <span className="font-semibold text-slate-700">
-              {registry.totalCount}
-            </span>{" "}
-            active schools across{" "}
-            <span className="font-semibold text-slate-700">
-              {registry.countyCount}
-            </span>{" "}
-            counties
-          </p>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[8px] font-semibold text-slate-500 hover:bg-white disabled:opacity-40"
-              disabled={registry.currentPage <= 1}
-            >
-              <ChevronLeft className="h-3 w-3" />
-              Previous
-            </button>
-            {Array.from(
-              { length: Math.max(registry.totalPages, 1) },
-              (_, index) => index + 1,
-            ).map((page) => (
+        {registry !== null && (
+          <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-[8px] text-slate-500">
+              Showing{" "}
+              <span className="font-semibold text-slate-700">
+                {visibleRows.length}
+              </span>{" "}
+              of{" "}
+              <span className="font-semibold text-slate-700">
+                {loadedCount}
+              </span>{" "}
+              active schools across{" "}
+              <span className="font-semibold text-slate-700">
+                {loadedCountyCount}
+              </span>{" "}
+              counties
+            </p>
+            <div className="flex items-center gap-1">
               <button
-                key={page}
                 type="button"
-                className={cn(
-                  "grid h-7 w-7 place-items-center rounded-lg text-[8px] font-semibold",
-                  page === registry.currentPage
-                    ? "bg-brand-500 text-white"
-                    : "text-slate-500 hover:bg-white",
-                )}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                disabled={currentPage <= 1}
+                aria-disabled={currentPage <= 1}
+                className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[8px] font-semibold text-slate-500 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
               >
-                {page}
+                <ChevronLeft className="h-3 w-3" aria-hidden="true" />
+                Previous
               </button>
-            ))}
-            <button
-              type="button"
-              className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[8px] font-semibold text-slate-500 hover:bg-white disabled:opacity-40"
-              disabled={registry.currentPage >= registry.totalPages}
-            >
-              Next
-              <ChevronRight className="h-3 w-3" />
-            </button>
+              {Array.from({ length: totalPages }, (_, index) => index + 1).map(
+                (pageNumber) => (
+                  <button
+                    key={pageNumber}
+                    type="button"
+                    onClick={() => setPage(pageNumber)}
+                    aria-current={
+                      pageNumber === currentPage ? "page" : undefined
+                    }
+                    className={cn(
+                      "grid h-7 w-7 place-items-center rounded-lg text-[8px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+                      pageNumber === currentPage
+                        ? "bg-brand-500 text-white"
+                        : "text-slate-500 hover:bg-white",
+                    )}
+                  >
+                    {pageNumber}
+                  </button>
+                ),
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  setPage((current) => Math.min(totalPages, current + 1))
+                }
+                disabled={currentPage >= totalPages}
+                aria-disabled={currentPage >= totalPages}
+                className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[8px] font-semibold text-slate-500 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
+              >
+                Next
+                <ChevronRight className="h-3 w-3" aria-hidden="true" />
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </section>
   );
+}
+
+/** Escapes CSV cells and neutralises spreadsheet formula injection. */
+function csvCell(value: string) {
+  const text = value ?? "";
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+/** Downloads the provided registry rows as a CSV file. */
+function exportRegistryCsv(rows: AdminRegistryRow[]) {
+  const header = [
+    "School Name",
+    "County",
+    "Type",
+    "Principal",
+    "Status",
+    "Progress",
+    "Created",
+  ];
+  const lines = [
+    header.map(csvCell).join(","),
+    ...rows.map((row) =>
+      [
+        row.school,
+        row.county,
+        row.type,
+        row.principal,
+        row.statusLabel,
+        row.progress ?? "",
+        row.created,
+      ]
+        .map(csvCell)
+        .join(","),
+    ),
+  ];
+  const blob = new Blob([`\uFEFF${lines.join("\r\n")}`], {
+    type: "text/csv;charset=utf-8;",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `school-registry-${new Date()
+    .toISOString()
+    .slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function StatusBadge({ row }: { row: AdminRegistryRow }) {
@@ -1145,7 +1460,7 @@ function MobileDrawer({
             type="button"
             onClick={onClose}
             data-autofocus
-            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />
