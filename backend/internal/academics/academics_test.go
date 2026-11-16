@@ -536,10 +536,38 @@ func TestRosterPrivacyScoping(t *testing.T) {
 	if err != nil || len(roster.Students) != 2 {
 		t.Fatalf("class teacher roster: %v %+v", err, roster)
 	}
+	if roster.StreamName != "East" || roster.Date == "" {
+		t.Fatalf("expected roster context, got %+v", roster)
+	}
 	if _, err := env.svc.GetRoster(mathTeacher, testClassID); err != nil {
 		t.Fatalf("assigned subject teacher should see roster: %v", err)
 	}
 	_, err = env.svc.GetRoster(otherTeacher, testClassID)
+	requireAPIError(t, err, http.StatusForbidden, CodeForbidden)
+}
+
+// TestTeacherClassesLookup verifies the roll-call route can resolve a default
+// class for the signed-in class teacher without a class id in the URL.
+func TestTeacherClassesLookup(t *testing.T) {
+	env := newTestEnv(t)
+
+	result, err := env.svc.GetTeacherClasses(identityCtx(testUserCT, testMemCT, RoleTeacher))
+	if err != nil {
+		t.Fatalf("teacher classes: %v", err)
+	}
+	if result.DefaultClassID != testClassID || len(result.Classes) != 1 {
+		t.Fatalf("expected default class %s, got %+v", testClassID, result)
+	}
+	if result.Classes[0].StreamName != "East" {
+		t.Fatalf("expected East stream, got %+v", result.Classes[0])
+	}
+
+	other, err := env.svc.GetTeacherClasses(identityCtx(testUserOther, testMemOther, RoleTeacher))
+	if err != nil || other.DefaultClassID != "" || len(other.Classes) != 0 {
+		t.Fatalf("unassigned teacher should have no default class: %v %+v", err, other)
+	}
+
+	_, err = env.svc.GetTeacherClasses(identityCtx(testUserParentA, testMemParentA, RoleParent))
 	requireAPIError(t, err, http.StatusForbidden, CodeForbidden)
 }
 

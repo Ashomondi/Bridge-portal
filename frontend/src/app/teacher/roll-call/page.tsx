@@ -11,7 +11,7 @@ export default async function TeacherRollCallPage({
 }: {
   searchParams: { classId?: string | string[] };
 }) {
-  const data = await loadRollCall({
+  const result = await loadRollCall({
     classId:
       typeof searchParams.classId === "string"
         ? searchParams.classId
@@ -19,6 +19,10 @@ export default async function TeacherRollCallPage({
   });
 
   return (
-    <RollCallDashboard data={data} isPreview={ROLL_CALL_IS_PREVIEW} />
+    <RollCallDashboard
+      data={result.data}
+      error={result.error}
+      isPreview={ROLL_CALL_IS_PREVIEW}
+    />
   );
 }

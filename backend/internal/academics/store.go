@@ -241,6 +241,7 @@ type Store interface {
 	EnrolledStudents(ctx context.Context, schoolID, classID string) ([]EnrolledStudent, error)
 
 	MembershipByID(ctx context.Context, schoolID, membershipID string) (Membership, error)
+	ClassesForTeacher(ctx context.Context, schoolID, membershipID string) ([]Class, error)
 	ClassTeacherMembership(ctx context.Context, schoolID, classID string) (string, error)
 	HasClassTeacherBadge(ctx context.Context, schoolID, membershipID, classID string) (bool, error)
 	AssignClassTeacher(ctx context.Context, schoolID, classID, membershipID, actorUserID string) error

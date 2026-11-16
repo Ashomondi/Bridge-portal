@@ -25,8 +25,10 @@ import {
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import {
+  getRollCallHref,
   getStudentInitials,
   type RollCallData,
+  type RollCallError,
   type RollCallStatus,
   type RollCallStudent,
 } from "./roll-call-data";
@@ -59,12 +61,14 @@ const BOTTOM_NAV = [
 /** Renders the teacher roll-call workspace for a resolved class roster. */
 export default function RollCallDashboard({
   data,
+  error = null,
   isPreview = true,
 }: {
   data: RollCallData | null;
+  error?: RollCallError | null;
   isPreview?: boolean;
 }) {
-  const students = data?.students ?? [];
+  const students = useMemo(() => data?.students ?? [], [data?.students]);
   const session = data?.session ?? null;
   const teacherName = session?.fullName?.trim() || "Teacher";
   const teacherRole = session?.role?.trim() || "Staff";
@@ -73,23 +77,49 @@ export default function RollCallDashboard({
     session?.initials?.trim() || initialsFromName(teacherName);
   const portalName = data?.portal?.name?.trim() || "School portal";
   const context = data?.context ?? {
+    classId: null,
     streamName: null,
     dateLabel: null,
     termLabel: null,
     registryRef: null,
   };
+  const rollCallHref = getRollCallHref(context.classId);
 
   const [statuses, setStatuses] = useState<Record<string, RollCallStatus>>({});
   const [menuOpen, setMenuOpen] = useState(false);
-  const markedCount = Object.keys(statuses).length;
-  const presentCount = useMemo(
-    () => Object.values(statuses).filter((status) => status === "present").length,
-    [statuses],
+  const markedCount = useMemo(
+    () =>
+      students.filter((student) => Boolean(statuses[student.id])).length,
+    [students, statuses],
   );
-  const absentCount = markedCount - presentCount;
+  const presentCount = useMemo(
+    () =>
+      students.filter((student) => statuses[student.id] === "present").length,
+    [students, statuses],
+  );
+  const absentCount = useMemo(
+    () =>
+      students.filter((student) => statuses[student.id] === "absent").length,
+    [students, statuses],
+  );
   const progress = students.length
     ? Math.round((markedCount / students.length) * 100)
     : 0;
+
+  // Drop marks for learners who are no longer in the current roster. This
+  // prevents a stale selection from inflating the progress or submission counts.
+  useEffect(() => {
+    setStatuses((current) => {
+      const currentIds = new Set(students.map((student) => student.id));
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([id]) => currentIds.has(id)),
+      ) as Record<string, RollCallStatus>;
+
+      return Object.keys(next).length === Object.keys(current).length
+        ? current
+        : next;
+    });
+  }, [students]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -158,6 +188,7 @@ export default function RollCallDashboard({
           teacherRole={teacherRole}
           teacherSubject={teacherSubject}
           teacherInitials={teacherInitials}
+          rollCallHref={rollCallHref}
         />
       </aside>
 
@@ -182,20 +213,26 @@ export default function RollCallDashboard({
           className="mx-auto w-full max-w-[1100px] px-4 pb-[260px] pt-20 sm:px-6 lg:px-8 lg:pt-7"
         >
           <PageHeader context={context} />
-          <ProgressCard
-            marked={markedCount}
-            total={students.length}
-            present={presentCount}
-            absent={absentCount}
-            progress={progress}
-            onMarkAllPresent={markAllPresent}
-          />
-          <StudentList
-            students={students}
-            statuses={statuses}
-            onToggle={toggleStatus}
-          />
-          <GuardianDispatchNotice />
+          {error ? (
+            <RollCallErrorNotice error={error} />
+          ) : (
+            <>
+              <ProgressCard
+                marked={markedCount}
+                total={students.length}
+                present={presentCount}
+                absent={absentCount}
+                progress={progress}
+                onMarkAllPresent={markAllPresent}
+              />
+              <StudentList
+                students={students}
+                statuses={statuses}
+                onToggle={toggleStatus}
+              />
+              <GuardianDispatchNotice />
+            </>
+          )}
         </main>
       </div>
 
@@ -206,7 +243,7 @@ export default function RollCallDashboard({
         termLabel={context.termLabel}
         isPreview={isPreview}
       />
-      <BottomNav />
+      <BottomNav rollCallHref={rollCallHref} />
 
       {menuOpen && (
         <MobileDrawer
@@ -214,6 +251,7 @@ export default function RollCallDashboard({
           teacherRole={teacherRole}
           teacherSubject={teacherSubject}
           teacherInitials={teacherInitials}
+          rollCallHref={rollCallHref}
           onClose={() => setMenuOpen(false)}
         />
       )}
@@ -227,12 +265,14 @@ function SidebarContent({
   teacherRole,
   teacherSubject,
   teacherInitials,
+  rollCallHref,
   onNavigate,
 }: {
   teacherName: string;
   teacherRole: string;
   teacherSubject: string;
   teacherInitials: string;
+  rollCallHref: string;
   onNavigate?: () => void;
 }) {
   return (
@@ -259,11 +299,13 @@ function SidebarContent({
       <nav className="mt-6 space-y-0.5" aria-label="Primary">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
+          const href =
+            item.href === "/teacher/roll-call" ? rollCallHref : item.href;
 
           return (
             <a
               key={item.label}
-              href={item.href}
+              href={href}
               onClick={onNavigate}
               aria-current={item.active ? "page" : undefined}
               className={cn(
@@ -464,6 +506,56 @@ function PageHeader({ context }: { context: RollCallData["context"] }) {
         </p>
       )}
     </div>
+  );
+}
+
+/** Shows an actionable error instead of pretending the roster is empty. */
+function RollCallErrorNotice({ error }: { error: RollCallError }) {
+  const copy: Record<RollCallError, { title: string; body: string }> = {
+    unauthorized: {
+      title: "Sign in required",
+      body: "Your session has expired. Sign in again to load this class roster.",
+    },
+    forbidden: {
+      title: "Roll-call access denied",
+      body: "You need to be the class teacher for this class to take roll-call.",
+    },
+    "not-found": {
+      title: "Class not found",
+      body: "This class roster could not be found. Ask an administrator to confirm your class assignment.",
+    },
+    "class-required": {
+      title: "No class assigned",
+      body: "We could not find a class-teacher assignment for your account. Ask an administrator to assign you to a class.",
+    },
+    server: {
+      title: "Roster unavailable",
+      body: "The school server could not load this roster. Try again shortly.",
+    },
+    network: {
+      title: "Connection problem",
+      body: "We could not reach the school server. Check your connection and try again.",
+    },
+    "invalid-response": {
+      title: "Roster unavailable",
+      body: "The roster response was incomplete. Try again or contact support.",
+    },
+  };
+  const { title, body } = copy[error];
+
+  return (
+    <section
+      role="alert"
+      className="mt-4 flex gap-3 rounded-2xl border border-[#E8C97A] bg-[#FEF3D6] p-4"
+    >
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-[#8A6A25] shadow-sm">
+        <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-[11px] font-bold text-[#6D4FA3]">{title}</p>
+        <p className="mt-1 text-[9px] leading-relaxed text-slate-600">{body}</p>
+      </div>
+    </section>
   );
 }
 
@@ -724,7 +816,7 @@ function SubmissionCard({
 }
 
 /** Fixed five-tab mobile navigation with Attendance marked as current. */
-function BottomNav() {
+function BottomNav({ rollCallHref }: { rollCallHref: string }) {
   return (
     <nav
       aria-label="Mobile navigation"
@@ -733,11 +825,13 @@ function BottomNav() {
       <div className="grid grid-cols-5 px-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1">
         {BOTTOM_NAV.map((item) => {
           const Icon = item.icon;
+          const href =
+            item.href === "/teacher/roll-call" ? rollCallHref : item.href;
 
           return (
             <a
               key={item.label}
-              href={item.href}
+              href={href}
               aria-current={item.active ? "page" : undefined}
               className={cn(
                 "relative flex flex-col items-center gap-1 rounded-xl py-2 text-[8px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
@@ -765,12 +859,14 @@ function MobileDrawer({
   teacherRole,
   teacherSubject,
   teacherInitials,
+  rollCallHref,
   onClose,
 }: {
   teacherName: string;
   teacherRole: string;
   teacherSubject: string;
   teacherInitials: string;
+  rollCallHref: string;
   onClose: () => void;
 }) {
   const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
@@ -816,6 +912,7 @@ function MobileDrawer({
             teacherRole={teacherRole}
             teacherSubject={teacherSubject}
             teacherInitials={teacherInitials}
+            rollCallHref={rollCallHref}
             onNavigate={onClose}
           />
         </div>
