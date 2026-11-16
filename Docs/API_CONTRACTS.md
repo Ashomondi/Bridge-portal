@@ -52,18 +52,24 @@ Internal calls require both a service credential and a delegated user session.
 Use `Authorization: Bearer <service-token>` for the shared secret configured as
 `INTERNAL_SERVICE_TOKEN` in Go and `AI_SERVICE_SECRET_TOKEN` in Python. Use
 `X-Delegated-Session: <opaque-session-token>` for a Go-issued, short-lived session
-bound to the user and active membership. For verified chat, Go resolves the
-token hash to an unexpired `chat_sessions` row and rechecks guardian access.
-For in-app requests, Go validates the user's existing session and membership.
-Unsigned user/school headers are never delegation credentials.
+bound to the user and active membership. For verified chat, migration `000004`
+enforces that `chat_sessions` rows in `VERIFIED` state carry a non-null,
+non-blank `access_token_hash` alongside `guardian_user_id`, `verified_at`, and
+`expires_at > verified_at`; Go resolves the hash of `X-Delegated-Session` to an
+unexpired (`expires_at > now()`) `chat_sessions` row and rechecks guardian
+access. For in-app requests, Go validates the user's existing session and
+membership. Unsigned user/school headers are never delegation credentials.
 
 Both credentials are required; the service token alone grants no student or
 school access. Go verifies each request, derives its principal, and applies the
-same permissions as a frontend request. Restrict internal routes to the private
-service network, use TLS, rotate service tokens, and redact both headers from
-logs. Production must reject the example development secrets. This decision
-defines the required protocol; credential validation and delegation middleware
-are not implemented in the current scaffolding.
+same tenant, badge-permission, and guardian-relationship checks as a frontend
+request. The AI service is restricted to permission-checked Go endpoints and
+never accesses PostgreSQL, raw biometric templates, or nurse clinical records.
+Restrict internal routes to the private service network, use TLS, rotate
+service tokens, and redact both headers from logs. Production must reject the
+example development secrets. This decision defines the required protocol;
+credential validation and delegation middleware are not implemented in the
+current scaffolding.
 
 ## Rule: the AI service never touches the database directly
 
@@ -165,16 +171,23 @@ errors become the generic `500 INTERNAL_ERROR` response. Helpers set
 | 429 | `RATE_LIMITED` | Reserved for rate-limit middleware, not implemented yet |
 | 500 | `INTERNAL_ERROR` | Unexpected error or response serialization failure |
 
-Pagination uses positive integers: `page` defaults to **1**, maximum
-**1,000,000**; `per_page` defaults to **25**, maximum **100**. `total` is the
-number of records matching the caller's authorized filters before pagination.
-Endpoints must use a stable ordering with an ID tie-breaker. Empty/out-of-range
-pages return an empty collection, not an error.
+Pagination is **offset-based** (not cursor-based) using positive integer query
+parameters: `page` defaults to **1** (maximum **1,000,000**) and `per_page`
+defaults to **25** (maximum **100**), where SQL queries compute
+`OFFSET = (page - 1) * per_page` and `LIMIT = per_page`. Non-integer,
+non-positive, or out-of-range values return `422 INVALID_PAGINATION`. `total` in
+`meta` is the number of records matching the caller's authorized filters before
+pagination. Endpoints must use a stable ordering with an ID tie-breaker.
+Empty/out-of-range pages return an empty `[]` collection with `200`, not an
+error.
 
-`Decode` limits each JSON request body to **1 MB (1,048,576 bytes)**, rejects
-unknown fields, and accepts exactly one JSON value. Oversized bodies currently
-return `400 INVALID_JSON`, not `413`. Handlers must call this helper to enforce
-the limit. Use canonical, nonzero UUID strings; timestamps use RFC 3339 with an
+`Decode` limits each JSON request body to **1 MB (1,048,576 bytes)** via
+`http.MaxBytesReader`, rejects unknown fields (`DisallowUnknownFields`), and
+accepts exactly one JSON value. Oversized bodies currently return
+`400 INVALID_JSON`, not `413`. Because `Decode` is an explicit per-handler
+helper rather than global server middleware in the current scaffolding, handlers
+must call `Decode` on every JSON endpoint to enforce the limit consistently.
+Use canonical, nonzero UUID strings (`ValidID`); timestamps use RFC 3339 with an
 explicit offset (storage in UTC), dates use `YYYY-MM-DD`, and school-local
 presentation uses `Africa/Nairobi`. Financial DTOs should use decimal strings
 with two fractional digits in KES to avoid floating-point loss.

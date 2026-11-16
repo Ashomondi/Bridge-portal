@@ -32,24 +32,40 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
 
 ## Commands
 
-- Backend build: `cd backend && go build ./...`
-- Backend tests: `cd backend && go test -count=1 -v ./...`
-- PostgreSQL tests: start `docker compose up -d --wait postgres` from the repo
-  root, then export
-  `DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'`
-  (adjust for local credentials) before running the backend tests. Use a
-  dedicated local test server with a superuser that can create databases and
-  roles; never a production database. The harness creates/deletes random
-  `dev05_*` databases and non-BYPASSRLS roles and uses synthetic data.
-  Missing URL skips locally but fails when `CI` is nonempty. CI provides
-  PostgreSQL 16 and the URL in `.github/workflows/backend.yml`.
+- **Prerequisites:** Go **1.22.2+** (`backend/go.mod`) and **PostgreSQL 16**
+  (`postgres:16-alpine`).
+- Backend build & static check:
+  `cd backend && go mod verify && go build ./... && go vet ./...`
+- Backend unit tests (no database required):
+  `cd backend && go test -count=1 -v ./internal/internalapi/contracts`
+- PostgreSQL 16 integration tests: start an isolated PostgreSQL 16 test server
+  (e.g., `docker compose up -d --wait postgres` from the repo root), configure
+  `DEV05_TEST_DATABASE_URL`, and run all tests with `CI=true` so database tests
+  cannot skip silently:
+  ```sh
+  export DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'
+  cd backend && CI=true go test -count=1 -v ./...
+  ```
+  Adjust the URL for your local credentials/port. Use a dedicated local test
+  server with a superuser capable of creating/dropping disposable `dev05_*`
+  databases and non-superuser, non-`BYPASSRLS` roles; never run against a
+  production or shared database. Missing `DEV05_TEST_DATABASE_URL` skips DB
+  tests locally without `CI`, but fails when `CI` is nonempty.
+  `.github/workflows/backend.yml` provisions PostgreSQL 16 and runs the full
+  validation suite.
+- Complete validation suite:
+  ```sh
+  cd backend && go mod verify && go build ./... && go vet ./... && CI=true DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable' go test -count=1 -v ./...
+  ```
 - Backend run (dev): `make backend-run` (entry point is still a placeholder)
 - Frontend run (dev): `make frontend-run`
 - Migrations: apply paired SQL files using a PostgreSQL migration runner in
-  version order: `000001_init_schema`, `000003_r1_academics`,
-  `000004_r1_billing_whatsapp_notifications`. There is no migration 000002.
-  `make migrate-up` is advertised but not implemented. The test harness applies
-  the files directly; see `README.md` for test commands and downgrade behavior.
+  exact sequence **`000001` → `000003` → `000004`**
+  (`000001_init_schema` → `000003_r1_academics` →
+  `000004_r1_billing_whatsapp_notifications`). **Migration `000002` is absent
+  from this branch.** `make migrate-up` in `Makefile` is advertised in help
+  output but not implemented. The test harness applies the SQL files directly;
+  see `README.md` for downgrade rules.
 - AI service run (dev): `make ai-run`
 
 ## Non-negotiable rules

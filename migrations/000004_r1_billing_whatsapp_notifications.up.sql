@@ -158,6 +158,7 @@ CREATE TABLE mpesa_stk_requests (
     transaction_ref VARCHAR(100),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (school_id, transaction_ref),
     FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id)
 );
 CREATE INDEX mpesa_stk_requests_pending_idx ON mpesa_stk_requests(school_id, status, created_at);
@@ -191,7 +192,7 @@ CREATE TABLE chat_sessions (
     payment_init_count INT NOT NULL DEFAULT 0 CHECK (payment_init_count >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CHECK (state <> 'VERIFIED' OR (guardian_user_id IS NOT NULL AND verified_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at > verified_at)),
+    CHECK (state <> 'VERIFIED' OR (guardian_user_id IS NOT NULL AND access_token_hash IS NOT NULL AND btrim(access_token_hash) <> '' AND verified_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at > verified_at)),
     UNIQUE (school_id, id),
     FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id)
 );

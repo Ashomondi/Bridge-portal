@@ -96,26 +96,98 @@ separate "history" table to keep in sync.
 
 ## Release 1 billing and chat foundation (migration 000004)
 
-Migration 000004 adds **12 tables**, all with enabled and forced tenant RLS:
-
-| Table | Responsibility |
-|---|---|
-| `school_mpesa_configs` | School shortcode, environment, encrypted passkey and test-payment verification |
-| `fee_periods` | Named billing period and due date within a school/year/term |
-| `fee_charges` | Student's assessed amount and selected structure for a period |
-| `fee_change_notes` | Actor, reason, amount/date changes and affected count |
-| `fee_change_note_students` | Exact students affected by each change note |
-| `ledger_entries` | Idempotent financial postings and references |
-| `unmatched_payments` | Reconciliation queue and human resolution record |
-| `mpesa_stk_requests` | Durable payment attempts, including uncertain outcomes |
-| `school_whatsapp_bots` | School-to-provider phone identity mapping for future WhatsApp activation |
-| `chat_sessions` | Channel, guardian verification, OTP/token hashes and expiry |
-| `in_app_notifications` | Recipient inbox and read state |
-| `ai_action_logs` | Redacted AI intent, endpoint reads and action metadata |
-
-It also adds boarding variants to `fee_structures` and credit/due-date fields
+Migration 000004 adds **12 tables**, all with `school_id` tenant ownership plus
+enabled and forced tenant RLS (`school_id = current_school_id()`). It also adds
+composite `(school_id, id)` unique keys on `academic_years`, `terms`, `students`,
+and `payments` (plus `(school_id, academic_year_id, id)` on `terms`), adds
+`boarding_status` variants (`all`, `boarder`, `day`) to `fee_structures`, and
+adds `credit_balance`, `credit_applied`, `credit_transferred`, and `due_date`
 to `fee_ledgers`. Schema availability does not mean the related handlers,
 workers, permission checks or audit sinks are implemented.
+
+1. **`school_mpesa_configs`**
+   - **Purpose:** Stores per-school Safaricom Daraja Paybill/Till shortcode, environment (`sandbox` / `production`), encrypted passkey, and test-payment verification state.
+   - **Ownership & tenant relationship:** Owned by `schools` (`school_id` is both `PRIMARY KEY` and `FOREIGN KEY REFERENCES schools(id) ON DELETE CASCADE`); isolated via forced RLS.
+   - **Important constraints:** `shortcode` is `UNIQUE NOT NULL`; `environment IN ('sandbox', 'production')` (default `'sandbox'`); `test_payment_verified BOOLEAN NOT NULL DEFAULT FALSE`.
+   - **Relationships:** 1:1 with `schools`.
+   - **Domain workflow role:** Supplies tenant payment shortcode/credentials for STK push initiation and Daraja callback resolution.
+
+2. **`fee_periods`**
+   - **Purpose:** Defines named billing periods and due dates per school, academic year, and optional term.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `btrim(period_type) <> ''` (default `'term'`), `btrim(name) <> ''`, `CHECK (period_type <> 'term' OR term_id IS NOT NULL)`, `UNIQUE (school_id, id)`, `UNIQUE (school_id, academic_year_id, term_id)`.
+   - **Relationships:** Composite tenant FKs `(school_id, academic_year_id) -> academic_years(school_id, id)` and `(school_id, academic_year_id, term_id) -> terms(school_id, academic_year_id, id)`. Referenced by `fee_charges` and `fee_change_notes`.
+   - **Domain workflow role:** Anchors billing due dates and groups student assessments (`fee_charges`) and revision notes (`fee_change_notes`).
+
+3. **`fee_charges`**
+   - **Purpose:** Records the assessed fee amount and chosen `fee_structure_id` for a student within a `fee_period`.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `amount >= 0`, `UNIQUE (school_id, student_id, fee_period_id)`.
+   - **Relationships:** Composite tenant FKs to `students(school_id, id)`, `fee_periods(school_id, id)`, and `fee_structures(school_id, id)`. Indexed on `(school_id, fee_period_id)` and `(school_id, fee_structure_id)`.
+   - **Domain workflow role:** Authoritative assessment record driving term charges posted to `ledger_entries` and projected onto `fee_ledgers`.
+
+4. **`fee_change_notes`**
+   - **Purpose:** Records authorized fee amount deltas or due-date revisions, reason text, actor, and affected student count.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `change_type IN ('amount', 'due_date')`, `btrim(note) <> ''`, `affected_students_count >= 0`, `UNIQUE (school_id, id)`.
+   - **Relationships:** `created_by REFERENCES users(id)`; composite tenant FKs `(school_id, term_id) -> terms(school_id, id)` and `(school_id, fee_period_id) -> fee_periods(school_id, id)`. Parent of `fee_change_note_students`.
+   - **Domain workflow role:** Captures why and by whom fee charges or due dates changed after initial assessment.
+
+5. **`fee_change_note_students`**
+   - **Purpose:** Preserves the exact subset of students affected by each `fee_change_notes` entry.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `PRIMARY KEY (school_id, note_id, student_id)`.
+   - **Relationships:** Composite tenant FKs `(school_id, note_id) -> fee_change_notes(school_id, id) ON DELETE CASCADE` and `(school_id, student_id) -> students(school_id, id)`. Indexed on `(school_id, student_id)`.
+   - **Domain workflow role:** Prevents losing student-level scope when a fee change note only applies to specific students in a period.
+
+6. **`ledger_entries`**
+   - **Purpose:** Append-style idempotent posting log for post-migration ledger operations (`charge`, `payment`, `credit_applied`, `adjustment`).
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `entry_type IN ('charge', 'payment', 'credit_applied', 'adjustment')`, `UNIQUE (school_id, student_id, term_id, entry_type, reference)`.
+   - **Relationships:** Composite tenant FKs `(school_id, student_id) -> students(school_id, id)` and `(school_id, term_id) -> terms(school_id, id)`. Indexed on `(school_id, student_id, created_at, id)`.
+   - **Domain workflow role:** Makes billing postings idempotent via `(school_id, student_id, term_id, entry_type, reference)` alongside materialized `fee_ledgers` updates.
+
+7. **`unmatched_payments`**
+   - **Purpose:** Queue of settled payments whose student could not be automatically matched, together with human resolution tracking.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `amount > 0`, `status IN ('unmatched', 'resolved')`, `UNIQUE (school_id, payment_id)`, `UNIQUE (school_id, transaction_ref)`, and a `CHECK` enforcing that `unmatched` rows have NULL `resolved_at`, `resolved_student_id`, and `resolved_by` while `resolved` rows require all three non-NULL. Partial queue index on `(school_id, created_at, id) WHERE status = 'unmatched'`.
+   - **Relationships:** Composite tenant FKs `(school_id, payment_id) -> payments(school_id, id) ON DELETE CASCADE` and `(school_id, resolved_student_id) -> students(school_id, id)`; `resolved_by REFERENCES users(id)`.
+   - **Domain workflow role:** Feeds AI reconciliation suggestions and requires bursar confirmation before ledger posting.
+
+8. **`mpesa_stk_requests`**
+   - **Purpose:** Tracks durable M-Pesa STK Push payment attempts and settlement/timeout/uncertain states separately from settled `payments`.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `amount > 0`, `checkout_request_id VARCHAR(100) UNIQUE`, `UNIQUE (school_id, transaction_ref)` (per-school unique receipt reference when non-null while allowing multiple `NULL` attempts), `status IN ('initiating', 'pending', 'succeeded', 'failed', 'timeout', 'uncertain')`.
+   - **Relationships:** Composite tenant FK `(school_id, student_id) -> students(school_id, id)`; `guardian_user_id REFERENCES users(id)`. Indexed on `(school_id, status, created_at)`.
+   - **Domain workflow role:** Supports idempotent STK initiation, callback/polling reconciliation, and duplicate receipt prevention per school.
+
+9. **`school_whatsapp_bots`**
+   - **Purpose:** Stores school-to-WhatsApp Business Cloud API phone number mappings (`phone_number_id`, `display_phone_number`) for future Release 3 activation.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `phone_number_id VARCHAR(100) UNIQUE NOT NULL`, `display_phone_number VARCHAR(30) UNIQUE NOT NULL`, `is_active BOOLEAN NOT NULL DEFAULT TRUE`.
+   - **Relationships:** References `schools(id)`. Indexed on `(school_id)`.
+   - **Domain workflow role:** Reserved schema for Release 3 WhatsApp bot routing; unused in Release 1 (`is_active` default is not a Release 1 activation flag).
+
+10. **`chat_sessions`**
+    - **Purpose:** Tracks parent chat verification state, OTP challenge state/attempts, delegated access-token hashes, expiry, and lookup/payment counters.
+    - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+    - **Important constraints:** `channel IN ('whatsapp', 'in_app')`, `state IN ('AWAITING_ADMISSION_NUMBER', 'AWAITING_GUARDIAN_SELECTION', 'AWAITING_OTP', 'VERIFIED')`, `otp_attempts >= 0`, `lookup_count >= 0`, `payment_init_count >= 0`, `UNIQUE (school_id, id)`, partial unique index `chat_sessions_sender_idx ON (school_id, sender_wa_number) WHERE channel = 'whatsapp'`, and `CHECK (state <> 'VERIFIED' OR (guardian_user_id IS NOT NULL AND access_token_hash IS NOT NULL AND btrim(access_token_hash) <> '' AND verified_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at > verified_at))`.
+    - **Relationships:** Composite tenant FK `(school_id, student_id) -> students(school_id, id)`; `guardian_user_id REFERENCES users(id)`. Referenced by `ai_action_logs(school_id, session_id)`.
+    - **Domain workflow role:** Enforces step-up verification before delegated parent assistant queries or STK payment initiation.
+
+11. **`in_app_notifications`**
+    - **Purpose:** Stores per-recipient in-app inbox notifications and read status/timestamps.
+    - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+    - **Important constraints:** `btrim(category) <> ''`, `btrim(title) <> ''`, `btrim(body) <> ''`, `jsonb_typeof(metadata) = 'object'`, `CHECK (is_read = (read_at IS NOT NULL))`.
+    - **Relationships:** `recipient_user_id REFERENCES users(id) ON DELETE CASCADE`. Indexed on `(school_id, recipient_user_id, created_at DESC, id)`.
+    - **Domain workflow role:** Release 1 in-app notification inbox delivery and read-state tracking.
+
+12. **`ai_action_logs`**
+    - **Purpose:** Records redacted AI assistant feature invocations, intent, endpoint templates read, and action outcomes.
+    - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+    - **Important constraints:** `channel IN ('whatsapp', 'in_app')`, `jsonb_typeof(endpoints_read) = 'array'`, `jsonb_typeof(metadata) = 'object'`.
+    - **Relationships:** `user_id REFERENCES users(id)`; composite tenant FK `(school_id, session_id) -> chat_sessions(school_id, id)` (non-cascading). Indexed on `(school_id, session_id, created_at)`.
+    - **Domain workflow role:** Provides redacted operational AI action logging (`SECURITY.md`), separate from `audit_log` / `AuditLogger` financial audit requirements.
 
 ### Fee ledgers: sources and balance transitions
 
@@ -163,10 +235,13 @@ terminal; duplicate callbacks are no-ops. Contradictory evidence requires
 operator reconciliation, never blind replay.
 
 Only verified settlement creates a `payments` receipt and applies the ledger
-posting in the same idempotent transaction. Enforce unique checkout/receipt
-identifiers; retries create a new attempt only after checking the earlier one.
-The schema checks state names; transition and callback authentication rules
-must be implemented in the billing service.
+posting in the same idempotent transaction. Checkout identifiers are globally
+unique (`checkout_request_id UNIQUE`), and M-Pesa receipt references are unique
+per school (`UNIQUE (school_id, transaction_ref)` on `mpesa_stk_requests` while
+allowing multiple `NULL` attempts prior to settlement); retries create a new
+attempt only after checking the earlier one. The schema checks state names and
+identifier uniqueness; transition and callback authentication rules must be
+implemented in the billing service.
 
 ### Unmatched payments
 
@@ -189,14 +264,17 @@ eligible guardian. Selection → `AWAITING_OTP`; a valid OTP → `VERIFIED`.
 Admission lookup alone never grants access. OTP failure increments attempts;
 expiry or attempt exhaustion clears the challenge and restarts verification.
 
-`VERIFIED` requires a guardian, verification timestamp, and a non-null expiry
-strictly after verification. At request time, also require `expires_at > now()`
-and a current guardian relationship. Expiry/revocation clears OTP/token hashes
-and returns to the admission state; expiry is enforced even before cleanup
-runs. No `EXPIRED` enum exists. `sender_wa_number` is routing data, never proof
-of guardianship. The constraint verifies field shape, not OTP possession or
-current authorization. Release 1 uses in-app chat; WhatsApp routing tables
-prepare for Release 3 (see the ADR in `DECISIONS.md`).
+`VERIFIED` requires a guardian (`guardian_user_id`), non-null/non-blank
+`access_token_hash`, verification timestamp (`verified_at`), and a non-null
+expiry (`expires_at`) strictly after verification (`expires_at > verified_at`).
+At request time, also require `expires_at > now()` and a current guardian
+relationship. Expiry/revocation clears OTP/token hashes and returns to the
+admission state (`AWAITING_ADMISSION_NUMBER`, where `access_token_hash` may be
+NULL); expiry is enforced even before cleanup runs. No `EXPIRED` enum exists.
+`sender_wa_number` is routing data, never proof of guardianship. The constraint
+verifies field shape, not OTP possession or current authorization. Release 1
+uses in-app chat; WhatsApp routing tables prepare for Release 3 (see the ADR in
+`DECISIONS.md`).
 
 ### Downgrade rule
 
