@@ -67,8 +67,11 @@ This is the section most specific to this project's AI features — see also
 4. **It never originates a fact.** Fee balances, attendance, and results come
    from the database; the model's job is language (phrasing, translation,
    mapping natural language to CBC strands), never invention.
-5. **Every AI-initiated action is logged**: what was asked, what data was
-   read, what action (if any) was taken, and by which AI feature.
+5. **Every AI-initiated action must be logged**: structured intent, endpoint
+   names read, action/outcome, actor, school and feature. Do not log raw prompts,
+   replies, access tokens or returned student records. `ai_action_logs` is a
+   schema foundation and `AuditLogger` is an interface; durable logging is not
+   wired by these contracts and AC-29 remains pending.
 6. **A human approves anything sent to a parent or written to a permanent
    record** — report comments, blog posts, plain-language explanations — the
    AI drafts, a teacher/patron/bursar confirms.
@@ -98,9 +101,37 @@ This is the section most specific to this project's AI features — see also
 
 ## Retention
 
-> Fill in per data category once policy is set: how long results, attendance,
-> financial records, and consent records are kept after a student leaves,
-> and the deletion process.
+Under Kenya's Data Protection Act, 2019, personal data must not be kept longer
+than necessary for its lawful purpose. **Formal retention schedules have not yet
+been established** for this platform: every post-session, post-reconciliation,
+raw-payload, AI-log, backup, and canonical financial retention period below is a
+**policy decision requiring legal and school-controller confirmation** before
+production launch, not an existing approved rule. These rules also specify
+requirements for future handlers and cleanup workers; expiry, redaction, and
+audit-logging workers are **not yet implemented** in the current codebase.
+
+| Data category | Stored & why | Who can access | Retention status (confirmation required) | Redaction / deletion & protection rules |
+|---|---|---|---|---|
+| **Chat phone numbers** (`chat_sessions.sender_wa_number`) | Stored in PostgreSQL (`chat_sessions`, RLS-isolated) solely to route inbound/outbound Release 3 WhatsApp chat turns to the active session. Not used in Release 1 in-app chat and never proof of guardian identity. | Restricted to backend messaging/verification code for that `school_id`; masked to final 4 digits if ever surfaced in staff UI; excluded from URLs, app logs, analytics, and AI prompts. | **Policy decision required:** confirm maximum inactive/post-expiry retention for routing phone numbers and expired `chat_sessions` rows (proposed engineering target: clear `sender_wa_number` on expiry/revocation and purge expired rows on a short schedule once detached from retained logs). | Clear `sender_wa_number` upon session revocation/expiry; normalize for routing only; protect at rest under forced tenant RLS (`school_id`) and encrypted storage. |
+| **OTP hashes & challenge fields** (`chat_sessions.otp_hash`, `otp_expires_at`, `otp_attempts`) | **Plaintext OTPs are never stored or logged.** Only a server-keyed cryptographic hash and expiry/attempt counters are stored transiently in `chat_sessions` to enforce step-up guardian verification and rate/attempt limits. | Backend authentication/verification service only (`school_id` RLS-isolated). Never exposed to frontend clients, staff UI, logs, or the AI service. | **Policy decision required:** confirm exact OTP validity window, max failed attempts, and dead-challenge purge window (proposed engineering target: short-lived validity and immediate clearing on verify/replace/exhaustion, plus periodic purge of expired challenges). | Clear `otp_hash` immediately on successful verification, replacement, exhaustion, or expiry. Use a keyed hash with a server-held secret (never plain unsalted hashes for short numeric OTPs). |
+| **Delegated access-token hashes & verification timestamps** (`chat_sessions.access_token_hash`, `verified_at`, `expires_at`) | **Plaintext delegated tokens are never stored or logged.** Only the cryptographic hash (`access_token_hash`, required non-null/non-blank in `VERIFIED` state by migration `000004`) and `verified_at`/`expires_at` are stored so Go can resolve `X-Delegated-Session` and enforce expiry. | Backend auth/delegation validation middleware only (`school_id` RLS-isolated). Never returned to clients after issuance or exposed to AI prompts or logs. | **Policy decision required:** confirm maximum delegated session TTL and post-expiry cleanup window (proposed engineering target: short-lived TTL with prompt cleanup after revocation/expiry). Cleanup delay must **never** extend access: handlers must enforce `expires_at > now()` on every request. | Generate cryptographically random opaque tokens; store only hashes; redact `Authorization` and `X-Delegated-Session` headers, cookies, and token fields at proxy and application layers. Transitioning out of `VERIFIED` or revoking clears `access_token_hash`, `verified_at`, and `expires_at`. |
+| **M-Pesa payer information** (`mpesa_stk_requests.phone_number`, `payments.payer_phone`, `payments.payer_name`, `unmatched_payments.payer_phone`, `payer_name`, `raw_account_ref`) | Stored in PostgreSQL (RLS-isolated per `school_id`) to initiate STK pushes, display payment confirmation, and allow bursar/AI-assisted matching of unmatched receipts. | Tenant-scoped authorized bursar/admin staff and the paying guardian (for their own STK attempt); never exposed to teachers or unrelated parents. AI reconciliation receives only minimal, scoped facts—never raw phone dumps in prompts. | **Policy decision required:** confirm how long payer phone/name/raw account references may be retained after terminal STK outcome or payment reconciliation, and review cadence for `uncertain`/`unmatched` items. | Mask phone numbers in staff displays and notifications; exclude from telemetry, error payloads, and LLM prompts; redact/anonymize payer contact fields once the controller-confirmed post-settlement/reconciliation window closes (unless covered by a documented legal hold). |
+| **Payment-related personal information & raw payloads** (`payments.raw_payload`, `payments`, `fee_ledgers`, `ledger_entries`, `fee_charges`, `fee_change_notes`) | Canonical billing records (`payments`, `fee_ledgers`, `ledger_entries`, `fee_charges`, `fee_change_notes`) are stored for school accounting and auditability. `payments.raw_payload` stores raw provider callback JSON if ingested. | Tenant- and permission-scoped access only (bursar/admin roles, and guardians scoped to their own children via `student_guardians`). | **Policy decision required:** confirm statutory/financial retention period for canonical accounting records and retention limit for `payments.raw_payload` under Kenyan tax/education/accounting law and school controller policy. | **Never** store or log M-Pesa PINs, API secrets, or authorization headers in `raw_payload` or logs; allowlist callback fields before storage; avoid copying financial/payer details into chat logs; protect via forced RLS and encrypted database backups. |
+| **AI action logs** (`ai_action_logs`) | Stored in PostgreSQL (RLS-isolated per `school_id`) to record structured `feature`, `intent`, `endpoints_read` (JSON array), `action_taken`, and redacted `metadata` for accountability under the AI data boundary. | Tenant-scoped authorized administrators/auditors only; `ai_action_logs` is separate from `AuditLogger` / financial `audit_log` (AC-29 remains pending). | **Policy decision required:** confirm retention period for operational AI action logs and backup retention/deletion propagation rules (other categories like results, attendance, and consent records also require controller-approved schedules). | Allowlist `endpoints_read` (route templates without query strings/IDs) and `metadata` keys; **never** store raw prompts, message transcripts, response bodies, phone numbers, names, payer details, secrets, or token hashes. `ai_action_logs.session_id` is a non-cascading FK to `chat_sessions(school_id, id)`—cleanup must set `session_id = NULL` in the same tenant transaction before deleting expired `chat_sessions`. |
+
+Operational cleanup requirements (pending worker implementation):
+
+- Execute all retention purges and redactions per `school_id` inside tenant-scoped
+  transactions (`SET LOCAL app.school_id`), honoring forced RLS.
+- Purge or redact personal copies across queue payloads, dead-letter jobs,
+  exports, and notification metadata alongside primary table rows.
+- Any legal hold suspending deletion must be documented with scope, owner,
+  reason, and review/expiry date; never suspend deletion indefinitely without
+  review.
+- Tests and examples must use synthetic identities and payer data only.
+- Audit deletion counts and policy outcomes without recording the deleted
+  personal data. Review new metadata keys and provider fields against the
+  redaction rules above before storage.
 
 ## Breach response
 
