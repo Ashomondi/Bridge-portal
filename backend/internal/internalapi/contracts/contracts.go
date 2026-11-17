@@ -5,6 +5,7 @@ package contracts
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,73 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// SQLTx is the minimal query/exec subset needed by shared transactional
+// contracts so callers using pgx.Tx (via PgxTx) or database/sql *sql.Tx (via
+// StdSQLTx) can participate in the same database transaction.
+type SQLTx interface {
+	QueryRowExists(ctx context.Context, query string, args ...any) (bool, error)
+	Exec(ctx context.Context, query string, args ...any) error
+}
+
+type pgxSQLTx struct{ tx pgx.Tx }
+
+// PgxTx adapts a pgx.Tx to SQLTx, returning nil when tx is nil.
+func PgxTx(tx pgx.Tx) SQLTx {
+	if tx == nil {
+		return nil
+	}
+	return pgxSQLTx{tx: tx}
+}
+
+func (p pgxSQLTx) QueryRowExists(ctx context.Context, query string, args ...any) (bool, error) {
+	var exists bool
+	err := p.tx.QueryRow(ctx, query, args...).Scan(&exists)
+	return exists, err
+}
+
+func (p pgxSQLTx) Exec(ctx context.Context, query string, args ...any) error {
+	_, err := p.tx.Exec(ctx, query, args...)
+	return err
+}
+
+type stdSQLTx struct{ tx *sql.Tx }
+
+// StdSQLTx adapts a database/sql *sql.Tx to SQLTx, returning nil when tx is nil.
+func StdSQLTx(tx *sql.Tx) SQLTx {
+	if tx == nil {
+		return nil
+	}
+	return stdSQLTx{tx: tx}
+}
+
+func (s stdSQLTx) QueryRowExists(ctx context.Context, query string, args ...any) (bool, error) {
+	var exists bool
+	err := s.tx.QueryRowContext(ctx, query, args...).Scan(&exists)
+	return exists, err
+}
+
+func (s stdSQLTx) Exec(ctx context.Context, query string, args ...any) error {
+	_, err := s.tx.ExecContext(ctx, query, args...)
+	return err
+}
+
+// InAppNotification is a single transaction-bound in-app notification request.
+type InAppNotification struct {
+	SchoolID        string         `json:"school_id"`
+	RecipientUserID string         `json:"recipient_user_id"`
+	Category        string         `json:"category"`
+	Title           string         `json:"title"`
+	Body            string         `json:"body"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+// InAppNotifier persists an in-app notification inside the caller's active
+// tenant-scoped database transaction so business writes and notices commit or
+// roll back together.
+type InAppNotifier interface {
+	CreateInAppNotification(context.Context, SQLTx, InAppNotification) error
+}
 
 type TenantDB interface {
 	WithTenantTx(context.Context, Principal, func(pgx.Tx) error) error
