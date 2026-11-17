@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   ArrowRight,
   Bell,
   Building2,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   Clock3,
   Copy,
@@ -33,18 +33,27 @@ import { useFocusTrap } from "@/hooks/useFocusTrap";
 import type {
   AdminConnectionsData,
   ConnectionsAuditRow,
+  DarajaCredentialSet,
+  DarajaEnvironment,
 } from "./admin-connections-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
   countKey?: "schools" | "connections" | "unmatchedPayments";
+  href?: string;
   active?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Schools", icon: Building2, countKey: "schools" },
-  { label: "Connections", icon: Link2, countKey: "connections", active: true },
+  { label: "Schools", icon: Building2, countKey: "schools", href: "/admin/schools" },
+  {
+    label: "Connections",
+    icon: Link2,
+    countKey: "connections",
+    href: "/admin/connections",
+    active: true,
+  },
   { label: "Fee Structures", icon: Wallet },
   { label: "Unmatched Payments", icon: AlertTriangle, countKey: "unmatchedPayments" },
   { label: "System Audit", icon: ShieldCheck },
@@ -71,11 +80,11 @@ export default function AdminConnectionsDashboard({
     connections: null,
     unmatchedPayments: null,
   };
-  const [paymentType, setPaymentType] = useState<"paybill" | "till">(
-    data?.daraja?.paymentType ?? "paybill",
+  const [paymentType, setPaymentType] = useState<"paybill" | "till" | null>(
+    data?.daraja?.paymentType ?? null,
   );
-  const [environment, setEnvironment] = useState<"sandbox" | "live">(
-    data?.daraja?.environment ?? "sandbox",
+  const [environment, setEnvironment] = useState<DarajaEnvironment | null>(
+    data?.daraja?.environment ?? null,
   );
 
   useEffect(() => {
@@ -89,6 +98,21 @@ export default function AdminConnectionsDashboard({
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", closeOnDesktop);
+
+    return () => {
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -131,6 +155,7 @@ export default function AdminConnectionsDashboard({
         >
           <PolicyNotice />
           <PageHeader header={data?.header ?? null} />
+          <PreviewNotice />
 
           <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
             <WhatsAppCard whatsapp={data?.whatsapp ?? null} />
@@ -187,7 +212,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-400">
@@ -200,23 +225,19 @@ function SidebarContent({
         </div>
       </div>
 
-      <button
-        type="button"
-        className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left transition hover:border-brand-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-      >
+      <div className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-brand-600 shadow-sm">
-          <Building2 className="h-3.5 w-3.5" />
+          <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-500">
             Active context
           </span>
           <span className="block truncate text-[11px] font-semibold text-slate-700">
             {activeEntity || "No entity selected"}
           </span>
         </span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-      </button>
+      </div>
 
       <p className="mt-6 px-2 text-[8px] font-semibold uppercase tracking-[0.18em] text-slate-400">
         Operations rail
@@ -226,26 +247,22 @@ function SidebarContent({
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const count = item.countKey ? counts[item.countKey] : null;
-
-          return (
-            <a
-              key={item.label}
-              href="#"
-              onClick={onNavigate}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500",
+            item.href
+              ? "hover:bg-slate-50 hover:text-slate-800"
+              : "cursor-not-allowed opacity-70",
+          );
+          const content = (
+            <>
               <Icon
+                aria-hidden="true"
                 className={cn(
                   "h-4 w-4 shrink-0",
-                  item.active
-                    ? "text-brand-600"
-                    : "text-slate-400 group-hover:text-brand-600",
+                  item.active ? "text-brand-600" : "text-slate-500",
                 )}
               />
               <span className="flex-1">{item.label}</span>
@@ -254,7 +271,32 @@ function SidebarContent({
                   {count.toLocaleString("en-GB")}
                 </span>
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <div
+                key={item.label}
+                aria-disabled="true"
+                title="This operations route is not connected yet."
+                className={className}
+              >
+                {content}
+              </div>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              onClick={onNavigate}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -272,10 +314,13 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Sign out"
+            disabled
+            aria-disabled="true"
+            title="Sign out is not connected yet."
+            className="grid h-8 w-8 cursor-not-allowed place-items-center rounded-lg text-slate-500 opacity-60"
+            aria-label="Sign out unavailable"
           >
-            <LogOut className="h-3.5 w-3.5" />
+            <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -300,7 +345,7 @@ function MobileAppBar({
           onClick={onOpenMenu}
           aria-expanded={menuOpen}
           aria-controls="connections-drawer"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           aria-label="Open navigation menu"
         >
           <Menu className="h-5 w-5" />
@@ -318,19 +363,20 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            title="Notifications are not connected yet."
+            className="grid h-10 w-10 cursor-not-allowed place-items-center rounded-xl text-slate-500 opacity-60"
+            aria-label="Notifications unavailable"
           >
-            <Bell className="h-5 w-5" />
-            <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <Bell className="h-5 w-5" aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -376,13 +422,12 @@ function TopBar({
             />
             {gatewayLive ? "Daraja API Live" : "Gateway status unavailable"}
           </span>
-          <button
-            type="button"
-            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -438,13 +483,38 @@ function PageHeader({
         </span>
         <button
           type="button"
-          className="grid h-8 w-8 place-items-center rounded-full border border-slate-200/80 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-          aria-label="Refresh connections"
+          disabled
+          aria-disabled="true"
+          title="Refreshing connections is not connected yet."
+          className="grid h-8 w-8 cursor-not-allowed place-items-center rounded-full border border-slate-200/80 bg-white text-slate-500 opacity-60 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
+          aria-label="Refresh connections unavailable"
         >
-          <RefreshCw className="h-3.5 w-3.5" />
+          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
       </div>
     </div>
+  );
+}
+
+function PreviewNotice() {
+  return (
+    <section
+      role="status"
+      className="mt-3 flex gap-2.5 rounded-xl border border-[#E8C97A] bg-[#FEF3D6] p-3"
+    >
+      <AlertTriangle
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#8A6A25]"
+        aria-hidden="true"
+      />
+      <div className="min-w-0">
+        <p className="text-[9px] font-bold text-[#6D4FA3]">Preview only</p>
+        <p className="mt-0.5 text-[8px] leading-relaxed text-slate-600">
+          Saving credentials and running live service tests are disabled until
+          the backend connection endpoints are wired. Copying the webhook URL
+          and local CSV export remain available.
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -453,18 +523,46 @@ function WhatsAppCard({
 }: {
   whatsapp: AdminConnectionsData["whatsapp"];
 }) {
+  const [copied, setCopied] = useState(false);
+  const webhookUrl = whatsapp?.webhookUrl?.trim() || "";
+  const connectedLabel =
+    whatsapp === null
+      ? "Status unavailable"
+      : whatsapp.connected
+        ? "Connected"
+        : "Not connected";
+  const receivingLabel =
+    whatsapp === null
+      ? "Receiving status unavailable"
+      : whatsapp.receiving
+        ? "Receiving messages"
+        : "Not receiving";
+
+  async function copyWebhookUrl() {
+    if (!webhookUrl) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-center gap-2">
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-[#E2F0ED] text-brand-700">
-            <MessageCircle className="h-4 w-4" />
+            <MessageCircle className="h-4 w-4" aria-hidden="true" />
           </span>
           <div>
             <h2 className="text-sm font-bold tracking-tight text-slate-900">
               WhatsApp Bot Integration
             </h2>
-            <p className="mt-0.5 text-[8px] text-slate-400">
+            <p className="mt-0.5 text-[8px] text-slate-500">
               API version and gateway subtype not loaded
             </p>
           </div>
@@ -473,21 +571,36 @@ function WhatsAppCard({
           <span
             className={cn(
               "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[8px] font-semibold ring-1",
-              whatsapp?.connected
-                ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
-                : "bg-slate-100 text-slate-500 ring-slate-200",
+              whatsapp === null
+                ? "bg-slate-100 text-slate-600 ring-slate-200"
+                : whatsapp.connected
+                  ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+                  : "bg-[#FEF3D6] text-[#8A6A25] ring-[#EBD7A5]",
             )}
           >
             <span
               className={cn(
                 "h-1.5 w-1.5 rounded-full",
-                whatsapp?.connected ? "bg-brand-500" : "bg-slate-400",
+                whatsapp === null
+                  ? "bg-slate-400"
+                  : whatsapp.connected
+                    ? "bg-brand-500"
+                    : "bg-[#D6A84A]",
               )}
             />
-            {whatsapp?.connected ? "Connected" : "Not connected"}
+            {connectedLabel}
           </span>
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
-            {whatsapp?.receiving ? "Receiving messages" : "Not receiving"}
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[8px] font-semibold",
+              whatsapp === null
+                ? "bg-slate-100 text-slate-600"
+                : whatsapp.receiving
+                  ? "bg-[#E2F0ED] text-brand-700"
+                  : "bg-[#FEF3D6] text-[#8A6A25]",
+            )}
+          >
+            {receivingLabel}
           </span>
         </div>
       </div>
@@ -510,7 +623,7 @@ function WhatsAppCard({
               type="tel"
               defaultValue={whatsapp?.displayNumber ?? ""}
               placeholder="Enter display number"
-              className="h-8 min-w-0 flex-1 bg-transparent px-2 text-[10px] text-slate-700 outline-none placeholder:text-slate-400"
+              className="h-8 min-w-0 flex-1 bg-transparent px-2 text-[10px] text-slate-700 outline-none placeholder:text-slate-500"
             />
           </div>
         </label>
@@ -521,18 +634,32 @@ function WhatsAppCard({
           <div className="flex h-9 items-center rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-1">
             <input
               readOnly
-              value={whatsapp?.webhookUrl ?? ""}
+              value={webhookUrl}
               placeholder="No webhook URL configured"
-              className="h-8 min-w-0 flex-1 bg-transparent text-[10px] text-slate-500 outline-none placeholder:text-slate-400"
+              className="h-8 min-w-0 flex-1 bg-transparent text-[10px] text-slate-500 outline-none placeholder:text-slate-500"
             />
             <button
               type="button"
-              disabled={!whatsapp?.webhookUrl}
-              className="inline-flex h-7 items-center gap-1 rounded-md bg-white px-2 text-[8px] font-semibold text-brand-700 shadow-sm ring-1 ring-slate-200/80 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+              onClick={copyWebhookUrl}
+              disabled={!webhookUrl}
+              aria-disabled={!webhookUrl}
+              title={
+                webhookUrl
+                  ? "Copy the inbound webhook URL"
+                  : "No webhook URL to copy"
+              }
+              className="inline-flex h-7 items-center gap-1 rounded-md bg-white px-2 text-[8px] font-semibold text-brand-700 shadow-sm ring-1 ring-slate-200/80 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             >
-              <Copy className="h-2.5 w-2.5" />
-              Copy
+              {copied ? (
+                <CheckCircle2 className="h-2.5 w-2.5" aria-hidden="true" />
+              ) : (
+                <Copy className="h-2.5 w-2.5" aria-hidden="true" />
+              )}
+              {copied ? "Copied" : "Copy"}
             </button>
+            <span className="sr-only" aria-live="polite">
+              {copied ? "Webhook URL copied to clipboard." : ""}
+            </span>
           </div>
         </label>
         <FormInput
@@ -545,24 +672,28 @@ function WhatsAppCard({
         />
       </div>
 
-      <div className="mt-3 flex gap-2 rounded-xl bg-[#E2F0ED] p-3">
-        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-brand-600" />
-        <p className="text-[9px] leading-relaxed text-brand-800">
-          {whatsapp?.lastTestStatus || "No test delivery recorded"}
-        </p>
-      </div>
+      <TestStatusCallout
+        status={whatsapp?.lastTestStatus ?? null}
+        fallback="No test delivery recorded"
+      />
 
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row">
         <button
           type="button"
-          className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          title="Test messages are not connected yet."
+          className="inline-flex h-9 flex-1 cursor-not-allowed items-center justify-center gap-1.5 rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
-          <Send className="h-3 w-3" />
+          <Send className="h-3 w-3" aria-hidden="true" />
           Send test message
         </button>
         <button
           type="button"
-          className="inline-flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white transition hover:bg-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          title="Saving WhatsApp settings is not connected yet."
+          className="inline-flex h-9 flex-1 cursor-not-allowed items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
           Save WhatsApp settings
         </button>
@@ -579,36 +710,55 @@ function DarajaCard({
   onEnvironmentChange,
 }: {
   daraja: AdminConnectionsData["daraja"];
-  paymentType: "paybill" | "till";
-  environment: "sandbox" | "live";
+  paymentType: "paybill" | "till" | null;
+  environment: DarajaEnvironment | null;
   onPaymentTypeChange: (value: "paybill" | "till") => void;
-  onEnvironmentChange: (value: "sandbox" | "live") => void;
+  onEnvironmentChange: (value: DarajaEnvironment) => void;
 }) {
+  const credentials: DarajaCredentialSet | null =
+    environment === "live"
+      ? daraja?.live ?? null
+      : environment === "sandbox"
+        ? daraja?.sandbox ?? null
+        : null;
+  const environmentLabel =
+    environment === "live"
+      ? "Live"
+      : environment === "sandbox"
+        ? "Sandbox"
+        : null;
+  const credentialLabel = environmentLabel ? `${environmentLabel} ` : "";
+  const subtitle =
+    daraja === null
+      ? "Gateway credentials not loaded"
+      : environmentLabel
+        ? `${environmentLabel} credential set`
+        : "Sandbox and live credentials are stored separately";
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-center gap-2">
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-[#F0EBF9] text-[#6D4FA3]">
-            <CreditCard className="h-4 w-4" />
+            <CreditCard className="h-4 w-4" aria-hidden="true" />
           </span>
           <div>
             <h2 className="text-sm font-bold tracking-tight text-slate-900">
               M-Pesa / Daraja Integration
             </h2>
-            <p className="mt-0.5 text-[8px] text-slate-400">
-              Gateway credentials not loaded
-            </p>
+            <p className="mt-0.5 text-[8px] text-slate-500">{subtitle}</p>
           </div>
         </div>
         <div className="flex rounded-full bg-slate-50 p-0.5 ring-1 ring-slate-200/80">
           <button
             type="button"
             onClick={() => onPaymentTypeChange("paybill")}
+            aria-pressed={paymentType === "paybill"}
             className={cn(
-              "rounded-full px-2.5 py-1 text-[8px] font-semibold transition",
+              "rounded-full px-2.5 py-1 text-[8px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
               paymentType === "paybill"
                 ? "bg-white text-brand-700 shadow-sm"
-                : "text-slate-400",
+                : "text-slate-500",
             )}
           >
             Paybill
@@ -616,11 +766,12 @@ function DarajaCard({
           <button
             type="button"
             onClick={() => onPaymentTypeChange("till")}
+            aria-pressed={paymentType === "till"}
             className={cn(
-              "rounded-full px-2.5 py-1 text-[8px] font-semibold transition",
+              "rounded-full px-2.5 py-1 text-[8px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
               paymentType === "till"
                 ? "bg-white text-brand-700 shadow-sm"
-                : "text-slate-400",
+                : "text-slate-500",
             )}
           >
             Till
@@ -630,9 +781,11 @@ function DarajaCard({
 
       <div className="mt-4 grid grid-cols-2 gap-2">
         <FormInput
-          label="Business shortcode"
-          placeholder="Enter shortcode"
-          defaultValue={daraja?.shortcode ?? ""}
+          label={`${credentialLabel}Business shortcode`}
+          placeholder={
+            environment ? "Enter shortcode" : "Select environment first"
+          }
+          defaultValue={credentials?.shortcode ?? ""}
         />
         <div>
           <p className="mb-1 text-[8px] font-semibold text-slate-500">
@@ -642,11 +795,12 @@ function DarajaCard({
             <button
               type="button"
               onClick={() => onEnvironmentChange("sandbox")}
+              aria-pressed={environment === "sandbox"}
               className={cn(
-                "flex-1 rounded-md text-[8px] font-semibold",
+                "flex-1 rounded-md text-[8px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                 environment === "sandbox"
                   ? "bg-white text-brand-700 shadow-sm"
-                  : "text-slate-400",
+                  : "text-slate-500",
               )}
             >
               Sandbox
@@ -654,11 +808,12 @@ function DarajaCard({
             <button
               type="button"
               onClick={() => onEnvironmentChange("live")}
+              aria-pressed={environment === "live"}
               className={cn(
-                "flex-1 rounded-md text-[8px] font-semibold",
+                "flex-1 rounded-md text-[8px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                 environment === "live"
                   ? "bg-[#FEF3D6] text-[#8A6A25] shadow-sm"
-                  : "text-slate-400",
+                  : "text-slate-500",
               )}
             >
               Live
@@ -667,62 +822,138 @@ function DarajaCard({
           <p className="mt-1 text-[7px] text-[#8A6A25]">
             {environment === "live"
               ? "Live mode uses real payment credentials."
-              : "Sandbox mode does not move real money."}
+              : environment === "sandbox"
+                ? "Sandbox mode does not move real money."
+                : "Select an environment to view its credential set."}
           </p>
         </div>
       </div>
 
-      <div className="mt-2.5 space-y-2.5">
+      <div className="mt-2.5 space-y-2.5" key={environment ?? "unset"}>
         <FormInput
-          label="Online passkey (STK key)"
+          label={`${credentialLabel}Online passkey (STK key)`}
           placeholder={
-            daraja?.passkeySet ? "••••••••" : "Enter online passkey"
+            credentials?.passkeySet
+              ? "••••••••"
+              : environment
+                ? "Enter online passkey"
+                : "Select environment first"
           }
           type="password"
-          helper="Stored as a write-only secret."
+          helper={
+            environment
+              ? "Stored as a write-only secret for this environment."
+              : "Select Sandbox or Live to view its separate credentials."
+          }
           icon={Key}
         />
         <div className="grid grid-cols-2 gap-2">
           <FormInput
-            label="Consumer key"
+            label={`${credentialLabel}Consumer key`}
             placeholder={
-              daraja?.consumerKeySet ? "••••••••" : "Enter consumer key"
+              credentials?.consumerKeySet
+                ? "••••••••"
+                : environment
+                  ? "Enter consumer key"
+                  : "Select environment first"
             }
             type="password"
           />
           <FormInput
-            label="Consumer secret"
+            label={`${credentialLabel}Consumer secret`}
             placeholder={
-              daraja?.consumerSecretSet ? "••••••••" : "Enter consumer secret"
+              credentials?.consumerSecretSet
+                ? "••••••••"
+                : environment
+                  ? "Enter consumer secret"
+                  : "Select environment first"
             }
             type="password"
           />
         </div>
       </div>
 
-      <div className="mt-3 flex gap-2 rounded-xl bg-[#E2F0ED] p-3">
-        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-brand-600" />
-        <p className="text-[9px] leading-relaxed text-brand-800">
-          {daraja?.lastTestStatus || "No transaction test recorded"}
-        </p>
-      </div>
+      <TestStatusCallout
+        status={credentials?.lastTestStatus ?? null}
+        fallback="No transaction test recorded"
+      />
 
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row">
         <button
           type="button"
-          className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          title="Live payment tests are not connected yet."
+          className="inline-flex h-9 flex-1 cursor-not-allowed items-center justify-center gap-1.5 rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
-          <ArrowRight className="h-3 w-3" />
+          <ArrowRight className="h-3 w-3" aria-hidden="true" />
           Run test payment
         </button>
         <button
           type="button"
-          className="inline-flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white transition hover:bg-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          disabled
+          aria-disabled="true"
+          title="Saving Daraja settings is not connected yet."
+          className="inline-flex h-9 flex-1 cursor-not-allowed items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
           Save Daraja settings
         </button>
       </div>
     </section>
+  );
+}
+
+/** Renders the test result with success styling only for real successes. */
+function TestStatusCallout({
+  status,
+  fallback,
+}: {
+  status: string | null;
+  fallback: string;
+}) {
+  const value = status?.trim() || "";
+  const failed = /fail|error|declin|invalid|timeout|unauthori[sz]ed|reject|not\s+connected/i.test(
+    value,
+  );
+  const succeeded = /\b(success|successful|delivered|verified|passed|pass|ok)\b/i.test(
+    value,
+  );
+  const tone = failed ? "failure" : succeeded ? "success" : "neutral";
+  const label = value || fallback;
+  const Icon =
+    tone === "success" ? CheckCircle2 : tone === "failure" ? AlertTriangle : Clock3;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "mt-3 flex gap-2 rounded-xl p-3",
+        tone === "success" && "bg-[#E2F0ED]",
+        tone === "failure" && "bg-[#FEF3D6]",
+        tone === "neutral" && "bg-slate-50",
+      )}
+    >
+      <Icon
+        className={cn(
+          "h-3.5 w-3.5 shrink-0",
+          tone === "success" && "text-brand-600",
+          tone === "failure" && "text-[#D6A84A]",
+          tone === "neutral" && "text-slate-500",
+        )}
+        aria-hidden="true"
+      />
+      <p
+        className={cn(
+          "text-[9px] leading-relaxed",
+          tone === "success" && "text-brand-800",
+          tone === "failure" && "text-[#8A6A25]",
+          tone === "neutral" && "text-slate-600",
+        )}
+      >
+        {label}
+      </p>
+    </div>
   );
 }
 
@@ -791,11 +1022,18 @@ function AuditTable({ rows }: { rows: ConnectionsAuditRow[] }) {
           </span>
           <button
             type="button"
+            onClick={() => exportAuditCsv(rows)}
             disabled={rows.length === 0}
-            className="grid h-8 w-8 place-items-center rounded-lg border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            aria-disabled={rows.length === 0}
+            title={
+              rows.length === 0
+                ? "There are no audit rows to export."
+                : "Download the audit history as CSV."
+            }
+            className="grid h-8 w-8 place-items-center rounded-lg border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             aria-label="Download audit CSV"
           >
-            <Download className="h-3.5 w-3.5" />
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -896,6 +1134,46 @@ function AuditTable({ rows }: { rows: ConnectionsAuditRow[] }) {
   );
 }
 
+/** Escapes CSV cells and neutralises spreadsheet formula injection. */
+function csvCell(value: string) {
+  const text = value ?? "";
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+/** Downloads the audit history as a CSV file. */
+function exportAuditCsv(rows: ConnectionsAuditRow[]) {
+  const header = ["Timestamp", "Operator", "Role", "Event", "Secrets Status"];
+  const lines = [
+    header.map(csvCell).join(","),
+    ...rows.map((row) =>
+      [
+        row.timestamp,
+        row.operator,
+        row.role,
+        row.event,
+        row.statusLabel,
+      ]
+        .map(csvCell)
+        .join(","),
+    ),
+  ];
+  const blob = new Blob([`\uFEFF${lines.join("\r\n")}`], {
+    type: "text/csv;charset=utf-8;",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `connection-audit-${new Date()
+    .toISOString()
+    .slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function AuditBadge({ row }: { row: ConnectionsAuditRow }) {
   return (
     <span
@@ -981,7 +1259,7 @@ function MobileDrawer({
             type="button"
             onClick={onClose}
             data-autofocus
-            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />

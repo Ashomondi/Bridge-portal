@@ -11,6 +11,16 @@ export type ConnectionsAuditRow = {
   statusLabel: string;
 };
 
+export type DarajaEnvironment = "sandbox" | "live";
+
+export type DarajaCredentialSet = {
+  shortcode: string | null;
+  passkeySet: boolean;
+  consumerKeySet: boolean;
+  consumerSecretSet: boolean;
+  lastTestStatus: string | null;
+};
+
 export type AdminConnectionsData = {
   portal: {
     name: string | null;
@@ -46,13 +56,10 @@ export type AdminConnectionsData = {
     lastTestStatus: string | null;
   } | null;
   daraja: {
-    paymentType: "paybill" | "till";
-    environment: "sandbox" | "live";
-    shortcode: string | null;
-    passkeySet: boolean;
-    consumerKeySet: boolean;
-    consumerSecretSet: boolean;
-    lastTestStatus: string | null;
+    paymentType: "paybill" | "till" | null;
+    environment: DarajaEnvironment | null;
+    sandbox: DarajaCredentialSet | null;
+    live: DarajaCredentialSet | null;
   } | null;
   auditRows: ConnectionsAuditRow[];
 };
