@@ -37,7 +37,9 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
 - Backend build & static check:
   `cd backend && go mod verify && go build ./... && go vet ./...`
 - Backend unit tests (no database required):
-  `cd backend && go test -count=1 -v ./internal/internalapi/contracts`
+  `cd backend && go test -count=1 -v ./internal/internalapi/contracts ./internal/academics`
+  and SMS transport unit tests:
+  `cd backend && go test -count=1 -v ./internal/notifications -run 'Test(AfricaTalking|SMS|Normalize|Sandbox|Transactional)'`
 - PostgreSQL 16 integration tests: start an isolated PostgreSQL 16 test server
   (e.g., `docker compose up -d --wait postgres` from the repo root), configure
   `DEV05_TEST_DATABASE_URL`, and run all tests with `CI=true` so database tests
@@ -45,6 +47,10 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
   ```sh
   export DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'
   cd backend && CI=true go test -count=1 -v ./...
+  ```
+  Run notification integration tests specifically with:
+  ```sh
+  cd backend && CI=true DEV05_TEST_DATABASE_URL="$DEV05_TEST_DATABASE_URL" go test -count=1 -v ./internal/notifications
   ```
   Adjust the URL for your local credentials/port. Use a dedicated local test
   server with a superuser capable of creating/dropping disposable `dev05_*`
@@ -107,6 +113,29 @@ These override convenience or "helpfulness" in any single task. See
   without a wired durable implementation.
 - Naming conventions (DB, API, frontend): `TODO`
 - Commit message style: `TODO`
+- Notifications package (`backend/internal/notifications`):
+  - **SMS purpose restrictions (`C58`):** `SMSDispatcher` only accepts
+    `app_login`, `whatsapp_session` (Release 3 reserved purpose key),
+    `phone_change`, and `phone_change_notice`. Never add event notifications
+    (`absence`, `sickbay`, results, timetable, calendar, fee reminders) to the
+    Release 1 SMS transport; those go to `in_app_notifications`.
+  - **Provider security:** Normalize phones via `NormalizePhone`; never log
+    message bodies, OTPs, full phone numbers, `APIKey`, or raw provider
+    responses; preserve `http.ErrUseLastResponse` redirect blocking, copied
+    HTTP clients with explicit timeouts, 64 KiB response bounds, and safe
+    `*SMSDeliveryError{Code, Retryable}` error classification.
+  - **Tenant transactions:** `notifications.Service.List` and `MarkRead` must
+    receive a `contracts.Principal` from `contracts.RequireIdentity` and pass it
+    to `contracts.TenantDB.WithTenantTx(ctx, principal, fn)` — never pass a raw
+    school ID string or accept school overrides from request inputs.
+  - **Transaction-bound in-app notifications:** Implement and consume
+    `contracts.InAppNotifier` (`CreateInAppNotification(context.Context,
+    contracts.SQLTx, contracts.InAppNotification) error`) inside the caller's
+    active tenant transaction (`contracts.PgxTx(tx)` or `contracts.StdSQLTx(tx)`),
+    verifying `var _ contracts.InAppNotifier = (*notifications.Service)(nil)` at
+    compile time. Never start a separate transaction inside `CreateInAppNotification`,
+    never send SMS from it, and always propagate mandatory notification errors
+    so the caller's transaction rolls back atomically.
 
 ## Where to look before asking the user
 
