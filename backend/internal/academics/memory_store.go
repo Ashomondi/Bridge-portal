@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // MemoryStore is a deterministic in-memory Store used by the unit tests and by
@@ -62,11 +64,31 @@ func NewMemoryStore() *MemoryStore {
 
 func key(parts ...string) string { return strings.Join(parts, "|") }
 
+type memoryNotificationTx struct{}
+
+func (memoryNotificationTx) QueryRowExists(context.Context, string, ...any) (bool, error) {
+	return false, nil
+}
+func (memoryNotificationTx) Exec(context.Context, string, ...any) error { return nil }
+
+type memoryTxStore struct {
+	*MemoryStore
+}
+
+func (m *memoryTxStore) NotificationTx() contracts.SQLTx {
+	return memoryNotificationTx{}
+}
+
 // WithTx executes fn. The memory store has no real transaction to commit; the
 // service layer validates before writing, and tests exercise the same service
 // paths as production.
 func (m *MemoryStore) WithTx(_ context.Context, _ string, fn func(tx Store) error) error {
-	return fn(m)
+	return fn(&memoryTxStore{MemoryStore: m})
+}
+
+// NotificationTx returns nil outside WithTx.
+func (m *MemoryStore) NotificationTx() contracts.SQLTx {
+	return nil
 }
 
 // ---- Seeding helpers used by tests, demos and the synthetic-data mandate. ----

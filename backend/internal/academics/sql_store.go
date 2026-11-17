@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // SQLStore is the PostgreSQL implementation of Store. It uses database/sql so
@@ -54,6 +56,11 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 		return err
 	}
 	return tx.Commit()
+}
+
+// NotificationTx returns the active *sql.Tx adapted to contracts.SQLTx.
+func (s *SQLStore) NotificationTx() contracts.SQLTx {
+	return contracts.StdSQLTx(s.tx)
 }
 
 func (s *SQLStore) CurrentAcademicYearID(ctx context.Context, schoolID string) (string, error) {

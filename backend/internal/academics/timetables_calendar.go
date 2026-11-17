@@ -74,8 +74,6 @@ func (s *Service) PutTimetable(ctx context.Context, req TimetableRequest) (Timet
 	}
 
 	var saved []TimetableSlot
-	var teacherRecipients []string
-	var guardianRecipients []string
 	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
 		term, err := tx.TermByID(ctx, actor.SchoolID, req.TermID)
 		if err != nil {
@@ -147,27 +145,35 @@ func (s *Service) PutTimetable(ctx context.Context, req TimetableRequest) (Timet
 		}
 		saved = slots
 
+		var recipients []string
 		for _, slot := range slots {
-			if mem, err := tx.MembershipByID(ctx, actor.SchoolID, slot.TeacherMembershipID); err == nil {
-				teacherRecipients = append(teacherRecipients, mem.UserID)
+			mem, err := tx.MembershipByID(ctx, actor.SchoolID, slot.TeacherMembershipID)
+			if err != nil {
+				return err
 			}
+			recipients = append(recipients, mem.UserID)
 		}
-		guardianRecipients, _ = tx.GuardianIDsForClass(ctx, actor.SchoolID, req.ClassID)
+		guardianRecipients, err := tx.GuardianIDsForClass(ctx, actor.SchoolID, req.ClassID)
+		if err != nil {
+			return err
+		}
+		recipients = append(recipients, guardianRecipients...)
 
-		return s.audit(ctx, tx, actor, "timetable_updated", "class", class.ID, map[string]any{
+		if err := s.audit(ctx, tx, actor, "timetable_updated", "class", class.ID, map[string]any{
 			"term_id":    req.TermID,
 			"slot_count": len(slots),
-		})
+		}); err != nil {
+			return err
+		}
+		_, err = s.notifyMany(ctx, tx, actor.SchoolID, recipients, "academics.timetable",
+			"Timetable updated",
+			"The class timetable has been updated. Open the app to see the new lesson times.",
+			map[string]any{"class_id": req.ClassID, "term_id": req.TermID})
+		return err
 	})
 	if err != nil {
 		return TimetableResponse{}, err
 	}
-
-	recipients := append(append([]string{}, teacherRecipients...), guardianRecipients...)
-	_, _ = s.notifyMany(ctx, actor.SchoolID, recipients, "academics.timetable",
-		"Timetable updated",
-		"The class timetable has been updated. Open the app to see the new lesson times.",
-		map[string]any{"class_id": req.ClassID, "term_id": req.TermID})
 
 	return TimetableResponse{TermID: req.TermID, ClassID: req.ClassID, Slots: saved}, nil
 }
@@ -331,7 +337,6 @@ func (s *Service) PutCalendar(ctx context.Context, req CalendarRequest) (Calenda
 	}
 
 	out := CalendarResponse{Updated: true}
-	var recipients []string
 	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
 		for _, update := range validated {
 			startChanged := !dateOnly(update.start).Equal(dateOnly(update.old.StartDate))
@@ -405,20 +410,28 @@ func (s *Service) PutCalendar(ctx context.Context, req CalendarRequest) (Calenda
 			}
 		}
 		if len(events) > 0 {
-			recipients, _ = tx.GuardianIDsForSchool(ctx, actor.SchoolID)
-			staff, _ := tx.StaffUserIDsForSchool(ctx, actor.SchoolID)
-			recipients = append(recipients, staff...)
+			guardians, err := tx.GuardianIDsForSchool(ctx, actor.SchoolID)
+			if err != nil {
+				return err
+			}
+			staff, err := tx.StaffUserIDsForSchool(ctx, actor.SchoolID)
+			if err != nil {
+				return err
+			}
+			recipients := append(guardians, staff...)
+			if len(recipients) > 0 {
+				if _, err := s.notifyMany(ctx, tx, actor.SchoolID, recipients, "academics.calendar",
+					"School calendar updated",
+					"The school calendar or term dates have been updated. Open the app for details.",
+					map[string]any{}); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return CalendarResponse{}, err
-	}
-	if len(recipients) > 0 {
-		_, _ = s.notifyMany(ctx, actor.SchoolID, recipients, "academics.calendar",
-			"School calendar updated",
-			"The school calendar or term dates have been updated. Open the app for details.",
-			map[string]any{})
 	}
 
 	// Return the fresh calendar after updates.
