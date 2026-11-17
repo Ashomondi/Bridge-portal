@@ -1,5 +1,8 @@
+export type UnmatchedTransactionStatus = "unmatched" | "matched";
+
 export type UnmatchedTransaction = {
   id: string;
+  status: UnmatchedTransactionStatus;
   received: string;
   amount: string;
   reference: string;
@@ -31,6 +34,13 @@ export type LedgerPreview = {
   progress: number;
 };
 
+export type PaymentInspectorData = {
+  student: DirectoryCandidate | null;
+  ledger: LedgerPreview | null;
+  overpaymentWarning: string | null;
+  auditReasonRequired: boolean;
+};
+
 export type AdminUnmatchedData = {
   portal: {
     name: string | null;
@@ -52,6 +62,11 @@ export type AdminUnmatchedData = {
     connections: number | null;
     unmatchedPayments: number | null;
   };
+  trust: {
+    livePolling: boolean | null;
+    signatureVerification: boolean | null;
+    assignmentAudit: boolean | null;
+  } | null;
   header: {
     entityName: string | null;
     description: string | null;
@@ -67,14 +82,36 @@ export type AdminUnmatchedData = {
   };
   transactions: UnmatchedTransaction[];
   metrics: UnmatchedMetric[];
-  inspector: {
-    student: DirectoryCandidate | null;
-    ledger: LedgerPreview | null;
-    overpaymentWarning: string | null;
-    auditReasonRequired: boolean;
-  } | null;
+  /** Inspector data keyed by transaction id so selections never go stale. */
+  inspectors: Record<string, PaymentInspectorData>;
   queue: {
     status: string | null;
     allClear: boolean;
   } | null;
 };
+
+export type UnmatchedTab = "unmatched" | "matched" | "all";
+
+/** Filters the payment list by tab status and a case-insensitive search query. */
+export function filterUnmatchedTransactions(
+  transactions: UnmatchedTransaction[],
+  tab: UnmatchedTab,
+  query: string,
+) {
+  const needle = query.trim().toLowerCase();
+
+  return transactions.filter((transaction) => {
+    const matchesTab = tab === "all" || transaction.status === tab;
+    const searchable = [
+      transaction.received,
+      transaction.amount,
+      transaction.reference,
+      transaction.note,
+      transaction.phone,
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return matchesTab && (!needle || searchable.includes(needle));
+  });
+}

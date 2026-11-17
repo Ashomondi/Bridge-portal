@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
@@ -26,23 +27,34 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
-import type { AdminUnmatchedData } from "./admin-unmatched-data";
+import {
+  filterUnmatchedTransactions,
+  type AdminUnmatchedData,
+  type PaymentInspectorData,
+} from "./admin-unmatched-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
   countKey?: "schools" | "connections" | "unmatchedPayments";
+  href?: string;
   active?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Schools", icon: Building2, countKey: "schools" },
-  { label: "Connections", icon: Link2, countKey: "connections" },
-  { label: "Fee Structures", icon: Wallet },
+  { label: "Schools", icon: Building2, countKey: "schools", href: "/admin/schools" },
+  {
+    label: "Connections",
+    icon: Link2,
+    countKey: "connections",
+    href: "/admin/connections",
+  },
+  { label: "Fee Structures", icon: Wallet, href: "/admin/fees" },
   {
     label: "Unmatched Payments",
     icon: AlertTriangle,
     countKey: "unmatchedPayments",
+    href: "/admin/unmatched-payments",
     active: true,
   },
   { label: "System Audit", icon: ShieldCheck },
@@ -74,15 +86,60 @@ export default function AdminUnmatchedPaymentsDashboard({
     connections: null,
     unmatchedPayments: null,
   };
-  const transactions = data?.transactions ?? [];
+  const transactions = useMemo(
+    () => data?.transactions ?? [],
+    [data?.transactions],
+  );
   const metrics = data?.metrics ?? [];
+  const tabs = useMemo(
+    () => data?.tabs ?? { unmatched: null, matched: null, all: null },
+    [data?.tabs],
+  );
+  const [searchQuery, setSearchQuery] = useState("");
+  const visibleTransactions = useMemo(
+    () => filterUnmatchedTransactions(transactions, activeTab, searchQuery),
+    [transactions, activeTab, searchQuery],
+  );
   const [selectedId, setSelectedId] = useState(
-    transactions[0]?.id ?? "",
+    visibleTransactions[0]?.id ?? "",
   );
   const selected = useMemo(
-    () => transactions.find((row) => row.id === selectedId) ?? null,
-    [selectedId, transactions],
+    () =>
+      visibleTransactions.find((row) => row.id === selectedId) ?? null,
+    [selectedId, visibleTransactions],
   );
+  const inspector = selectedId
+    ? data?.inspectors?.[selectedId] ?? null
+    : null;
+
+  useEffect(() => {
+    if (visibleTransactions.length === 0) {
+      if (selectedId) {
+        setSelectedId("");
+      }
+      return;
+    }
+
+    if (!visibleTransactions.some((row) => row.id === selectedId)) {
+      setSelectedId(visibleTransactions[0].id);
+    }
+  }, [visibleTransactions, selectedId]);
+
+  useEffect(() => {
+    const tab = tabs[activeTab];
+
+    if (tab !== null && tab > 0) {
+      return;
+    }
+
+    const fallback = (["unmatched", "matched", "all"] as const).find(
+      (candidate) => (tabs[candidate] ?? 0) > 0,
+    );
+
+    if (fallback && fallback !== activeTab) {
+      setActiveTab(fallback);
+    }
+  }, [activeTab, tabs]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -95,6 +152,21 @@ export default function AdminUnmatchedPaymentsDashboard({
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", closeOnDesktop);
+
+    return () => {
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -136,29 +208,30 @@ export default function AdminUnmatchedPaymentsDashboard({
           className="mx-auto w-full max-w-[1440px] px-4 pb-10 pt-20 sm:px-6 lg:px-8 lg:pt-7"
         >
           <PageHeader header={data?.header ?? null} />
-          <ViewTabs
-            activeTab={activeTab}
-            tabs={
-              data?.tabs ?? { unmatched: null, matched: null, all: null }
-            }
-            onChange={setActiveTab}
+          <PreviewNotice />
+          <ViewTabs activeTab={activeTab} tabs={tabs} onChange={setActiveTab} />
+          <FilterToolbar
+            termLabel={data?.filter?.termLabel ?? null}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
           />
-          <FilterToolbar termLabel={data?.filter.termLabel ?? null} />
 
           <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,1fr)]">
             <div className="min-w-0 space-y-4">
               <IncomingStreamTable
-                transactions={transactions}
+                transactions={visibleTransactions}
                 selectedId={selectedId}
+                trust={data?.trust ?? null}
                 onSelect={setSelectedId}
               />
               <MetricsGrid metrics={metrics} />
-              <AuditGuarantee />
+              <AuditGuarantee trust={data?.trust ?? null} />
             </div>
             <div className="min-w-0 xl:sticky xl:top-[84px] xl:self-start">
               <PaymentInspector
+                key={selected?.id ?? "no-payment"}
                 transaction={selected}
-                inspector={data?.inspector ?? null}
+                inspector={inspector}
               />
             </div>
           </div>
@@ -207,7 +280,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-400">
@@ -220,23 +293,19 @@ function SidebarContent({
         </div>
       </div>
 
-      <button
-        type="button"
-        className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left transition hover:border-brand-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-      >
+      <div className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-brand-600 shadow-sm">
-          <Building2 className="h-3.5 w-3.5" />
+          <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-500">
             Active context
           </span>
           <span className="block truncate text-[11px] font-semibold text-slate-700">
             {activeEntity || "No entity selected"}
           </span>
         </span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-      </button>
+      </div>
 
       <p className="mt-6 px-2 text-[8px] font-semibold uppercase tracking-[0.18em] text-slate-400">
         Operations rail
@@ -246,26 +315,22 @@ function SidebarContent({
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const count = item.countKey ? counts[item.countKey] : null;
-
-          return (
-            <a
-              key={item.label}
-              href="#"
-              onClick={onNavigate}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500",
+            item.href
+              ? "hover:bg-slate-50 hover:text-slate-800"
+              : "cursor-not-allowed opacity-70",
+          );
+          const content = (
+            <>
               <Icon
+                aria-hidden="true"
                 className={cn(
                   "h-4 w-4 shrink-0",
-                  item.active
-                    ? "text-brand-600"
-                    : "text-slate-400 group-hover:text-brand-600",
+                  item.active ? "text-brand-600" : "text-slate-500",
                 )}
               />
               <span className="flex-1">{item.label}</span>
@@ -274,7 +339,32 @@ function SidebarContent({
                   {count.toLocaleString("en-GB")}
                 </span>
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <div
+                key={item.label}
+                aria-disabled="true"
+                title="This operations route is not connected yet."
+                className={className}
+              >
+                {content}
+              </div>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              onClick={onNavigate}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -292,10 +382,13 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Sign out"
+            disabled
+            aria-disabled="true"
+            title="Sign out is not connected yet."
+            className="grid h-8 w-8 cursor-not-allowed place-items-center rounded-lg text-slate-500 opacity-60"
+            aria-label="Sign out unavailable"
           >
-            <LogOut className="h-3.5 w-3.5" />
+            <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -320,7 +413,7 @@ function MobileAppBar({
           onClick={onOpenMenu}
           aria-expanded={menuOpen}
           aria-controls="unmatched-drawer"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           aria-label="Open navigation menu"
         >
           <Menu className="h-5 w-5" />
@@ -338,19 +431,20 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            title="Notifications are not connected yet."
+            className="grid h-10 w-10 cursor-not-allowed place-items-center rounded-xl text-slate-500 opacity-60"
+            aria-label="Notifications unavailable"
           >
-            <Bell className="h-5 w-5" />
-            <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <Bell className="h-5 w-5" aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -396,13 +490,12 @@ function TopBar({
             />
             {gatewayLive ? "Daraja API Live" : "Gateway status unavailable"}
           </span>
-          <button
-            type="button"
-            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -452,6 +545,27 @@ function PageHeader({
   );
 }
 
+function PreviewNotice() {
+  return (
+    <section
+      role="status"
+      className="mt-3 flex gap-2.5 rounded-xl border border-[#E8C97A] bg-[#FEF3D6] p-3"
+    >
+      <AlertTriangle
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#8A6A25]"
+        aria-hidden="true"
+      />
+      <div className="min-w-0">
+        <p className="text-[9px] font-bold text-[#6D4FA3]">Preview only</p>
+        <p className="mt-0.5 text-[8px] leading-relaxed text-slate-600">
+          Holding, assigning and refreshing transactions are disabled until the
+          reconciliation write endpoints are connected.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 function ViewTabs({
   activeTab,
   tabs,
@@ -470,57 +584,94 @@ function ViewTabs({
   return (
     <div className="mt-4 rounded-full bg-[#E8F5F3] p-1">
       <div className="grid grid-cols-3 gap-1" role="tablist" aria-label="Payment views">
-        {items.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            onClick={() => onChange(tab.id)}
-            className={cn(
-              "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
-              activeTab === tab.id
-                ? "bg-white text-brand-700 shadow-sm"
-                : "text-slate-400",
-            )}
-          >
-            {tab.label}
-            <span className="rounded-full bg-[#FEF3D6] px-1.5 py-0.5 text-[7px] text-[#8A6A25]">
-              {tab.count === null ? "—" : tab.count.toLocaleString("en-GB")}
-            </span>
-          </button>
-        ))}
+        {items.map((tab) => {
+          const disabled = tab.count === null || tab.count === 0;
+
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              disabled={disabled}
+              aria-disabled={disabled}
+              title={
+                disabled
+                  ? tab.count === null
+                    ? `${tab.label} count unavailable`
+                    : `No ${tab.label.toLowerCase()} payments`
+                  : `Show ${tab.label.toLowerCase()} payments`
+              }
+              onClick={() => onChange(tab.id)}
+              className={cn(
+                "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+                activeTab === tab.id
+                  ? "bg-white text-brand-700 shadow-sm"
+                  : "text-slate-500",
+                disabled && "cursor-not-allowed opacity-50",
+              )}
+            >
+              {tab.label}
+              <span className="rounded-full bg-[#FEF3D6] px-1.5 py-0.5 text-[7px] text-[#8A6A25]">
+                {tab.count === null
+                  ? "Unavailable"
+                  : tab.count.toLocaleString("en-GB")}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function FilterToolbar({ termLabel }: { termLabel: string | null }) {
+function FilterToolbar({
+  termLabel,
+  searchQuery,
+  onSearchChange,
+}: {
+  termLabel: string | null;
+  searchQuery: string;
+  onSearchChange: (value: string) => void;
+}) {
   return (
     <section className="mt-3 flex flex-col gap-2 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card sm:flex-row sm:items-center">
       <label className="relative shrink-0 sm:w-52">
+        <span className="sr-only">Academic term</span>
         <select
           disabled={!termLabel}
-          className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] font-semibold text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+          className="h-9 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] font-semibold text-slate-600 outline-none focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <option>{termLabel || "No active term"}</option>
         </select>
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
+        <ChevronDown
+          className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500"
+          aria-hidden="true"
+        />
       </label>
       <label className="relative min-w-0 flex-1">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
+        <span className="sr-only">Search transactions</span>
+        <Search
+          className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500"
+          aria-hidden="true"
+        />
         <input
           type="search"
+          value={searchQuery}
+          onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search transactions..."
-          className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-8 pr-2.5 text-[9px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10"
+          className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-8 pr-2.5 text-[9px] text-slate-700 outline-none placeholder:text-slate-500 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20"
         />
       </label>
       <button
         type="button"
-        className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-slate-200/80 bg-white text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-        aria-label="Refresh transactions"
+        disabled
+        aria-disabled="true"
+        title="Refreshing transactions is not connected yet."
+        className="grid h-9 w-9 shrink-0 cursor-not-allowed place-items-center rounded-lg border border-slate-200/80 bg-white text-slate-500 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
+        aria-label="Refresh transactions unavailable"
       >
-        <RefreshCw className="h-3.5 w-3.5" />
+        <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
       </button>
     </section>
   );
@@ -529,12 +680,27 @@ function FilterToolbar({ termLabel }: { termLabel: string | null }) {
 function IncomingStreamTable({
   transactions,
   selectedId,
+  trust,
   onSelect,
 }: {
   transactions: AdminUnmatchedData["transactions"];
   selectedId: string;
+  trust: AdminUnmatchedData["trust"];
   onSelect: (id: string) => void;
 }) {
+  const pollingLabel =
+    trust?.livePolling === true
+      ? "Live polling active"
+      : trust?.livePolling === false
+        ? "Live polling inactive"
+        : "Polling status unavailable";
+  const signatureLabel =
+    trust?.signatureVerification === true
+      ? "Cryptographic signature verification active"
+      : trust?.signatureVerification === false
+        ? "Signature verification inactive"
+        : "Signature verification status unavailable";
+
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -542,21 +708,20 @@ function IncomingStreamTable({
           <h2 className="text-sm font-bold tracking-tight text-slate-900">
             Incoming Paybill Stream
           </h2>
-          <p className="mt-0.5 text-[8px] text-slate-400">
-            Live polling active
-          </p>
+          <p className="mt-0.5 text-[8px] text-slate-500">{pollingLabel}</p>
         </div>
         <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[#FEF3D6] px-2.5 py-1 text-[8px] font-semibold text-[#8A6A25] ring-1 ring-[#EBD7A5]">
-          <AlertTriangle className="h-3 w-3" />
+          <AlertTriangle className="h-3 w-3" aria-hidden="true" />
           {transactions.length} requires manual triage
         </span>
       </div>
 
       {transactions.length > 0 ? (
         <div className="mt-3 overflow-x-auto rounded-xl border border-slate-100">
-          <table className="min-w-[600px] w-full border-collapse text-left">
+          <table className="min-w-[650px] w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-slate-100 bg-[#F8F9FA]">
+                <TableHeading>Select</TableHeading>
                 <TableHeading>Received</TableHeading>
                 <TableHeading align="right">Amount</TableHeading>
                 <TableHeading>Reference</TableHeading>
@@ -565,36 +730,56 @@ function IncomingStreamTable({
               </tr>
             </thead>
             <tbody>
-              {transactions.map((row) => (
-                <tr
-                  key={row.id}
-                  onClick={() => onSelect(row.id)}
-                  className={cn(
-                    "cursor-pointer border-b border-slate-100 transition last:border-0",
-                    selectedId === row.id
-                      ? "bg-[#F1FAF8]"
-                      : "hover:bg-slate-50/70",
-                  )}
-                >
-                  <td className="px-3 py-3 text-[9px] font-medium text-slate-600">
-                    {row.received}
-                  </td>
-                  <td className="px-3 py-3 text-right text-[10px] font-bold tabular-nums text-brand-700">
-                    {row.amount}
-                  </td>
-                  <td className="px-3 py-3 text-[9px] font-semibold text-slate-600">
-                    {row.reference}
-                  </td>
-                  <td className="px-3 py-3">
-                    <span className="rounded-lg bg-[#F0EBF9] px-2 py-1 text-[8px] font-medium text-[#6D4FA3]">
-                      {row.note}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3 text-[9px] text-slate-500">
-                    {row.phone}
-                  </td>
-                </tr>
-              ))}
+              {transactions.map((row) => {
+                const selected = selectedId === row.id;
+
+                return (
+                  <tr
+                    key={row.id}
+                    className={cn(
+                      "border-b border-slate-100 last:border-0",
+                      selected ? "bg-[#F1FAF8]" : "hover:bg-slate-50/70",
+                    )}
+                  >
+                    <td className="px-3 py-3">
+                      <button
+                        type="button"
+                        onClick={() => onSelect(row.id)}
+                        aria-pressed={selected}
+                        aria-label={`Select payment ${row.reference}`}
+                        className={cn(
+                          "inline-flex h-7 items-center gap-1 rounded-lg border px-2 text-[8px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+                          selected
+                            ? "border-brand-600 bg-brand-500 text-white"
+                            : "border-slate-200/80 bg-white text-slate-600 hover:bg-slate-50",
+                        )}
+                      >
+                        {selected && (
+                          <Check className="h-2.5 w-2.5" aria-hidden="true" />
+                        )}
+                        {selected ? "Selected" : "Select"}
+                      </button>
+                    </td>
+                    <td className="px-3 py-3 text-[9px] font-medium text-slate-600">
+                      {row.received}
+                    </td>
+                    <td className="px-3 py-3 text-right text-[10px] font-bold tabular-nums text-brand-700">
+                      {row.amount}
+                    </td>
+                    <td className="px-3 py-3 text-[9px] font-semibold text-slate-600">
+                      {row.reference}
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className="rounded-lg bg-[#F0EBF9] px-2 py-1 text-[8px] font-medium text-[#6D4FA3]">
+                        {row.note}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 text-[9px] text-slate-500">
+                      {row.phone}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -607,10 +792,23 @@ function IncomingStreamTable({
         />
       )}
 
-      <div className="mt-2.5 flex flex-col gap-1 text-[8px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-        <span className="inline-flex items-center gap-1">
-          <ShieldCheck className="h-3 w-3 text-brand-600" />
-          Cryptographic signature verification active
+      <div className="mt-2.5 flex flex-col gap-1 text-[8px] text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+        <span
+          className={cn(
+            "inline-flex items-center gap-1",
+            trust?.signatureVerification === true
+              ? "text-brand-700"
+              : trust?.signatureVerification === false
+                ? "text-[#8A6A25]"
+                : "text-slate-500",
+          )}
+        >
+          {trust?.signatureVerification === false ? (
+            <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+          ) : (
+            <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+          )}
+          {signatureLabel}
         </span>
         <span>{transactions.length} visible transactions</span>
       </div>
@@ -676,12 +874,49 @@ function MetricsGrid({ metrics }: { metrics: AdminUnmatchedData["metrics"] }) {
   );
 }
 
-function AuditGuarantee() {
+function AuditGuarantee({ trust }: { trust: AdminUnmatchedData["trust"] }) {
+  const assignmentAudit = trust?.assignmentAudit ?? null;
+  const label =
+    assignmentAudit === true
+      ? "Every assignment is timestamped and signed by the operator."
+      : assignmentAudit === false
+        ? "Assignment audit signing is disabled."
+        : "Assignment audit status unavailable.";
+  const Icon = assignmentAudit === true ? ShieldCheck : AlertTriangle;
+
   return (
-    <div className="flex gap-2.5 rounded-2xl border border-brand-100 bg-[#E2F0ED] p-3.5">
-      <ShieldCheck className="h-4 w-4 shrink-0 text-brand-600" />
-      <p className="text-[9px] leading-relaxed text-brand-800">
-        Every assignment is timestamped and signed by the operator.
+    <div
+      className={cn(
+        "flex gap-2.5 rounded-2xl border p-3.5",
+        assignmentAudit === true
+          ? "border-brand-100 bg-[#E2F0ED]"
+          : assignmentAudit === false
+            ? "border-[#EBD7A5] bg-[#FEF3D6]"
+            : "border-slate-200 bg-slate-50",
+      )}
+    >
+      <Icon
+        className={cn(
+          "h-4 w-4 shrink-0",
+          assignmentAudit === true
+            ? "text-brand-600"
+            : assignmentAudit === false
+              ? "text-[#8A6A25]"
+              : "text-slate-500",
+        )}
+        aria-hidden="true"
+      />
+      <p
+        className={cn(
+          "text-[9px] leading-relaxed",
+          assignmentAudit === true
+            ? "text-brand-800"
+            : assignmentAudit === false
+              ? "text-[#8A6A25]"
+              : "text-slate-600",
+        )}
+      >
+        {label}
       </p>
     </div>
   );
@@ -692,14 +927,16 @@ function PaymentInspector({
   inspector,
 }: {
   transaction: AdminUnmatchedData["transactions"][number] | null;
-  inspector: AdminUnmatchedData["inspector"];
+  inspector: PaymentInspectorData | null;
 }) {
+  const [reason, setReason] = useState("");
+
   if (!transaction) {
     return (
       <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
         <div className="flex items-center gap-2">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600">
-            <CreditCard className="h-4 w-4" />
+            <CreditCard className="h-4 w-4" aria-hidden="true" />
           </span>
           <h2 className="text-sm font-bold tracking-tight text-slate-900">
             Active Payment Inspector
@@ -717,32 +954,41 @@ function PaymentInspector({
 
   const student = inspector?.student ?? null;
   const ledger = inspector?.ledger ?? null;
+  const matched = transaction.status === "matched";
+  const heading = matched
+    ? `Matched payment ${transaction.reference}`
+    : `Assign payment ${transaction.reference}`;
 
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600">
-            <CreditCard className="h-4 w-4" />
+            <CreditCard className="h-4 w-4" aria-hidden="true" />
           </span>
           <h2 className="text-sm font-bold tracking-tight text-slate-900">
             Active Payment Inspector
           </h2>
         </div>
-        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
-          ID: {transaction.reference}
+        <span
+          className={cn(
+            "rounded-full px-2 py-0.5 text-[8px] font-semibold ring-1",
+            matched
+              ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
+              : "bg-[#FEF3D6] text-[#8A6A25] ring-[#EBD7A5]",
+          )}
+        >
+          {matched ? "Matched" : "Unmatched"}
         </span>
       </div>
 
       <div className="mt-4 rounded-xl border border-slate-100 bg-[#F8FAF9] p-3">
-        <p className="text-[10px] font-bold text-slate-800">
-          Assign payment {transaction.reference}
-        </p>
+        <p className="text-[10px] font-bold text-slate-800">{heading}</p>
         <p className="mt-2 text-2xl font-bold tracking-tight text-brand-700">
           {transaction.amount}
         </p>
-        <p className="mt-0.5 text-[8px] text-slate-400">
-          From {transaction.phone}
+        <p className="mt-0.5 text-[8px] text-slate-500">
+          From {transaction.phone} · ID: {transaction.reference}
         </p>
       </div>
 
@@ -757,11 +1003,17 @@ function PaymentInspector({
 
       <div className="mt-3">
         <label className="relative block">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
+          <span className="sr-only">Search student directory</span>
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-500"
+            aria-hidden="true"
+          />
           <input
             type="search"
-            placeholder="Search student name or admission number"
-            className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-8 pr-8 text-[9px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10"
+            disabled
+            aria-disabled="true"
+            placeholder="Student search unavailable until connected"
+            className="h-9 w-full cursor-not-allowed rounded-lg border border-slate-200/80 bg-slate-100 pl-8 pr-8 text-[9px] text-slate-700 outline-none placeholder:text-slate-500 disabled:opacity-70"
           />
         </label>
 
@@ -778,19 +1030,22 @@ function PaymentInspector({
                 <p className="text-[8px] text-brand-600">
                   {student.admission}
                 </p>
-                <p className="truncate text-[8px] text-slate-400">
+                <p className="truncate text-[8px] text-slate-500">
                   {student.grade} · {student.boarding}
                 </p>
               </div>
               <button
                 type="button"
-                className="grid h-6 w-6 place-items-center rounded-full bg-slate-100 text-slate-400 hover:bg-slate-200"
-                aria-label="Remove selected student"
+                disabled
+                aria-disabled="true"
+                title="Removing a student is not connected yet."
+                className="grid h-6 w-6 cursor-not-allowed place-items-center rounded-full bg-slate-100 text-slate-500 opacity-60"
+                aria-label="Remove selected student unavailable"
               >
-                <X className="h-3 w-3" />
+                <X className="h-3 w-3" aria-hidden="true" />
               </button>
             </div>
-            <div className="mt-2 border-t border-slate-100 pt-2 text-[8px] text-slate-400">
+            <div className="mt-2 border-t border-slate-100 pt-2 text-[8px] text-slate-500">
               Guardian: {student.guardianName} · {student.guardianPhone}
             </div>
           </div>
@@ -818,7 +1073,7 @@ function PaymentInspector({
               style={{ width: `${Math.max(0, Math.min(100, ledger.progress))}%` }}
             />
           </div>
-          <div className="mt-1.5 flex justify-between text-[7px] text-slate-400">
+          <div className="mt-1.5 flex justify-between text-[7px] text-slate-500">
             <span>Cleared {ledger.cleared}</span>
             <span>Total {ledger.total}</span>
           </div>
@@ -841,17 +1096,24 @@ function PaymentInspector({
         </span>
         <input
           type="text"
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
           placeholder="Enter audit reason"
-          className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] px-2.5 text-[10px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10"
+          className="h-9 w-full rounded-lg border border-slate-200/80 bg-[#F8FAF9] px-2.5 text-[10px] text-slate-700 outline-none placeholder:text-slate-500 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20"
         />
-        <span className="mt-1 block text-[7px] text-slate-400">
-          Required for the audit log.
+        <span className="mt-1 block text-[7px] text-slate-500">
+          {matched
+            ? "This payment is already matched; no audit reason is required."
+            : "Required for the audit log."}
         </span>
       </label>
 
       {inspector?.overpaymentWarning && (
         <div className="mt-3 flex gap-2 rounded-xl bg-[#FEF3D6] p-2.5">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[#8A6A25]" />
+          <AlertTriangle
+            className="h-3.5 w-3.5 shrink-0 text-[#8A6A25]"
+            aria-hidden="true"
+          />
           <p className="text-[8px] leading-relaxed text-[#8A6A25]">
             {inspector.overpaymentWarning}
           </p>
@@ -861,16 +1123,26 @@ function PaymentInspector({
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row">
         <button
           type="button"
-          className="h-9 flex-1 rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 transition hover:bg-slate-50"
+          disabled
+          aria-disabled="true"
+          title="Holding payments is not connected yet."
+          className="h-9 flex-1 cursor-not-allowed rounded-lg border border-slate-200/80 bg-white text-[9px] font-semibold text-slate-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
           Hold for later
         </button>
         <button
           type="button"
-          className="inline-flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white transition hover:bg-brand-600"
+          disabled
+          aria-disabled="true"
+          title={
+            matched
+              ? "This payment is already matched."
+              : "Assigning payments is not connected yet."
+          }
+          className="inline-flex h-9 flex-1 cursor-not-allowed items-center justify-center gap-1 rounded-lg bg-brand-500 text-[9px] font-bold text-white opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
         >
-          <Check className="h-3 w-3" />
-          Assign payment
+          {!matched && <Check className="h-3 w-3" aria-hidden="true" />}
+          {matched ? "Already matched" : "Assign payment"}
         </button>
       </div>
     </section>
@@ -878,10 +1150,31 @@ function PaymentInspector({
 }
 
 function QueueFooter({ queue }: { queue: AdminUnmatchedData["queue"] }) {
+  const available = Boolean(queue?.status?.trim());
+  const Icon = available ? CheckCircle2 : Clock3;
+
   return (
-    <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-brand-100 bg-[#E2F0ED] p-3.5">
-      <p className="inline-flex items-center gap-2 text-[9px] font-medium text-brand-800">
-        <CheckCircle2 className="h-3.5 w-3.5" />
+    <div
+      className={cn(
+        "mt-4 flex items-center justify-between gap-3 rounded-2xl border p-3.5",
+        available
+          ? "border-brand-100 bg-[#E2F0ED]"
+          : "border-slate-200 bg-slate-50",
+      )}
+    >
+      <p
+        className={cn(
+          "inline-flex items-center gap-2 text-[9px] font-medium",
+          available ? "text-brand-800" : "text-slate-600",
+        )}
+      >
+        <Icon
+          className={cn(
+            "h-3.5 w-3.5",
+            available ? "text-brand-600" : "text-slate-500",
+          )}
+          aria-hidden="true"
+        />
         {queue?.status || "Queue status unavailable"}
       </p>
       {queue?.allClear && (
@@ -972,7 +1265,7 @@ function MobileDrawer({
             type="button"
             onClick={onClose}
             data-autofocus
-            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />
