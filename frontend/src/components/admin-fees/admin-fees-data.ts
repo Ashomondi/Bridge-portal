@@ -22,6 +22,34 @@ export type DistributionSegment = {
   color: string;
 };
 
+export type FeeStructureSnapshot = {
+  cohort: {
+    gradeName: string;
+    studentCount: number | null;
+    description: string | null;
+    ledgerBase: string | null;
+  } | null;
+  matrix: {
+    currency: string;
+    rows: FeeMatrixRow[];
+    totals: FeeTotals | null;
+    dueDates: { term: string; date: string }[];
+    verificationNote: string | null;
+    /** null means the lock/publish state is unavailable. */
+    locked: boolean | null;
+  } | null;
+  distribution: {
+    gradeTag: string | null;
+    total: string | null;
+    segments: DistributionSegment[];
+  } | null;
+  adjustment: {
+    policyNote: string;
+  } | null;
+  published: boolean | null;
+  publishedAt: string | null;
+};
+
 export type AdminFeesData = {
   portal: {
     name: string | null;
@@ -55,30 +83,22 @@ export type AdminFeesData = {
     curriculumTiers: { value: string; label: string }[];
     selectedAcademicYear: string | null;
     selectedCurriculumTier: string | null;
-    published: boolean;
-    publishedAt: string | null;
   };
   grades: string[];
   selectedGrade: string | null;
-  cohort: {
-    gradeName: string;
-    studentCount: number | null;
-    description: string | null;
-    ledgerBase: string | null;
-  } | null;
-  matrix: {
-    currency: string;
-    rows: FeeMatrixRow[];
-    totals: FeeTotals | null;
-    dueDates: { term: string; date: string }[];
-    verificationNote: string | null;
-  };
-  distribution: {
-    gradeTag: string | null;
-    total: string | null;
-    segments: DistributionSegment[];
-  };
-  adjustment: {
-    policyNote: string;
-  } | null;
+  /**
+   * Snapshots keyed by academic year, curriculum tier and grade. Use
+   * `getFeeStructureKey` so changing any selector always resolves the matching
+   * cohort, matrix and distribution instead of reusing the previous grade.
+   */
+  structures: Record<string, FeeStructureSnapshot>;
 };
+
+/** Builds the stable key used by the fee-structure snapshot map. */
+export function getFeeStructureKey(
+  academicYear: string,
+  curriculumTier: string,
+  grade: string,
+) {
+  return JSON.stringify([academicYear, curriculumTier, grade]);
+}

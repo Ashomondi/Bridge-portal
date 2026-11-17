@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   ArrowRight,
@@ -14,6 +15,7 @@ import {
   Info,
   Link2,
   Lock,
+  LockOpen,
   LogOut,
   Menu,
   Plus,
@@ -25,19 +27,34 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
-import type { AdminFeesData } from "./admin-fees-data";
+import {
+  getFeeStructureKey,
+  type AdminFeesData,
+  type FeeStructureSnapshot,
+} from "./admin-fees-data";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
   countKey?: "schools" | "connections" | "unmatchedPayments";
+  href?: string;
   active?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Schools", icon: Building2, countKey: "schools" },
-  { label: "Connections", icon: Link2, countKey: "connections" },
-  { label: "Fee Structures", icon: Wallet, active: true },
+  { label: "Schools", icon: Building2, countKey: "schools", href: "/admin/schools" },
+  {
+    label: "Connections",
+    icon: Link2,
+    countKey: "connections",
+    href: "/admin/connections",
+  },
+  {
+    label: "Fee Structures",
+    icon: Wallet,
+    href: "/admin/fees",
+    active: true,
+  },
   { label: "Unmatched Payments", icon: AlertTriangle, countKey: "unmatchedPayments" },
   { label: "System Audit", icon: ShieldCheck },
 ];
@@ -64,9 +81,23 @@ export default function AdminFeeStructureDashboard({
     connections: null,
     unmatchedPayments: null,
   };
-  const grades = data?.grades ?? [];
+  const grades = useMemo(() => data?.grades ?? [], [data?.grades]);
+  const academicYears = useMemo(
+    () => data?.filters?.academicYears ?? [],
+    [data?.filters?.academicYears],
+  );
+  const curriculumTiers = useMemo(
+    () => data?.filters?.curriculumTiers ?? [],
+    [data?.filters?.curriculumTiers],
+  );
   const [activeGrade, setActiveGrade] = useState(
     data?.selectedGrade ?? grades[0] ?? "",
+  );
+  const [activeAcademicYear, setActiveAcademicYear] = useState(
+    data?.filters?.selectedAcademicYear ?? academicYears[0]?.value ?? "",
+  );
+  const [activeCurriculumTier, setActiveCurriculumTier] = useState(
+    data?.filters?.selectedCurriculumTier ?? curriculumTiers[0]?.value ?? "",
   );
 
   useEffect(() => {
@@ -82,10 +113,56 @@ export default function AdminFeeStructureDashboard({
   }, [menuOpen]);
 
   useEffect(() => {
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", closeOnDesktop);
+
+    return () => {
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+    };
+  }, []);
+
+  useEffect(() => {
     if (grades.length > 0 && !grades.includes(activeGrade)) {
       setActiveGrade(grades[0]);
     }
   }, [activeGrade, grades]);
+
+  useEffect(() => {
+    if (
+      academicYears.length > 0 &&
+      !academicYears.some((option) => option.value === activeAcademicYear)
+    ) {
+      setActiveAcademicYear(academicYears[0].value);
+    }
+  }, [academicYears, activeAcademicYear]);
+
+  useEffect(() => {
+    if (
+      curriculumTiers.length > 0 &&
+      !curriculumTiers.some(
+        (option) => option.value === activeCurriculumTier,
+      )
+    ) {
+      setActiveCurriculumTier(curriculumTiers[0].value);
+    }
+  }, [curriculumTiers, activeCurriculumTier]);
+
+  const activeStructure: FeeStructureSnapshot | null =
+    data && activeAcademicYear && activeCurriculumTier && activeGrade
+      ? data.structures?.[
+          getFeeStructureKey(
+            activeAcademicYear,
+            activeCurriculumTier,
+            activeGrade,
+          )
+        ] ?? null
+      : null;
 
   return (
     <div className="min-h-screen bg-[#F4F7F6] text-slate-900">
@@ -132,19 +209,32 @@ export default function AdminFeeStructureDashboard({
             changesLogged={data?.changesLogged ?? null}
             onChange={setActiveTab}
           />
+          <PreviewNotice />
           <FilterCard
             filters={data?.filters ?? null}
             grades={grades}
             activeGrade={activeGrade}
+            activeAcademicYear={activeAcademicYear}
+            activeCurriculumTier={activeCurriculumTier}
+            published={activeStructure?.published ?? null}
+            publishedAt={activeStructure?.publishedAt ?? null}
             onGradeChange={setActiveGrade}
+            onAcademicYearChange={setActiveAcademicYear}
+            onCurriculumTierChange={setActiveCurriculumTier}
           />
-          <CohortBanner grade={activeGrade} cohort={data?.cohort ?? null} />
+          <CohortBanner
+            grade={activeGrade}
+            cohort={activeStructure?.cohort ?? null}
+          />
 
           <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,1fr)]">
-            <FeeMatrixCard matrix={data?.matrix ?? null} />
+            <FeeMatrixCard matrix={activeStructure?.matrix ?? null} />
             <div className="min-w-0 space-y-4">
-              <DonutCard distribution={data?.distribution ?? null} />
-              <AdjustmentCallout adjustment={data?.adjustment ?? null} />
+              <DonutCard distribution={activeStructure?.distribution ?? null} />
+              <AdjustmentCallout
+                adjustment={activeStructure?.adjustment ?? null}
+                onSwitchToChanges={() => setActiveTab("changes")}
+              />
             </div>
           </div>
         </main>
@@ -190,7 +280,7 @@ function SidebarContent({
         </span>
         <div>
           <p className="text-[15px] font-bold tracking-tight text-slate-900">
-            Ikonex <span className="text-brand-600">Academy</span>
+            Bridge <span className="text-brand-600">Portal</span>
           </p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <p className="text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-400">
@@ -203,23 +293,19 @@ function SidebarContent({
         </div>
       </div>
 
-      <button
-        type="button"
-        className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left transition hover:border-brand-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-      >
+      <div className="mt-5 flex w-full items-center gap-2.5 rounded-xl border border-slate-200/80 bg-[#F8F9FA] p-3 text-left">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-brand-600 shadow-sm">
-          <Building2 className="h-3.5 w-3.5" />
+          <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+          <span className="block text-[8px] font-semibold uppercase tracking-[0.12em] text-slate-500">
             Active context
           </span>
           <span className="block truncate text-[11px] font-semibold text-slate-700">
             {activeEntity || "No entity selected"}
           </span>
         </span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-      </button>
+      </div>
 
       <p className="mt-6 px-2 text-[8px] font-semibold uppercase tracking-[0.18em] text-slate-400">
         Operations rail
@@ -229,26 +315,22 @@ function SidebarContent({
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const count = item.countKey ? counts[item.countKey] : null;
-
-          return (
-            <a
-              key={item.label}
-              href="#"
-              onClick={onNavigate}
-              aria-current={item.active ? "page" : undefined}
-              className={cn(
-                "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2",
-                item.active
-                  ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800",
-              )}
-            >
+          const className = cn(
+            "group flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
+            item.active
+              ? "bg-[#E8F5F3] font-semibold text-brand-700 ring-1 ring-brand-100"
+              : "text-slate-500",
+            item.href
+              ? "hover:bg-slate-50 hover:text-slate-800"
+              : "cursor-not-allowed opacity-70",
+          );
+          const content = (
+            <>
               <Icon
+                aria-hidden="true"
                 className={cn(
                   "h-4 w-4 shrink-0",
-                  item.active
-                    ? "text-brand-600"
-                    : "text-slate-400 group-hover:text-brand-600",
+                  item.active ? "text-brand-600" : "text-slate-500",
                 )}
               />
               <span className="flex-1">{item.label}</span>
@@ -257,7 +339,32 @@ function SidebarContent({
                   {count.toLocaleString("en-GB")}
                 </span>
               )}
-            </a>
+            </>
+          );
+
+          if (!item.href) {
+            return (
+              <div
+                key={item.label}
+                aria-disabled="true"
+                title="This operations route is not connected yet."
+                className={className}
+              >
+                {content}
+              </div>
+            );
+          }
+
+          return (
+            <Link
+              key={item.label}
+              href={item.href}
+              onClick={onNavigate}
+              aria-current={item.active ? "page" : undefined}
+              className={className}
+            >
+              {content}
+            </Link>
           );
         })}
       </nav>
@@ -275,10 +382,13 @@ function SidebarContent({
           </div>
           <button
             type="button"
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Sign out"
+            disabled
+            aria-disabled="true"
+            title="Sign out is not connected yet."
+            className="grid h-8 w-8 cursor-not-allowed place-items-center rounded-lg text-slate-500 opacity-60"
+            aria-label="Sign out unavailable"
           >
-            <LogOut className="h-3.5 w-3.5" />
+            <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -303,7 +413,7 @@ function MobileAppBar({
           onClick={onOpenMenu}
           aria-expanded={menuOpen}
           aria-controls="fees-drawer"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           aria-label="Open navigation menu"
         >
           <Menu className="h-5 w-5" />
@@ -321,19 +431,20 @@ function MobileAppBar({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Notifications"
+            disabled
+            aria-disabled="true"
+            title="Notifications are not connected yet."
+            className="grid h-10 w-10 cursor-not-allowed place-items-center rounded-xl text-slate-500 opacity-60"
+            aria-label="Notifications unavailable"
           >
-            <Bell className="h-5 w-5" />
-            <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
+            <Bell className="h-5 w-5" aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-9 w-9 place-items-center rounded-full bg-brand-500 text-[10px] font-bold text-white shadow-sm ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -379,13 +490,12 @@ function TopBar({
             />
             {gatewayLive ? "Daraja API Live" : "Gateway status unavailable"}
           </span>
-          <button
-            type="button"
-            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
-            aria-label="Open user profile"
+          <span
+            title="Operator profile"
+            className="grid h-8 w-8 place-items-center rounded-full bg-brand-500 text-[9px] font-bold text-white ring-2 ring-white"
           >
             {operatorInitials}
-          </button>
+          </span>
         </div>
       </div>
     </header>
@@ -433,6 +543,27 @@ function PageHeader({ header }: { header: AdminFeesData["header"] | null }) {
   );
 }
 
+function PreviewNotice() {
+  return (
+    <section
+      role="status"
+      className="mt-3 flex gap-2.5 rounded-xl border border-[#E8C97A] bg-[#FEF3D6] p-3"
+    >
+      <AlertTriangle
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#8A6A25]"
+        aria-hidden="true"
+      />
+      <div className="min-w-0">
+        <p className="text-[9px] font-bold text-[#6D4FA3]">Preview only</p>
+        <p className="mt-0.5 text-[8px] leading-relaxed text-slate-600">
+          Publishing structures, adding fee items and cohort adjustments are
+          disabled until the fee-structure write endpoints are connected.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 function ViewTabs({
   activeTab,
   changesLogged,
@@ -474,7 +605,9 @@ function ViewTabs({
         >
           Fee Changes
           <span className="rounded-full bg-[#F0EBF9] px-1.5 py-0.5 text-[7px] text-[#6D4FA3]">
-            {changesLogged === null ? "—" : `${changesLogged} logged`}
+            {changesLogged === null
+              ? "Changes unavailable"
+              : `${changesLogged} logged`}
           </span>
         </button>
       </div>
@@ -486,12 +619,24 @@ function FilterCard({
   filters,
   grades,
   activeGrade,
+  activeAcademicYear,
+  activeCurriculumTier,
+  published,
+  publishedAt,
   onGradeChange,
+  onAcademicYearChange,
+  onCurriculumTierChange,
 }: {
   filters: AdminFeesData["filters"] | null;
   grades: string[];
   activeGrade: string;
+  activeAcademicYear: string;
+  activeCurriculumTier: string;
+  published: boolean | null;
+  publishedAt: string | null;
   onGradeChange: (grade: string) => void;
+  onAcademicYearChange: (year: string) => void;
+  onCurriculumTierChange: (tier: string) => void;
 }) {
   return (
     <section className="mt-3 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card">
@@ -501,25 +646,33 @@ function FilterCard({
             label="Academic year"
             placeholder="Select academic year"
             options={filters?.academicYears ?? []}
+            value={activeAcademicYear}
+            onChange={onAcademicYearChange}
           />
           <FilterSelect
             label="Curriculum tier"
             placeholder="Select curriculum tier"
             options={filters?.curriculumTiers ?? []}
+            value={activeCurriculumTier}
+            onChange={onCurriculumTierChange}
           />
         </div>
         <span
           className={cn(
             "inline-flex w-fit items-center gap-1 rounded-full px-2.5 py-1 text-[8px] font-semibold ring-1",
-            filters?.published
+            published === true
               ? "bg-[#E2F0ED] text-brand-700 ring-brand-100"
-              : "bg-slate-100 text-slate-500 ring-slate-200",
+              : published === false
+                ? "bg-[#FEF3D6] text-[#8A6A25] ring-[#EBD7A5]"
+                : "bg-slate-100 text-slate-600 ring-slate-200",
           )}
         >
-          <Lock className="h-3 w-3" />
-          {filters?.published
-            ? `Published ${filters.publishedAt || ""}`.trim()
-            : "Not published"}
+          <Lock className="h-3 w-3" aria-hidden="true" />
+          {published === true
+            ? `Published ${publishedAt || ""}`.trim()
+            : published === false
+              ? "Not published"
+              : "Publish status unavailable"}
         </span>
       </div>
 
@@ -531,8 +684,9 @@ function FilterCard({
                 key={grade}
                 type="button"
                 onClick={() => onGradeChange(grade)}
+                aria-pressed={grade === activeGrade}
                 className={cn(
-                  "rounded-full px-2.5 py-1 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                  "rounded-full px-2.5 py-1 text-[9px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
                   grade === activeGrade
                     ? "bg-brand-500 text-white shadow-sm"
                     : "bg-slate-50 text-slate-500 ring-1 ring-slate-200/80 hover:bg-white",
@@ -543,7 +697,7 @@ function FilterCard({
             ))}
           </div>
         ) : (
-          <p className="text-[9px] text-slate-400">
+          <p className="text-[9px] text-slate-500">
             No grade cohorts available.
           </p>
         )}
@@ -556,10 +710,14 @@ function FilterSelect({
   label,
   placeholder,
   options,
+  value,
+  onChange,
 }: {
   label: string;
   placeholder: string;
   options: { value: string; label: string }[];
+  value: string;
+  onChange: (value: string) => void;
 }) {
   return (
     <label className="relative block">
@@ -567,10 +725,12 @@ function FilterSelect({
         {label}
       </span>
       <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
         disabled={options.length === 0}
-        className="h-8 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] text-slate-600 outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+        className="h-8 w-full appearance-none rounded-lg border border-slate-200/80 bg-[#F8FAF9] pl-2.5 pr-7 text-[9px] text-slate-600 outline-none focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-brand-600/20 disabled:cursor-not-allowed disabled:opacity-60"
       >
-        <option>
+        <option value="">
           {options.length > 0 ? placeholder : "No options available"}
         </option>
         {options.map((option) => (
@@ -579,7 +739,10 @@ function FilterSelect({
           </option>
         ))}
       </select>
-      <ChevronDown className="pointer-events-none absolute bottom-2 right-2 h-3 w-3 text-slate-400" />
+      <ChevronDown
+        className="pointer-events-none absolute bottom-2 right-2 h-3 w-3 text-slate-500"
+        aria-hidden="true"
+      />
     </label>
   );
 }
@@ -589,23 +752,26 @@ function CohortBanner({
   cohort,
 }: {
   grade: string;
-  cohort: AdminFeesData["cohort"];
+  cohort: FeeStructureSnapshot["cohort"];
 }) {
+  const summary = !cohort
+    ? `${grade || "Selected"} cohort summary unavailable`
+    : cohort.studentCount === null
+      ? `${cohort.gradeName} student count unavailable`
+      : `${cohort.gradeName} has ${cohort.studentCount.toLocaleString(
+          "en-GB",
+        )} active enrolled students`;
+
   return (
     <div className="mt-3 rounded-2xl bg-[#E2F0ED] p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex gap-2.5">
-          <Users className="h-4 w-4 shrink-0 text-brand-600" />
+          <Users
+            className="h-4 w-4 shrink-0 text-brand-600"
+            aria-hidden="true"
+          />
           <div>
-            <p className="text-[11px] font-bold text-brand-800">
-              {cohort
-                ? `${cohort.gradeName} has ${
-                    cohort.studentCount === null
-                      ? "no"
-                      : cohort.studentCount.toLocaleString("en-GB")
-                  } active enrolled students`
-                : `${grade || "No grade"} cohort summary unavailable`}
-            </p>
+            <p className="text-[11px] font-bold text-brand-800">{summary}</p>
             <p className="mt-0.5 text-[9px] text-slate-500">
               {cohort?.description || "No cohort metadata available."}
             </p>
@@ -614,14 +780,17 @@ function CohortBanner({
         {cohort && (
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-white px-2.5 py-1 text-[9px] font-semibold text-brand-700">
-              Ledger base: {cohort.ledgerBase || "Not available"}
+              Ledger base: {cohort.ledgerBase || "Ledger base unavailable"}
             </span>
             <button
               type="button"
-              className="inline-flex items-center gap-1 text-[9px] font-semibold text-brand-700 hover:underline"
+              disabled
+              aria-disabled="true"
+              title="Cohort adjustments are not connected yet."
+              className="inline-flex cursor-not-allowed items-center gap-1 text-[9px] font-semibold text-brand-700 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             >
               Apply cohort adjustment
-              <ArrowRight className="h-3 w-3" />
+              <ArrowRight className="h-3 w-3" aria-hidden="true" />
             </button>
           </div>
         )}
@@ -633,10 +802,18 @@ function CohortBanner({
 function FeeMatrixCard({
   matrix,
 }: {
-  matrix: AdminFeesData["matrix"] | null;
+  matrix: FeeStructureSnapshot["matrix"];
 }) {
   const rows = matrix?.rows ?? [];
   const dueDates = matrix?.dueDates ?? [];
+  const locked = matrix?.locked ?? null;
+  const LockIcon = locked === false ? LockOpen : Lock;
+  const lockLabel =
+    locked === true
+      ? "Locked"
+      : locked === false
+        ? "Unlocked"
+        : "Lock status unavailable";
 
   return (
     <section className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
@@ -645,17 +822,24 @@ function FeeMatrixCard({
           <h2 className="text-sm font-bold tracking-tight text-slate-900">
             Core Fee Matrix
           </h2>
-          <p className="mt-0.5 text-[9px] text-slate-400">
+          <p className="mt-0.5 text-[9px] text-slate-500">
             Billing schedule and structure
           </p>
         </div>
         <div className="flex gap-1.5">
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-500">
-            Currency: {matrix?.currency || "—"}
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[8px] font-semibold text-slate-600">
+            Currency: {matrix?.currency || "Currency unavailable"}
           </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-[#E2F0ED] px-2 py-0.5 text-[8px] font-semibold text-brand-700">
-            <Lock className="h-2.5 w-2.5" />
-            Locked
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[8px] font-semibold",
+              locked === true && "bg-[#E2F0ED] text-brand-700",
+              locked === false && "bg-[#FEF3D6] text-[#8A6A25]",
+              locked === null && "bg-slate-100 text-slate-600",
+            )}
+          >
+            <LockIcon className="h-2.5 w-2.5" aria-hidden="true" />
+            {lockLabel}
           </span>
         </div>
       </div>
@@ -729,30 +913,44 @@ function FeeMatrixCard({
       )}
 
       <div className="mt-3 flex gap-2 rounded-xl bg-[#E2F0ED] p-3">
-        <CalendarDays className="h-3.5 w-3.5 shrink-0 text-brand-600" />
+        <CalendarDays
+          className="h-3.5 w-3.5 shrink-0 text-brand-600"
+          aria-hidden="true"
+        />
         <p className="text-[9px] leading-relaxed text-brand-800">
-          {dueDates.length > 0
-            ? dueDates.map((item) => `${item.term}: ${item.date}`).join(" · ")
-            : "No term due dates available"}
+          {matrix === null
+            ? "Due dates unavailable"
+            : dueDates.length > 0
+              ? dueDates.map((item) => `${item.term}: ${item.date}`).join(" · ")
+              : "No term due dates available"}
         </p>
       </div>
 
       <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="inline-flex items-center gap-1 text-[8px] text-slate-400">
-          <CheckCircle2 className="h-3 w-3 text-brand-600" />
+        <p className="inline-flex items-center gap-1 text-[8px] text-slate-500">
+          <CheckCircle2
+            className="h-3 w-3 text-brand-600"
+            aria-hidden="true"
+          />
           {matrix?.verificationNote || "Verification note unavailable"}
         </p>
         <div className="flex gap-2">
           <button
             type="button"
-            className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200/80 bg-white px-2.5 text-[8px] font-semibold text-slate-600 transition hover:bg-slate-50"
+            disabled
+            aria-disabled="true"
+            title="Adding fee items is not connected yet."
+            className="inline-flex h-8 cursor-not-allowed items-center gap-1 rounded-lg border border-slate-200/80 bg-white px-2.5 text-[8px] font-semibold text-slate-600 opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           >
-            <Plus className="h-3 w-3" />
+            <Plus className="h-3 w-3" aria-hidden="true" />
             Add fee item
           </button>
           <button
             type="button"
-            className="inline-flex h-8 items-center gap-1 rounded-lg bg-brand-500 px-2.5 text-[8px] font-bold text-white transition hover:bg-brand-600"
+            disabled
+            aria-disabled="true"
+            title="Publishing fee structures is not connected yet."
+            className="inline-flex h-8 cursor-not-allowed items-center gap-1 rounded-lg bg-brand-500 px-2.5 text-[8px] font-bold text-white opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           >
             Publish structure
           </button>
@@ -784,7 +982,7 @@ function TableHeading({
 function DonutCard({
   distribution,
 }: {
-  distribution: AdminFeesData["distribution"] | null;
+  distribution: FeeStructureSnapshot["distribution"];
 }) {
   const segments = distribution?.segments ?? [];
 
@@ -795,7 +993,7 @@ function DonutCard({
           Annual Distribution
         </h2>
         <span className="rounded-full bg-[#F0EBF9] px-2 py-0.5 text-[8px] font-semibold text-[#6D4FA3]">
-          {distribution?.gradeTag || "No grade"}
+          {distribution?.gradeTag || "Grade unavailable"}
         </span>
       </div>
 
@@ -833,7 +1031,7 @@ function DonutCard({
                 textAnchor="middle"
                 className="fill-slate-900 text-[11px] font-bold"
               >
-                {distribution?.total || "—"}
+                {distribution?.total || "Unavailable"}
               </text>
               <text x="60" y="68" textAnchor="middle" className="fill-slate-400 text-[6px]">
                 Annual
@@ -872,29 +1070,32 @@ function DonutCard({
 
 function AdjustmentCallout({
   adjustment,
+  onSwitchToChanges,
 }: {
-  adjustment: AdminFeesData["adjustment"] | null;
+  adjustment: FeeStructureSnapshot["adjustment"];
+  onSwitchToChanges: () => void;
 }) {
   return (
     <section className="rounded-2xl border border-[#E4DBF5] bg-[#F0EBF9] p-4">
       <div className="flex gap-2.5">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white text-[#6D4FA3] shadow-sm">
-          <Info className="h-3.5 w-3.5" />
+          <Info className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
         <div>
           <p className="text-[11px] font-bold text-slate-800">
             Need a mid-term adjustment?
           </p>
-          <p className="mt-1 text-[9px] leading-relaxed text-slate-500">
+          <p className="mt-1 text-[9px] leading-relaxed text-slate-600">
             {adjustment?.policyNote ||
               "No adjustment policy is available for this fee structure."}
           </p>
           <button
             type="button"
-            className="mt-2 inline-flex items-center gap-1 text-[9px] font-semibold text-[#6D4FA3] hover:underline"
+            onClick={onSwitchToChanges}
+            className="mt-2 inline-flex items-center gap-1 text-[9px] font-semibold text-[#6D4FA3] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
           >
             Switch to Changes Tab
-            <ArrowRight className="h-3 w-3" />
+            <ArrowRight className="h-3 w-3" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -981,7 +1182,7 @@ function MobileDrawer({
             type="button"
             onClick={onClose}
             data-autofocus
-            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
             aria-label="Close navigation menu"
           >
             <X className="h-4 w-4" />
