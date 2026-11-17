@@ -14,6 +14,7 @@ export const viewport: Viewport = {
   themeColor: "#007A78",
 };
 
+/** Renders the document shell shared by every portal route. */
 export default function RootLayout({
   children,
 }: {

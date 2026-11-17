@@ -284,6 +284,25 @@ func (m *MemoryStore) MembershipByID(_ context.Context, schoolID, membershipID s
 	return mem, nil
 }
 
+func (m *MemoryStore) ClassesForTeacher(_ context.Context, schoolID, membershipID string) ([]Class, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]Class, 0)
+	for classID, teacherID := range m.classTeacher {
+		if teacherID != membershipID {
+			continue
+		}
+		class, ok := m.classes[classID]
+		if !ok || class.SchoolID != schoolID {
+			continue
+		}
+		out = append(out, class)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StreamName < out[j].StreamName })
+	return out, nil
+}
+
 func (m *MemoryStore) ClassTeacherMembership(_ context.Context, schoolID, classID string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
