@@ -2,6 +2,7 @@ package contracts
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -118,5 +119,15 @@ func TestDecodeAndPagination(t *testing.T) {
 	}
 	if p, err := Pagination(httptest.NewRequest("GET", "/", nil)); err != nil || p.Page != 1 || p.PerPage != 25 {
 		t.Fatalf("defaults: %+v %v", p, err)
+	}
+}
+
+func TestSQLTxAdaptersHandleNil(t *testing.T) {
+	if PgxTx(nil) != nil {
+		t.Fatal("PgxTx(nil) must return nil SQLTx")
+	}
+	var sqlTx *sql.Tx
+	if StdSQLTx(sqlTx) != nil {
+		t.Fatal("StdSQLTx(nil) must return nil SQLTx")
 	}
 }

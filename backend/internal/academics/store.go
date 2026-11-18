@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // ErrNotFound is returned by a Store when the requested record does not exist
@@ -228,6 +230,9 @@ type Store interface {
 	// WithTx runs fn inside a tenant-scoped transaction where
 	// app.school_id has been set. Every academic query goes through it.
 	WithTx(ctx context.Context, schoolID string, fn func(tx Store) error) error
+	// NotificationTx exposes the active transaction handle so transaction-bound
+	// InAppNotifier implementations participate in the caller's commit/rollback.
+	NotificationTx() contracts.SQLTx
 
 	CurrentAcademicYearID(ctx context.Context, schoolID string) (string, error)
 	AcademicYearExists(ctx context.Context, schoolID, academicYearID string) (bool, error)
