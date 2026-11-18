@@ -49,7 +49,7 @@ const NAV_ITEMS: NavItem[] = [
     countKey: "connections",
     href: "/admin/connections",
   },
-  { label: "Fee Structures", icon: Wallet, href: "/admin/fees" },
+  { label: "Fee Structures", icon: Wallet },
   {
     label: "Unmatched Payments",
     icon: AlertTriangle,
