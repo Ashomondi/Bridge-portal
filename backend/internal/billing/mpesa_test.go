@@ -55,6 +55,7 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 
 	// Set up httptest Daraja sandbox server
 	var lastSTKBody map[string]any
+	var stkSeq int
 	darajaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/oauth/v1/generate"):
@@ -76,8 +77,10 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 				return
 			}
 			lastSTKBody = body
+			stkSeq++
+			suffix := "100" + string(rune('0'+stkSeq))
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"MerchantRequestID":"MR-1001","CheckoutRequestID":"ws_CO_1001","ResponseCode":"0","ResponseDescription":"Success","CustomerMessage":"Success. Request accepted for processing"}`))
+			_, _ = w.Write([]byte(`{"MerchantRequestID":"MR-` + suffix + `","CheckoutRequestID":"ws_CO_` + suffix + `","ResponseCode":"0","ResponseDescription":"Success","CustomerMessage":"Success. Request accepted for processing"}`))
 		case r.URL.Path == "/mpesa/stkpushquery/v1/query":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"MerchantRequestID":"MR-1001","CheckoutRequestID":"ws_CO_1001","ResultCode":"0","ResultDesc":"The service request is processed successfully.","MpesaReceiptNumber":"QWE123STK"}`))
@@ -99,15 +102,17 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 	}
 
 	pollQueue := &recordingPollQueue{}
-	auditLog := &recordingAuditLogger{}
-	notifSvc := &notifications.Service{DB: db}
+	tenantDB := contracts.TenantTxFunc(db.WithTenantTx)
+	auditLog := billing.NewPostgresAuditLogger()
+	notifSvc := &notifications.Service{DB: tenantDB}
 	fixedNow := time.Date(2026, 2, 10, 12, 0, 0, 0, time.UTC)
 
 	svc := &billing.Service{
-		DB:        db,
-		Audit:     auditLog,
-		Notifier:  notifSvc,
-		Daraja:    darajaClient,
+		DB:       tenantDB,
+		SystemDB: db.WithTenantTx,
+		Audit:    auditLog,
+		Notifier: notifSvc,
+		Daraja:   darajaClient,
 		PollQueue: pollQueue,
 		ResolveShortcode: func(_ context.Context, shortcode string) (string, error) {
 			switch shortcode {
@@ -122,9 +127,23 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 		Now: func() time.Time { return fixedNow },
 	}
 
-	adminA := contracts.Principal{UserID: schoolA.UserID, SchoolID: schoolA.ID, MembershipID: schoolA.MembershipID, Role: "ikonex_admin"}
+	adminA := seedMemberWithPermission(t, db, schoolA.ID, "+254711000021", "Bursar A", "bursar", billing.PermFeeStructuresManage)
+	noPermStaff := seedMemberWithPermission(t, db, schoolA.ID, "+254711000022", "Teacher A", "teacher", "")
 	guardianA := contracts.Principal{UserID: schoolA.UserID, SchoolID: schoolA.ID, MembershipID: schoolA.MembershipID, Role: "parent"}
 	guardianB := contracts.Principal{UserID: schoolB.UserID, SchoolID: schoolB.ID, MembershipID: schoolB.MembershipID, Role: "parent"}
+
+	// Seed a non-fee-paying guardian on schoolA.StudentID to verify both STK restriction and notification privacy
+	var nonFeePayerID, nonFeePayerMembID string
+	if err := db.Admin.QueryRow(ctx, `INSERT INTO users(phone_number,full_name) VALUES('+254799554433','Non Fee Guardian') RETURNING id`).Scan(&nonFeePayerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Admin.QueryRow(ctx, `INSERT INTO memberships(school_id,user_id,role,status) VALUES($1,$2,'parent','active') RETURNING id`, schoolA.ID, nonFeePayerID).Scan(&nonFeePayerMembID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Admin.Exec(ctx, `INSERT INTO student_guardians(school_id,student_id,user_id,relationship,is_fee_payer) VALUES($1,$2,$3,'aunt',false)`, schoolA.ID, schoolA.StudentID, nonFeePayerID); err != nil {
+		t.Fatal(err)
+	}
+	nonFeeGuardian := contracts.Principal{UserID: nonFeePayerID, SchoolID: schoolA.ID, MembershipID: nonFeePayerMembID, Role: "parent"}
 
 	// Load Term 1 fee structure in School A = 10,000.00
 	if _, err := svc.LoadFeeStructure(ctx, adminA, billing.LoadFeeStructureInput{
@@ -136,7 +155,7 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. Unlinked/Cross-school guardian rejected
+	// 1. Unlinked/Cross-school guardian and non-fee-paying guardian rejected; fractional KES STK amount rejected
 	_, err := svc.InitiateSTKPush(ctx, guardianB, billing.InitiateSTKPushInput{
 		StudentID: schoolA.StudentID,
 		Amount:    json.RawMessage(`"500.00"`),
@@ -144,6 +163,20 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 	var apiErr *contracts.APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
 		t.Fatalf("expected 404 for cross-school student STK push, got %v", err)
+	}
+	_, err = svc.InitiateSTKPush(ctx, nonFeeGuardian, billing.InitiateSTKPushInput{
+		StudentID: schoolA.StudentID,
+		Amount:    json.RawMessage(`"500.00"`),
+	}, false)
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-fee-paying guardian STK push, got %v", err)
+	}
+	_, err = svc.InitiateSTKPush(ctx, guardianA, billing.InitiateSTKPushInput{
+		StudentID: schoolA.StudentID,
+		Amount:    json.RawMessage(`"500.50"`),
+	}, false)
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for fractional STK push amount, got %v", err)
 	}
 
 	// 2. Internal AI payment requires parent_confirmed = true (422 if false or missing)
@@ -270,7 +303,13 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 		t.Fatalf("expected 1 unmatched payment, got %+v (%v)", unmatchedList, err)
 	}
 
-	// 7. Manual resolution via MatchUnmatchedPayment (and HTTP endpoints check)
+	// 7. Manual resolution via MatchUnmatchedPayment (badge permission enforced & HTTP endpoints check)
+	if _, err := svc.MatchUnmatchedPayment(ctx, noPermStaff, unmatchedList[0].PaymentID, billing.MatchPaymentInput{
+		StudentID:      schoolA.StudentID,
+		ResolutionNote: "Unauthorized staff attempt",
+	}); !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("expected 403 for staff without billing.fee_structures.manage, got %v", err)
+	}
 	mux := http.NewServeMux()
 	billing.RegisterRoutes(mux, svc, func(*http.Request) (contracts.Principal, error) {
 		return adminA, nil
@@ -329,6 +368,36 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 		t.Fatalf("expected 422 MPESA_AMOUNT_MISMATCH, got %v", err)
 	}
 
+	// Missing Amount on STK callback must also fail
+	var cbMissingAmt billing.DarajaSTKCallbackEnvelope
+	cbMissingAmt.BusinessShortCode = "600001"
+	cbMissingAmt.Body.StkCallback.MerchantRequestID = stkRes2.MerchantRequestID
+	cbMissingAmt.Body.StkCallback.CheckoutRequestID = stkRes2.CheckoutRequestID
+	cbMissingAmt.Body.StkCallback.ResultCode = &zero
+	cbMissingAmt.Body.StkCallback.CallbackMetadata = &struct {
+		Item []struct {
+			Name  string          `json:"Name"`
+			Value json.RawMessage `json:"Value"`
+		} `json:"Item"`
+	}{
+		Item: []struct {
+			Name  string          `json:"Name"`
+			Value json.RawMessage `json:"Value"`
+		}{
+			{Name: "MpesaReceiptNumber", Value: json.RawMessage(`"QWE999NOAMT"`)},
+		},
+	}
+	err = svc.ProcessSTKCallback(ctx, "", cbMissingAmt)
+	if !errors.As(err, &apiErr) || apiErr.Code != "MPESA_AMOUNT_MISMATCH" {
+		t.Fatalf("expected MPESA_AMOUNT_MISMATCH when callback omits Amount, got %v", err)
+	}
+
+	// Verify non-fee-paying guardian received zero payment notifications
+	var nonFeeNotices int
+	if err := db.Admin.QueryRow(ctx, `SELECT count(*) FROM in_app_notifications WHERE school_id=$1 AND recipient_user_id=$2`, schoolA.ID, nonFeePayerID).Scan(&nonFeeNotices); err != nil || nonFeeNotices != 0 {
+		t.Fatalf("expected 0 payment notifications for non-fee-paying guardian, got %d (%v)", nonFeeNotices, err)
+	}
+
 	// 9. Security Regression 6.7: Chat Payment Phone Override rejected
 	// Clear the freeze to isolate phone override
 	if _, err := db.Admin.Exec(ctx, `UPDATE users SET chat_payment_paused_until = NULL WHERE id = $1`, schoolA.UserID); err != nil {
@@ -345,9 +414,19 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 		t.Fatalf("expected CHAT_PHONE_OVERRIDE_FORBIDDEN on chat phone override, got %v", err)
 	}
 
-	// 10. Security Regression 6.4: Callback origin authentication
-	svc.CallbackAuthToken = "secret-callback-token"
+	// 10. Security Regression 6.4: Fail-closed callback auth & no URL query token
 	recCallback := httptest.NewRecorder()
+	mux.ServeHTTP(recCallback, httptest.NewRequest(http.MethodPost, "/api/v1/billing/mpesa/c2b-confirmation", bytes.NewBufferString(`{}`)))
+	if recCallback.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 fail-closed when CallbackAuthToken unset, got %d", recCallback.Code)
+	}
+	svc.CallbackAuthToken = "secret-callback-token"
+	recQueryToken := httptest.NewRecorder()
+	mux.ServeHTTP(recQueryToken, httptest.NewRequest(http.MethodPost, "/api/v1/billing/mpesa/c2b-confirmation?token=secret-callback-token", bytes.NewBufferString(`{}`)))
+	if recQueryToken.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when passing token in query string, got %d", recQueryToken.Code)
+	}
+	recCallback = httptest.NewRecorder()
 	mux.ServeHTTP(recCallback, httptest.NewRequest(http.MethodPost, "/api/v1/billing/mpesa/c2b-confirmation", bytes.NewBufferString(`{}`)))
 	if recCallback.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 on missing callback token, got %d", recCallback.Code)
