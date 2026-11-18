@@ -74,7 +74,6 @@ func (s *Service) ReleaseResults(ctx context.Context, classID string, req Releas
 	}
 
 	var result ReleaseResult
-	var guardians []string
 	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
 		allowed, err := tx.HasClassTeacherBadge(ctx, actor.SchoolID, actor.MembershipID, classID)
 		if err != nil {
@@ -215,24 +214,30 @@ func (s *Service) ReleaseResults(ctx context.Context, classID string, req Releas
 		}); err != nil {
 			return err
 		}
-		guardians, _ = tx.GuardianIDsForClass(ctx, actor.SchoolID, classID)
+		guardians, err := tx.GuardianIDsForClass(ctx, actor.SchoolID, classID)
+		if err != nil {
+			return err
+		}
+		notified, err := s.notifyMany(ctx, tx, actor.SchoolID, guardians, "academics.results",
+			"Results released",
+			"Your child's results for this term are now available in the app.",
+			map[string]any{"class_id": classID, "term_id": req.TermID})
+		if err != nil {
+			return err
+		}
 		result = ReleaseResult{
 			ClassID:               classID,
 			TermID:                req.TermID,
 			Status:                "released",
 			GradingScaleVersionID: scale.ID,
 			SnapshotCount:         len(snapshots),
+			GuardiansNotified:     notified,
 		}
 		return nil
 	})
 	if err != nil {
 		return ReleaseResult{}, err
 	}
-	notified, _ := s.notifyMany(ctx, actor.SchoolID, guardians, "academics.results",
-		"Results released",
-		"Your child's results for this term are now available in the app.",
-		map[string]any{"class_id": classID, "term_id": req.TermID})
-	result.GuardiansNotified = notified
 	return result, nil
 }
 
@@ -298,7 +303,6 @@ func (s *Service) RereleaseResults(ctx context.Context, classID string, req Rere
 	}
 
 	var out RereleaseResult
-	var affectedGuardians []string
 	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
 		allowed, err := tx.HasClassTeacherBadge(ctx, actor.SchoolID, actor.MembershipID, classID)
 		if err != nil {
@@ -437,8 +441,12 @@ func (s *Service) RereleaseResults(ctx context.Context, classID string, req Rere
 			studentIDs = append(studentIDs, studentID)
 		}
 		sort.Strings(studentIDs)
+		var affectedGuardians []string
 		for _, studentID := range studentIDs {
-			users, _ := tx.GuardianIDsForStudent(ctx, actor.SchoolID, studentID)
+			users, err := tx.GuardianIDsForStudent(ctx, actor.SchoolID, studentID)
+			if err != nil {
+				return err
+			}
 			affectedGuardians = append(affectedGuardians, users...)
 		}
 
@@ -460,6 +468,12 @@ func (s *Service) RereleaseResults(ctx context.Context, classID string, req Rere
 		}); err != nil {
 			return err
 		}
+		if _, err := s.notifyMany(ctx, tx, actor.SchoolID, affectedGuardians, "academics.results.amended",
+			"Corrected results published",
+			"A corrected mark has been published for your child. The teacher's explanation is shown with the result.",
+			map[string]any{"class_id": classID, "term_id": req.TermID}); err != nil {
+			return err
+		}
 		out = RereleaseResult{
 			ClassID:                  classID,
 			TermID:                   req.TermID,
@@ -472,12 +486,6 @@ func (s *Service) RereleaseResults(ctx context.Context, classID string, req Rere
 	if err != nil {
 		return RereleaseResult{}, err
 	}
-	// Best-effort fan-out; the count above is the number of affected students,
-	// not the number of guardian notifications.
-	_, _ = s.notifyMany(ctx, actor.SchoolID, affectedGuardians, "academics.results.amended",
-		"Corrected results published",
-		"A corrected mark has been published for your child. The teacher's explanation is shown with the result.",
-		map[string]any{"class_id": classID, "term_id": req.TermID})
 	return out, nil
 }
 

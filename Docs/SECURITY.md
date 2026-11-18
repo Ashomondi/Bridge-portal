@@ -99,6 +99,54 @@ This is the section most specific to this project's AI features — see also
   a server abroad, both count as a "transfer" under the ODPC's 2026 guidance
   — not only a literal file copy.
 
+## SMS and in-app notification security
+
+- **Phone number normalization & masking:** `notifications.NormalizePhone`
+  normalizes Kenyan local (`07...`, `01...`, `254...`) and international E.164
+  numbers and rejects malformed, newline-containing, or out-of-range inputs
+  with `ErrInvalidPhone` (never echoing the raw input). Sandbox logging masks
+  recipient numbers to the trailing 3 digits (`***678`) and never logs the full
+  number.
+- **OTP & message-body redaction:** `SMSDispatcher` never logs message bodies,
+  OTP codes, or full recipient numbers (only redacted recipient suffix, purpose,
+  and rune length in sandbox mode). Callers must not place OTPs, credentials,
+  or clinical details in `in_app_notifications` titles, bodies, or `metadata`.
+- **Africa's Talking credential & error sanitization:** `APIKey` is transmitted
+  only in the `apiKey` request header to `https://api.africastalking.com/version1/messaging`
+  and never logged or surfaced in errors. Provider responses are capped at 64 KiB,
+  parsed into a minimal status struct, verified for single-recipient phone
+  match (`RECIPIENT_MISMATCH` otherwise), and mapped to safe
+  `*SMSDeliveryError{Code, Retryable}` codes without raw provider text.
+- **HTTP redirect protection, timeouts & retries:** `NewSMSDispatcher` copies
+  the caller's `*http.Client`, enforces a default 15-second timeout when
+  `Timeout <= 0`, and sets `CheckRedirect` to `http.ErrUseLastResponse` so
+  redirects are never followed and `apiKey`/body cannot leak to a redirect
+  target. Retries are not performed inside the transport; `*SMSDeliveryError.Retryable`
+  signals safe retry eligibility (`408`, `429`, `5xx`, transport errors, provider
+  `500`–`502`) to the future Asynq worker.
+
+### Africa's Talking data boundary
+
+- **What is transmitted & why:** Only the normalized recipient phone number
+  (`to`), transactional SMS text (`message`), platform `username`, and optional
+  `from` sender ID are sent over HTTPS `POST` to Africa's Talking strictly for
+  the four permitted transactional purposes (`app_login`, `whatsapp_session`,
+  `phone_change`, `phone_change_notice`). No student records, admission numbers,
+  academic marks, health/nurse details, or fee balances are transmitted by the
+  Release 1 SMS transport.
+- **Recipient & data-location considerations:** Africa's Talking Limited
+  processes the outbound SMS payload and passes carrier routing metadata to
+  downstream mobile network operators (MNOs). Before processing real Kenyan
+  user data in production, legal/compliance must confirm Africa's Talking's
+  applicable data-processing agreement, infrastructure/sub-processor locations,
+  and whether any cross-border transfer safeguards under Sections 48–50 of the
+  Data Protection Act apply — no data-residency guarantee is assumed by code.
+- **Control boundary after transmission:** Once Africa's Talking accepts a
+  message (`statusCode` `100`/`101`/`102`), the application cannot recall,
+  delete, or control retention of the SMS text or recipient number inside the
+  provider or telecom carriers, and ambiguous network timeouts cannot prove
+  whether the SMS was sent. Keep transactional SMS content minimal and short-lived.
+
 ## Retention
 
 Under Kenya's Data Protection Act, 2019, personal data must not be kept longer
@@ -118,6 +166,8 @@ audit-logging workers are **not yet implemented** in the current codebase.
 | **M-Pesa payer information** (`mpesa_stk_requests.phone_number`, `payments.payer_phone`, `payments.payer_name`, `unmatched_payments.payer_phone`, `payer_name`, `raw_account_ref`) | Stored in PostgreSQL (RLS-isolated per `school_id`) to initiate STK pushes, display payment confirmation, and allow bursar/AI-assisted matching of unmatched receipts. | Tenant-scoped authorized bursar/admin staff and the paying guardian (for their own STK attempt); never exposed to teachers or unrelated parents. AI reconciliation receives only minimal, scoped facts—never raw phone dumps in prompts. | **Policy decision required:** confirm how long payer phone/name/raw account references may be retained after terminal STK outcome or payment reconciliation, and review cadence for `uncertain`/`unmatched` items. | Mask phone numbers in staff displays and notifications; exclude from telemetry, error payloads, and LLM prompts; redact/anonymize payer contact fields once the controller-confirmed post-settlement/reconciliation window closes (unless covered by a documented legal hold). |
 | **Payment-related personal information & raw payloads** (`payments.raw_payload`, `payments`, `fee_ledgers`, `ledger_entries`, `fee_charges`, `fee_change_notes`) | Canonical billing records (`payments`, `fee_ledgers`, `ledger_entries`, `fee_charges`, `fee_change_notes`) are stored for school accounting and auditability. `payments.raw_payload` stores raw provider callback JSON if ingested. | Tenant- and permission-scoped access only (bursar/admin roles, and guardians scoped to their own children via `student_guardians`). | **Policy decision required:** confirm statutory/financial retention period for canonical accounting records and retention limit for `payments.raw_payload` under Kenyan tax/education/accounting law and school controller policy. | **Never** store or log M-Pesa PINs, API secrets, or authorization headers in `raw_payload` or logs; allowlist callback fields before storage; avoid copying financial/payer details into chat logs; protect via forced RLS and encrypted database backups. |
 | **AI action logs** (`ai_action_logs`) | Stored in PostgreSQL (RLS-isolated per `school_id`) to record structured `feature`, `intent`, `endpoints_read` (JSON array), `action_taken`, and redacted `metadata` for accountability under the AI data boundary. | Tenant-scoped authorized administrators/auditors only; `ai_action_logs` is separate from `AuditLogger` / financial `audit_log` (AC-29 remains pending). | **Policy decision required:** confirm retention period for operational AI action logs and backup retention/deletion propagation rules (other categories like results, attendance, and consent records also require controller-approved schedules). | Allowlist `endpoints_read` (route templates without query strings/IDs) and `metadata` keys; **never** store raw prompts, message transcripts, response bodies, phone numbers, names, payer details, secrets, or token hashes. `ai_action_logs.session_id` is a non-cascading FK to `chat_sessions(school_id, id)`—cleanup must set `session_id = NULL` in the same tenant transaction before deleting expired `chat_sessions`. |
+| **Transactional SMS payloads & provider responses** (in-memory transport; future `internal/jobs` queue payloads & logs) | Normalized recipient phone numbers, transactional message bodies (including OTPs), and provider responses are handled transiently by `SMSDispatcher`. No SMS body or provider-response persistence table exists in Release 1. | Restricted to backend SMS transport/worker execution; never exposed to frontend clients, staff UI, or AI service. | **Policy decision required:** confirm whether future worker job/dead-letter retention is strictly bounded (proposed target: never persist plaintext OTPs in queue dead-letter logs; purge delivery attempt metadata on a short operational window) and confirm provider-side retention terms with Africa's Talking. | **Never** log SMS message bodies, OTP values, `APIKey`, raw provider responses, or unmasked phone numbers; mask recipients to trailing digits (`***678`) in sandbox logs; store only safe error codes in delivery diagnostics. |
+| **In-app notifications & read timestamps** (`in_app_notifications`, `read_at`) | Stored in PostgreSQL (RLS-isolated per `school_id`) for `recipient_user_id` (`category`, `title`, `body`, `metadata`, `is_read`, `read_at`, `created_at`) to deliver Release 1 event notices and track read receipts. | Authenticated recipient (`recipient_user_id = Principal.UserID`) in the active school (`school_id = Principal.SchoolID`) only; enforced by service queries and PostgreSQL forced RLS. | **Policy decision required:** confirm how long read and unread in-app notifications (and `read_at` timestamps) are retained after term close or membership/student exit; no automated purge worker is implemented yet. | Avoid storing secrets, OTPs, clinical details, or unnecessary personal data in `body`/`metadata`; preserve first `read_at` (`coalesce(read_at, now())`) for audit consistency until purged under the approved retention schedule. |
 
 Operational cleanup requirements (pending worker implementation):
 
