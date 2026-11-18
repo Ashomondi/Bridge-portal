@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,19 +25,22 @@ type ApplyFeeChangeInput struct {
 
 // ApplyFeeChange validates and transactionally applies a mid-year fee adjustment
 // across affected students in the school, writing a fee_change_notes record,
-// an audit log entry, and deduplicated in-app notifications to linked guardians.
+// an audit log entry, and deduplicated in-app notifications to linked fee-paying guardians.
 func (s *Service) ApplyFeeChange(ctx context.Context, p contracts.Principal, in ApplyFeeChangeInput) (FeeChangeNoteView, error) {
-	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return FeeChangeNoteView{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
-	}
-	if !isIkonexTeamRole(p.Role) {
-		return FeeChangeNoteView{}, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only Ikonex administrators may apply mid-year fee changes.")
 	}
 	if s == nil || s.DB == nil {
 		return FeeChangeNoteView{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 	}
+	if err := s.requireAuditLogger(); err != nil {
+		return FeeChangeNoteView{}, err
+	}
 	var out FeeChangeNoteView
-	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+		if err := requireSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage, "Only authorized fee-management administrators may apply mid-year fee changes."); err != nil {
+			return err
+		}
 		var err error
 		out, err = s.ApplyFeeChangeTx(ctx, tx, p.SchoolID, p.UserID, in)
 		return err
@@ -49,6 +51,9 @@ func (s *Service) ApplyFeeChange(ctx context.Context, p contracts.Principal, in 
 func (s *Service) ApplyFeeChangeTx(ctx context.Context, tx pgx.Tx, schoolID, actorUserID string, in ApplyFeeChangeInput) (FeeChangeNoteView, error) {
 	if !contracts.ValidID(schoolID) || !contracts.ValidID(actorUserID) {
 		return FeeChangeNoteView{}, contracts.Fail(http.StatusBadRequest, "INVALID_ACTOR", "Valid school and actor IDs are required.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return FeeChangeNoteView{}, err
 	}
 	note := strings.TrimSpace(in.Note)
 	if note == "" {
@@ -197,79 +202,7 @@ func (s *Service) ApplyFeeChangeTx(ctx context.Context, tx pgx.Tx, schoolID, act
 
 	affectedStudents := make([]string, 0, len(targets))
 	for _, tc := range targets {
-		newChargeAmt, err := addMoney(tc.Amount, delta)
-		if err != nil || newChargeAmt < 0 {
-			return FeeChangeNoteView{}, validationFail("amount_delta", "NEGATIVE_CHARGE_AMOUNT", "Fee adjustment cannot reduce a student's term charge below zero.")
-		}
-		newChargeNum, err := newChargeAmt.NumericValue()
-		if err != nil {
-			return FeeChangeNoteView{}, err
-		}
-
-		// Lock student and student ledgers for balance update
-		var lockedStudent string
-		if err := tx.QueryRow(ctx, `SELECT id FROM students WHERE school_id = $1 AND id = $2 FOR UPDATE`, schoolID, tc.StudentID).Scan(&lockedStudent); err != nil {
-			return FeeChangeNoteView{}, err
-		}
-		if _, err := tx.Exec(ctx, `SELECT id FROM fee_ledgers WHERE school_id = $1 AND student_id = $2 ORDER BY id ASC FOR UPDATE`, schoolID, tc.StudentID); err != nil {
-			return FeeChangeNoteView{}, err
-		}
-
-		var creditAppliedDelta Money
-		if delta > 0 {
-			_, _, _, _, creditBefore, err := computeStudentTotals(ctx, tx, schoolID, tc.StudentID)
-			if err != nil {
-				return FeeChangeNoteView{}, err
-			}
-			if creditBefore > 0 {
-				creditAppliedDelta = creditBefore
-				if delta < creditAppliedDelta {
-					creditAppliedDelta = delta
-				}
-			}
-		}
-
-		if _, err := tx.Exec(ctx, `
-			UPDATE fee_charges
-			SET amount = $1
-			WHERE school_id = $2 AND id = $3`,
-			newChargeNum, schoolID, tc.ChargeID,
-		); err != nil {
-			return FeeChangeNoteView{}, err
-		}
-
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO ledger_entries (school_id, student_id, term_id, entry_type, amount, reference, description)
-			VALUES ($1, $2, $3, 'adjustment', $4, $5, $6)`,
-			schoolID, tc.StudentID, termID, deltaNum, "ADJ:"+noteID, note,
-		); err != nil {
-			return FeeChangeNoteView{}, err
-		}
-
-		if creditAppliedDelta > 0 {
-			capNum, err := creditAppliedDelta.NumericValue()
-			if err != nil {
-				return FeeChangeNoteView{}, err
-			}
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO ledger_entries (school_id, student_id, term_id, entry_type, amount, reference, description)
-				VALUES ($1, $2, $3, 'credit_applied', $4, $5, $6)`,
-				schoolID, tc.StudentID, termID, capNum, "CRD-ADJ:"+noteID, "Credit applied to mid-year fee adjustment",
-			); err != nil {
-				return FeeChangeNoteView{}, err
-			}
-		}
-
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO fee_change_note_students (school_id, note_id, student_id)
-			VALUES ($1, $2, $3)
-			ON CONFLICT DO NOTHING`,
-			schoolID, noteID, tc.StudentID,
-		); err != nil {
-			return FeeChangeNoteView{}, err
-		}
-
-		if err := syncStudentLedgerRow(ctx, tx, schoolID, tc.StudentID, yearID, termID, delta, 0, creditAppliedDelta, nil); err != nil {
+		if err := applyFeeChangeToStudentTx(ctx, tx, schoolID, yearID, termID, noteID, note, tc.ChargeID, tc.StudentID, tc.Amount, delta, deltaNum); err != nil {
 			return FeeChangeNoteView{}, err
 		}
 		affectedStudents = append(affectedStudents, tc.StudentID)
@@ -291,23 +224,21 @@ func (s *Service) ApplyFeeChangeTx(ctx context.Context, tx pgx.Tx, schoolID, act
 		return FeeChangeNoteView{}, err
 	}
 
-	if s.Audit != nil {
-		if err := s.Audit.Log(ctx, tx, contracts.AuditEvent{
-			SchoolID:     schoolID,
-			UserID:       actorUserID,
-			Action:       "billing.fee_change.apply",
-			ResourceType: "fee_change_note",
-			ResourceID:   noteID,
-			Details: map[string]any{
-				"fee_period_id":           feePeriodID,
-				"term_id":                 termID,
-				"amount_delta":            delta.String(),
-				"affected_students_count": len(affectedStudents),
-				"note":                    note,
-			},
-		}); err != nil {
-			return FeeChangeNoteView{}, err
-		}
+	if err := s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+		SchoolID:     schoolID,
+		UserID:       actorUserID,
+		Action:       "billing.fee_change.apply",
+		ResourceType: "fee_change_note",
+		ResourceID:   noteID,
+		Details: map[string]any{
+			"fee_period_id":           feePeriodID,
+			"term_id":                 termID,
+			"amount_delta":            delta.String(),
+			"affected_students_count": len(affectedStudents),
+			"note":                    note,
+		},
+	}); err != nil {
+		return FeeChangeNoteView{}, err
 	}
 
 	var termIDPtr *string
@@ -326,175 +257,177 @@ func (s *Service) ApplyFeeChangeTx(ctx context.Context, tx pgx.Tx, schoolID, act
 	}, nil
 }
 
-// OnTermStartDateChanged implements TermDateFeeSyncer for Ema's academics calendar handler.
-// It updates fee_periods.due_date, fee_charges.due_date, and fee_ledgers.due_date to
-// newStartDate, records a fee_change_notes entry, writes an audit log entry, and sends
-// deduplicated in-app notifications only to guardians of affected students.
-func (s *Service) OnTermStartDateChanged(
+func applyFeeChangeToStudentTx(
 	ctx context.Context,
 	tx pgx.Tx,
-	schoolID, termID string,
-	newStartDate time.Time,
-	actorUserID, note string,
+	schoolID, yearID, termID, noteID, note, chargeID, studentID string,
+	currentChargeAmt, delta Money,
+	deltaNum any,
 ) error {
-	if !contracts.ValidID(schoolID) || !contracts.ValidID(termID) || !contracts.ValidID(actorUserID) {
-		return contracts.Fail(http.StatusBadRequest, "INVALID_TERM_DATE_SYNC", "Valid school_id, term_id, and actorUserID are required.")
+	newChargeAmt, err := addMoney(currentChargeAmt, delta)
+	if err != nil || newChargeAmt < 0 {
+		return validationFail("amount_delta", "NEGATIVE_CHARGE_AMOUNT", "Fee adjustment cannot reduce a student's term charge below zero.")
 	}
-	trimmedNote := strings.TrimSpace(note)
-	if trimmedNote == "" {
-		return validationFail("note", "FEE_CHANGE_NOTE_REQUIRED", "An explanation note is required when changing a term start date.")
-	}
-	if newStartDate.IsZero() {
-		return validationFail("new_start_date", "INVALID_DUE_DATE", "A valid new term start date is required.")
-	}
-	newDateStr := newStartDate.Format("2006-01-02")
-
-	var feePeriodID string
-	var oldDueDate time.Time
-	err := tx.QueryRow(ctx, `
-		SELECT id, due_date
-		FROM fee_periods
-		WHERE school_id = $1 AND term_id = $2
-		FOR UPDATE`,
-		schoolID, termID,
-	).Scan(&feePeriodID, &oldDueDate)
-	if errors.Is(err, pgx.ErrNoRows) {
-		var yearID string
-		var termNumber int
-		err := tx.QueryRow(ctx, `
-			SELECT academic_year_id, term_number, start_date
-			FROM terms
-			WHERE school_id = $1 AND id = $2`,
-			schoolID, termID,
-		).Scan(&yearID, &termNumber, &oldDueDate)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return validationFail("term_id", "INVALID_TERM", "Term does not exist in this school.")
-		}
-		if err != nil {
-			return err
-		}
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO fee_periods (school_id, academic_year_id, term_id, period_type, name, due_date)
-			VALUES ($1, $2, $3, 'term', $4, $5::date)
-			RETURNING id`,
-			schoolID, yearID, termID, fmt.Sprintf("Term %d", termNumber), newDateStr,
-		).Scan(&feePeriodID); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	} else {
-		if _, err := tx.Exec(ctx, `
-			UPDATE fee_periods
-			SET due_date = $1::date
-			WHERE school_id = $2 AND id = $3`,
-			newDateStr, schoolID, feePeriodID,
-		); err != nil {
-			return err
-		}
-	}
-
-	oldDateStr := oldDueDate.Format("2006-01-02")
-
-	rows, err := tx.Query(ctx, `
-		UPDATE fee_charges
-		SET due_date = $1::date
-		WHERE school_id = $2 AND fee_period_id = $3
-		RETURNING student_id`,
-		newDateStr, schoolID, feePeriodID,
-	)
+	newChargeNum, err := newChargeAmt.NumericValue()
 	if err != nil {
 		return err
 	}
-	studentSet := make(map[string]struct{})
-	var affectedStudents []string
-	for rows.Next() {
-		var sid string
-		if err := rows.Scan(&sid); err != nil {
-			rows.Close()
-			return err
-		}
-		if _, seen := studentSet[sid]; !seen {
-			studentSet[sid] = struct{}{}
-			affectedStudents = append(affectedStudents, sid)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+
+	var lockedStudent string
+	if err := tx.QueryRow(ctx, `SELECT id FROM students WHERE school_id = $1 AND id = $2 FOR UPDATE`, schoolID, studentID).Scan(&lockedStudent); err != nil {
 		return err
 	}
-	sort.Strings(affectedStudents)
+
+	ledgers, err := lockAndLoadStudentLedgers(ctx, tx, schoolID, studentID)
+	if err != nil {
+		return err
+	}
+	dstIdx := -1
+	for i := range ledgers {
+		if ledgers[i].AcademicYearID == yearID && ledgers[i].TermID == termID {
+			dstIdx = i
+			break
+		}
+	}
+	if dstIdx < 0 {
+		return fmt.Errorf("billing: missing fee_ledgers row for student %s term %s", studentID, termID)
+	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE fee_ledgers
-		SET due_date = $1::date, updated_at = NOW()
-		WHERE school_id = $2 AND term_id = $3`,
-		newDateStr, schoolID, termID,
+		UPDATE fee_charges
+		SET amount = $1
+		WHERE school_id = $2 AND id = $3`,
+		newChargeNum, schoolID, chargeID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO ledger_entries (school_id, student_id, term_id, entry_type, amount, reference, description)
+		VALUES ($1, $2, $3, 'adjustment', $4, $5, $6)`,
+		schoolID, studentID, termID, deltaNum, "ADJ:"+noteID, note,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO fee_change_note_students (school_id, note_id, student_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`,
+		schoolID, noteID, studentID,
 	); err != nil {
 		return err
 	}
 
-	var noteID string
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO fee_change_notes (
-			school_id, term_id, fee_period_id, change_type, amount_delta,
-			old_due_date, new_due_date, note, created_by, affected_students_count
-		)
-		VALUES ($1, $2, $3, 'due_date', 0.00, $4::date, $5::date, $6, $7, $8)
-		RETURNING id`,
-		schoolID, termID, feePeriodID, oldDateStr, newDateStr, trimmedNote, actorUserID, len(affectedStudents),
-	).Scan(&noteID); err != nil {
-		return err
-	}
+	dst := ledgers[dstIdx]
+	if delta > 0 {
+		remaining := delta
+		if dst.CreditBalance > 0 {
+			absorbed := dst.CreditBalance
+			if remaining < absorbed {
+				absorbed = remaining
+			}
+			dst.CreditBalance -= absorbed
+			nextApp, err := addMoney(dst.CreditApplied, absorbed)
+			if err != nil {
+				return err
+			}
+			dst.CreditApplied = nextApp
+			remaining -= absorbed
+			absorbedNum, err := absorbed.NumericValue()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO ledger_entries (school_id, student_id, term_id, entry_type, amount, reference, description)
+				VALUES ($1, $2, $3, 'credit_applied', $4, $5, $6)`,
+				schoolID, studentID, termID, absorbedNum, "CRD:ADJ:"+noteID, "Credit applied to mid-year fee adjustment",
+			); err != nil {
+				return err
+			}
+		}
+		for i := range ledgers {
+			if i == dstIdx || remaining == 0 {
+				continue
+			}
+			src := ledgers[i]
+			if src.CreditBalance <= 0 {
+				continue
+			}
+			xfer := src.CreditBalance
+			if remaining < xfer {
+				xfer = remaining
+			}
+			src.CreditBalance -= xfer
+			nextXfer, err := addMoney(src.CreditTransferred, xfer)
+			if err != nil {
+				return err
+			}
+			src.CreditTransferred = nextXfer
+			if err := updateLedgerRowInPlace(ctx, tx, src, nil); err != nil {
+				return err
+			}
+			ledgers[i] = src
 
-	for _, sid := range affectedStudents {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO fee_change_note_students (school_id, note_id, student_id)
-			VALUES ($1, $2, $3)
-			ON CONFLICT DO NOTHING`,
-			schoolID, noteID, sid,
-		); err != nil {
+			xferNum, err := xfer.NumericValue()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO ledger_entries (school_id, student_id, term_id, entry_type, amount, reference, description)
+				VALUES ($1, $2, $3, 'adjustment', $4, $5, $6)`,
+				schoolID, studentID, src.TermID, xferNum,
+				"XFER:ADJ:"+noteID+":"+src.TermID,
+				fmt.Sprintf("Credit transferred to Year %d Term %d fee adjustment", dst.Year, dst.TermNumber),
+			); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO ledger_entries (school_id, student_id, term_id, entry_type, amount, reference, description)
+				VALUES ($1, $2, $3, 'credit_applied', $4, $5, $6)`,
+				schoolID, studentID, termID, xferNum,
+				"CRD:ADJ:"+noteID+":"+src.TermID,
+				fmt.Sprintf("Credit carried forward from Year %d Term %d", src.Year, src.TermNumber),
+			); err != nil {
+				return err
+			}
+			nextApp, err := addMoney(dst.CreditApplied, xfer)
+			if err != nil {
+				return err
+			}
+			dst.CreditApplied = nextApp
+			remaining -= xfer
+		}
+		nextBilled, err := addMoney(dst.BilledAmount, delta)
+		if err != nil {
 			return err
 		}
-	}
-
-	if err := s.notifyAffectedGuardians(
-		ctx, tx, schoolID, affectedStudents,
-		"fee_due_date_change",
-		"Fee Due Date Updated",
-		fmt.Sprintf("The fee due date has been updated from %s to %s: %s", oldDateStr, newDateStr, trimmedNote),
-		map[string]any{
-			"fee_change_note_id": noteID,
-			"fee_period_id":      feePeriodID,
-			"term_id":            termID,
-			"change_type":        "due_date",
-			"old_due_date":       oldDateStr,
-			"new_due_date":       newDateStr,
-		},
-	); err != nil {
-		return err
-	}
-
-	if s != nil && s.Audit != nil {
-		if err := s.Audit.Log(ctx, tx, contracts.AuditEvent{
-			SchoolID:     schoolID,
-			UserID:       actorUserID,
-			Action:       "billing.term_due_date.sync",
-			ResourceType: "fee_change_note",
-			ResourceID:   noteID,
-			Details: map[string]any{
-				"term_id":                 termID,
-				"fee_period_id":           feePeriodID,
-				"old_due_date":            oldDateStr,
-				"new_due_date":            newDateStr,
-				"affected_students_count": len(affectedStudents),
-				"note":                    trimmedNote,
-			},
-		}); err != nil {
+		nextCurrent, err := addMoney(dst.CurrentBalance, remaining)
+		if err != nil {
 			return err
 		}
+		dst.BilledAmount = nextBilled
+		dst.CurrentBalance = nextCurrent
+		return updateLedgerRowInPlace(ctx, tx, dst, nil)
 	}
-	return nil
+
+	reduction := -delta
+	if dst.BilledAmount < reduction {
+		return validationFail("amount_delta", "NEGATIVE_CHARGE_AMOUNT", "Fee adjustment cannot reduce billed term fees below zero.")
+	}
+	dst.BilledAmount -= reduction
+	debtReduced := dst.CurrentBalance
+	if reduction < debtReduced {
+		debtReduced = reduction
+	}
+	dst.CurrentBalance -= debtReduced
+	surplus := reduction - debtReduced
+	if surplus > 0 {
+		nextCredit, err := addMoney(dst.CreditBalance, surplus)
+		if err != nil {
+			return err
+		}
+		dst.CreditBalance = nextCredit
+	}
+	return updateLedgerRowInPlace(ctx, tx, dst, nil)
 }
 
 func (s *Service) notifyAffectedGuardians(
@@ -513,7 +446,7 @@ func (s *Service) notifyAffectedGuardians(
 		FROM student_guardians sg
 		JOIN memberships m ON m.school_id = sg.school_id AND m.user_id = sg.user_id AND m.status = 'active'
 		JOIN users u ON u.id = sg.user_id AND u.is_active
-		WHERE sg.school_id = $1 AND sg.student_id = ANY($2::uuid[])
+		WHERE sg.school_id = $1 AND sg.student_id = ANY($2::uuid[]) AND sg.is_fee_payer = TRUE
 		ORDER BY sg.user_id ASC`,
 		schoolID, studentIDs,
 	)
@@ -534,8 +467,10 @@ func (s *Service) notifyAffectedGuardians(
 		return err
 	}
 
+	sqlTx := contracts.PgxTx(tx)
 	for _, uid := range guardianUserIDs {
-		if err := s.Notifier.CreateInAppNotification(ctx, tx, schoolID, CreateNotification{
+		if err := s.Notifier.CreateInAppNotification(ctx, sqlTx, contracts.InAppNotification{
+			SchoolID:        schoolID,
 			RecipientUserID: uid,
 			Category:        category,
 			Title:           title,
