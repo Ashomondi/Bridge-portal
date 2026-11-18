@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // Role names used by the platform (C59, Docs/Ikonex.md section 4).
@@ -92,21 +94,12 @@ func DefaultConfig() Config {
 	return Config{AllowPrincipalDeanOverride: true}
 }
 
-// Notification is a single in-app notification request. Ian's notifications
-// package implements InAppNotifier at the consumer boundary.
-type Notification struct {
-	SchoolID        string         `json:"school_id"`
-	RecipientUserID string         `json:"recipient_user_id"`
-	Category        string         `json:"category"`
-	Title           string         `json:"title"`
-	Body            string         `json:"body"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
-}
+// Notification is an alias for the shared contracts.InAppNotification request.
+type Notification = contracts.InAppNotification
 
-// InAppNotifier is implemented by internal/notifications (Ian, Dev 5).
-type InAppNotifier interface {
-	CreateInAppNotification(ctx context.Context, n Notification) error
-}
+// InAppNotifier is an alias for contracts.InAppNotifier, implemented by
+// internal/notifications (Ian, Dev 5).
+type InAppNotifier = contracts.InAppNotifier
 
 // TermDateFeeSyncer is implemented by internal/billing (Ian, Dev 5). It shifts
 // the term's fee due dates, records the fee-change note and notifies parents.
@@ -116,12 +109,18 @@ type TermDateFeeSyncer interface {
 
 type noopNotifier struct{}
 
-func (noopNotifier) CreateInAppNotification(context.Context, Notification) error { return nil }
+func (noopNotifier) CreateInAppNotification(context.Context, contracts.SQLTx, Notification) error {
+	return nil
+}
+
+// ErrFeeSyncerUnavailable is returned when a term start date changes without a
+// configured TermDateFeeSyncer implementation.
+var ErrFeeSyncerUnavailable = errors.New("academics: term date fee syncer is not configured")
 
 type noopFeeSyncer struct{}
 
 func (noopFeeSyncer) OnTermStartDateChanged(context.Context, string, string, time.Time, string, string) error {
-	return nil
+	return ErrFeeSyncerUnavailable
 }
 
 // Deps is the complete set of collaborators required by academics.
@@ -325,14 +324,14 @@ func contains(values []string, want string) bool {
 	return false
 }
 
-func (s *Service) notify(ctx context.Context, n Notification) error {
+func (s *Service) notify(ctx context.Context, tx Store, n Notification) error {
 	if s.notifier == nil {
 		return nil
 	}
-	return s.notifier.CreateInAppNotification(ctx, n)
+	return s.notifier.CreateInAppNotification(ctx, tx.NotificationTx(), n)
 }
 
-func (s *Service) notifyMany(ctx context.Context, schoolID string, recipients []string, category, title, body string, metadata map[string]any) (int, error) {
+func (s *Service) notifyMany(ctx context.Context, tx Store, schoolID string, recipients []string, category, title, body string, metadata map[string]any) (int, error) {
 	seen := map[string]bool{}
 	queued := 0
 	for _, uid := range recipients {
@@ -340,7 +339,7 @@ func (s *Service) notifyMany(ctx context.Context, schoolID string, recipients []
 			continue
 		}
 		seen[uid] = true
-		if err := s.notify(ctx, Notification{
+		if err := s.notify(ctx, tx, Notification{
 			SchoolID:        schoolID,
 			RecipientUserID: uid,
 			Category:        category,

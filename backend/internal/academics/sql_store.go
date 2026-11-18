@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // SQLStore is the PostgreSQL implementation of Store. It uses database/sql so
@@ -54,6 +56,33 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 		return err
 	}
 	return tx.Commit()
+}
+
+// NotificationTx returns the active *sql.Tx adapted to contracts.SQLTx.
+func (s *SQLStore) NotificationTx() contracts.SQLTx {
+	return contracts.StdSQLTx(s.tx)
+}
+
+// SQLTx returns the active *sql.Tx for transaction-bound collaborators.
+func (s *SQLStore) SQLTx() *sql.Tx {
+	return s.tx
+}
+
+type sqlTxContextKey struct{}
+
+// WithSQLTx attaches an active *sql.Tx to ctx so collaborators invoked within
+// Store.WithTx (such as TermDateFeeSyncer) share the caller's transaction.
+func WithSQLTx(ctx context.Context, tx *sql.Tx) context.Context {
+	if tx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sqlTxContextKey{}, tx)
+}
+
+// SQLTxFromContext extracts an active *sql.Tx attached by WithSQLTx.
+func SQLTxFromContext(ctx context.Context) (*sql.Tx, bool) {
+	tx, ok := ctx.Value(sqlTxContextKey{}).(*sql.Tx)
+	return tx, ok && tx != nil
 }
 
 func (s *SQLStore) CurrentAcademicYearID(ctx context.Context, schoolID string) (string, error) {
@@ -239,6 +268,32 @@ func (s *SQLStore) MembershipByID(ctx context.Context, schoolID, membershipID st
 		return Membership{}, ErrNotFound
 	}
 	return m, err
+}
+
+func (s *SQLStore) ClassesForTeacher(ctx context.Context, schoolID, membershipID string) ([]Class, error) {
+	rows, err := s.q().QueryContext(ctx, `
+		SELECT DISTINCT c.id, c.school_id, c.grade_level_id, c.stream_name
+		FROM classes c
+		JOIN membership_badges mb ON mb.scope_id = c.id
+		JOIN badges b ON b.id = mb.badge_id AND b.school_id = c.school_id
+		WHERE c.school_id = $1 AND mb.membership_id = $2
+		  AND b.slug = 'class_teacher'
+		  AND `+activeBadgePredicate+`
+		ORDER BY c.stream_name`, schoolID, membershipID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]Class, 0)
+	for rows.Next() {
+		var class Class
+		if err := rows.Scan(&class.ID, &class.SchoolID, &class.GradeLevelID, &class.StreamName); err != nil {
+			return nil, err
+		}
+		out = append(out, class)
+	}
+	return out, rows.Err()
 }
 
 const activeBadgePredicate = `(mb.valid_from IS NULL OR mb.valid_from <= NOW())
