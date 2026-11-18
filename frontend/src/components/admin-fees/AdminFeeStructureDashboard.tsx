@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock3,
   GraduationCap,
   Info,
   Link2,
@@ -210,32 +211,48 @@ export default function AdminFeeStructureDashboard({
             onChange={setActiveTab}
           />
           <PreviewNotice />
-          <FilterCard
-            filters={data?.filters ?? null}
-            grades={grades}
-            activeGrade={activeGrade}
-            activeAcademicYear={activeAcademicYear}
-            activeCurriculumTier={activeCurriculumTier}
-            published={activeStructure?.published ?? null}
-            publishedAt={activeStructure?.publishedAt ?? null}
-            onGradeChange={setActiveGrade}
-            onAcademicYearChange={setActiveAcademicYear}
-            onCurriculumTierChange={setActiveCurriculumTier}
-          />
-          <CohortBanner
-            grade={activeGrade}
-            cohort={activeStructure?.cohort ?? null}
-          />
+          <div
+            id={`fees-panel-${activeTab}`}
+            role="tabpanel"
+            aria-labelledby={`fees-tab-${activeTab}`}
+            tabIndex={0}
+            className="focus-visible:outline-none"
+          >
+            {activeTab === "structure" ? (
+              <>
+                <FilterCard
+                  filters={data?.filters ?? null}
+                  grades={grades}
+                  activeGrade={activeGrade}
+                  activeAcademicYear={activeAcademicYear}
+                  activeCurriculumTier={activeCurriculumTier}
+                  published={activeStructure?.published ?? null}
+                  publishedAt={activeStructure?.publishedAt ?? null}
+                  onGradeChange={setActiveGrade}
+                  onAcademicYearChange={setActiveAcademicYear}
+                  onCurriculumTierChange={setActiveCurriculumTier}
+                />
+                <CohortBanner
+                  grade={activeGrade}
+                  cohort={activeStructure?.cohort ?? null}
+                />
 
-          <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,1fr)]">
-            <FeeMatrixCard matrix={activeStructure?.matrix ?? null} />
-            <div className="min-w-0 space-y-4">
-              <DonutCard distribution={activeStructure?.distribution ?? null} />
-              <AdjustmentCallout
-                adjustment={activeStructure?.adjustment ?? null}
-                onSwitchToChanges={() => setActiveTab("changes")}
-              />
-            </div>
+                <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,1fr)]">
+                  <FeeMatrixCard matrix={activeStructure?.matrix ?? null} />
+                  <div className="min-w-0 space-y-4">
+                    <DonutCard
+                      distribution={activeStructure?.distribution ?? null}
+                    />
+                    <AdjustmentCallout
+                      adjustment={activeStructure?.adjustment ?? null}
+                      onSwitchToChanges={() => setActiveTab("changes")}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <FeeChangesPanel changesLogged={data?.changesLogged ?? null} />
+            )}
           </div>
         </main>
       </div>
@@ -579,28 +596,32 @@ function ViewTabs({
         <button
           type="button"
           role="tab"
+          id="fees-tab-structure"
+          aria-controls="fees-panel-structure"
           aria-selected={activeTab === "structure"}
           onClick={() => onChange("structure")}
           className={cn(
-            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
+            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
             activeTab === "structure"
               ? "bg-white text-brand-700 shadow-sm"
-              : "text-slate-400",
+              : "text-slate-500",
           )}
         >
-          <Wallet className="h-3.5 w-3.5" />
+          <Wallet className="h-3.5 w-3.5" aria-hidden="true" />
           Fee Structure
         </button>
         <button
           type="button"
           role="tab"
+          id="fees-tab-changes"
+          aria-controls="fees-panel-changes"
           aria-selected={activeTab === "changes"}
           onClick={() => onChange("changes")}
           className={cn(
-            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition",
+            "inline-flex items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[10px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2",
             activeTab === "changes"
               ? "bg-white text-brand-700 shadow-sm"
-              : "text-slate-400",
+              : "text-slate-500",
           )}
         >
           Fee Changes
@@ -612,6 +633,60 @@ function ViewTabs({
         </button>
       </div>
     </div>
+  );
+}
+
+function FeeChangesPanel({ changesLogged }: { changesLogged: number | null }) {
+  const title =
+    changesLogged === 0 ? "No fee changes logged" : "Fee changes unavailable";
+  const body =
+    changesLogged === null
+      ? "The fee-change history view is not connected yet."
+      : changesLogged === 0
+        ? "No changes have been recorded for the selected fee structure."
+        : `${changesLogged} ${
+            changesLogged === 1 ? "change is" : "changes are"
+          } logged, but the change-history view is not connected yet.`;
+
+  return (
+    <section className="mt-4 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600">
+            <Clock3 className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+            <h2 className="text-sm font-bold tracking-tight text-slate-900">
+              Fee Changes
+            </h2>
+            <p className="mt-0.5 text-[8px] text-slate-500">
+              Fee-change history for the selected structure
+            </p>
+          </div>
+        </div>
+        <span className="rounded-full bg-[#F0EBF9] px-2 py-0.5 text-[8px] font-semibold text-[#6D4FA3]">
+          {changesLogged === null
+            ? "Count unavailable"
+            : `${changesLogged.toLocaleString("en-GB")} logged`}
+        </span>
+      </div>
+
+      <div
+        role="status"
+        aria-live="polite"
+        className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-8 text-center"
+      >
+        <span className="mx-auto grid h-9 w-9 place-items-center rounded-xl bg-white text-slate-500 shadow-sm">
+          <Clock3 className="h-4 w-4" aria-hidden="true" />
+        </span>
+        <p className="mt-2.5 text-[11px] font-semibold text-slate-700">
+          {title}
+        </p>
+        <p className="mx-auto mt-1 max-w-xs text-[9px] leading-relaxed text-slate-600">
+          {body}
+        </p>
+      </div>
+    </section>
   );
 }
 
