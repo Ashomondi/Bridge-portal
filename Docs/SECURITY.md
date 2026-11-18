@@ -197,3 +197,35 @@ Operational cleanup requirements (pending worker implementation):
   is an offence under the Act. Confirm registration status before
   processing real student data — this is a business/legal task, not a
   coding task, but it blocks going live.
+
+## Billing access control and financial auditability
+
+- **Authorization & least privilege:** Billing endpoints never rely on
+  hardcoded platform role strings. Every staff operation checks an active,
+  non-parent `memberships` row, active `users.is_active`, and an active,
+  unexpired school-wide badge permission (`billing.fee_structures.manage` for
+  `LoadFeeStructure` and `ChargeCurrentTermStructures`; `billing.ledgers.view`
+  for read-only `GetStudentFeeBalance` and `GetStudentLedger`).
+- **Guardian & fee-payer boundary:** Guardian access to student fee balances,
+  ledgers, and fee-due-date change notifications requires an active
+  `student_guardians` relationship in the same school with `is_fee_payer = TRUE`.
+  Non-fee-paying guardians (`is_fee_payer = FALSE`), unlinked guardians, and
+  unrelated users receive `403 FORBIDDEN`.
+- **Tenant isolation:** All billing HTTP and service entry points derive
+  `school_id` exclusively from the authenticated `contracts.Principal` via
+  `contracts.TenantDB.WithTenantTx`, backed by PostgreSQL `FORCE ROW LEVEL SECURITY`.
+  Requests targeting a student in another school return `404 STUDENT_NOT_FOUND`
+  without disclosing existence.
+- **Mandatory transactional audit:** All billing mutations (`LoadFeeStructure`,
+  `ChargeCurrentTermStructures`, `ChargeGradeForTerm`, `ChargeStudent`,
+  `ChargeAdmittedStudent`, `RecordStudentPayment*`, `OnTermStartDateChanged*`)
+  require a non-nil `AuditLogger` (`PostgresAuditLogger` writes to `audit_log`
+  within the caller's transaction) and fail closed (`500 AUDIT_LOGGER_REQUIRED`)
+  if omitted. Audit failures roll back the financial mutation atomically.
+- **Redaction & immutability:** Audit `details` record actor user ID, school ID,
+  action, resource IDs, references, and minor-unit amounts — never phone numbers,
+  PINs, or raw provider payloads. `fee_charges`, `ledger_entries`, and
+  `fee_change_notes` are append-only; corrections are represented via new
+  compensating entries/notes rather than mutating historical records. Financial
+  retention schedules remain subject to the controller-confirmed policy in the
+  Retention table above.

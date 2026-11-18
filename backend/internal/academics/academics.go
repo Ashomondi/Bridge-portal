@@ -113,10 +113,14 @@ func (noopNotifier) CreateInAppNotification(context.Context, contracts.SQLTx, No
 	return nil
 }
 
+// ErrFeeSyncerUnavailable is returned when a term start date changes without a
+// configured TermDateFeeSyncer implementation.
+var ErrFeeSyncerUnavailable = errors.New("academics: term date fee syncer is not configured")
+
 type noopFeeSyncer struct{}
 
 func (noopFeeSyncer) OnTermStartDateChanged(context.Context, string, string, time.Time, string, string) error {
-	return nil
+	return ErrFeeSyncerUnavailable
 }
 
 // Deps is the complete set of collaborators required by academics.
