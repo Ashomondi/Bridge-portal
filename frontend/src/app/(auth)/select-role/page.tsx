@@ -16,16 +16,18 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
+import { roleRoute } from '@/lib/auth';
 
 interface SchoolRole {
   id: string;
+  schoolId?: string;
   schoolName: string;
-  role: 'Parent' | 'Teacher' | 'Waiting for verification';
+  role: string;
+  rawRole: string;
+  route: string | null;
   details: string;
   subDetails: string;
   type: 'active' | 'pending';
-  badgeColor?: string;
-  badgeBg?: string;
 }
 
 interface MembershipPayload {
@@ -51,26 +53,30 @@ interface MembershipPayload {
 }
 
 function normalizeRole(raw: MembershipPayload): SchoolRole {
-  const roleText = (raw.role ?? raw.role_name ?? 'Teacher').toString();
+  const rawRole = (raw.role ?? raw.role_name ?? 'membership').toString();
+  const lowerRole = rawRole.toLowerCase();
   const schoolName = raw.school_name ?? raw.schoolName ?? 'School';
   const status = raw.type ?? raw.status ?? (raw.pending || raw.is_pending ? 'pending' : 'active');
   const isPending = status === 'pending' || raw.pending || raw.is_pending || raw.is_active === false || raw.active === false;
-  const role: SchoolRole['role'] =
-    roleText.toLowerCase().includes('parent')
-      ? 'Parent'
-      : roleText.toLowerCase().includes('teacher')
-        ? 'Teacher'
-        : 'Waiting for verification';
+  const route = roleRoute(rawRole);
+  const role = lowerRole.includes('parent')
+    ? 'Parent'
+    : lowerRole.includes('teacher')
+      ? 'Teacher'
+      : rawRole.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 
   return {
-    id: raw.id ?? raw.membership_id ?? raw.school_id ?? `${schoolName}-${role}`,
+    id: raw.id ?? raw.membership_id ?? raw.school_id ?? `${schoolName}-${rawRole}`,
+    schoolId: raw.school_id ?? undefined,
     schoolName,
-    role,
+    role: isPending && !route ? 'Waiting for verification' : role,
+    rawRole,
+    route: isPending ? null : route,
     details:
       raw.details ??
       raw.description ??
       raw.label ??
-      (role === 'Parent' ? 'guardian account' : 'school membership'),
+      (lowerRole.includes('parent') ? 'guardian account' : 'school membership'),
     subDetails:
       raw.subDetails ??
       raw.sub_details ??
@@ -89,7 +95,17 @@ export default function SelectRolePage() {
   useEffect(() => {
     const loadRoles = async () => {
       try {
-        const token = localStorage.getItem('auth_token');
+        const stored = sessionStorage.getItem('auth_memberships');
+        if (stored) {
+          const memberships = JSON.parse(stored) as MembershipPayload[];
+          if (Array.isArray(memberships)) {
+            setRoles(memberships.map(normalizeRole));
+            setLoading(false);
+            return;
+          }
+        }
+
+        const token = sessionStorage.getItem('auth_token') ?? localStorage.getItem('auth_token');
         const payload = await apiFetch<{ data?: { memberships?: MembershipPayload[] }; memberships?: MembershipPayload[] }>(
           '/api/v1/auth/memberships',
           token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
@@ -110,13 +126,13 @@ export default function SelectRolePage() {
   }, []);
 
   const handleSelectRole = (roleItem: SchoolRole) => {
-    if (roleItem.type === 'pending') return;
+    if (roleItem.type === 'pending' || !roleItem.route) return;
 
-    if (roleItem.role === 'Parent') {
-      router.push('/parent');
-    } else if (roleItem.role === 'Teacher') {
-      router.push('/teacher');
-    }
+    sessionStorage.setItem(
+      'auth_membership',
+      JSON.stringify({ id: roleItem.id, school_id: roleItem.schoolId, role: roleItem.rawRole }),
+    );
+    router.push(roleItem.route);
   };
 
   const emptyState = useMemo(
@@ -139,7 +155,7 @@ export default function SelectRolePage() {
             <span className="font-bold text-slate-900 tracking-tight">Role Switcher</span>
           </div>
           <div className="flex items-center gap-3">
-            <button className="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition">
+            <button type="button" aria-label="Open notifications" onClick={() => router.push('/notifications')} className="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition">
               <Bell className="w-4 h-4" />
             </button>
             <div className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-semibold">
@@ -176,9 +192,18 @@ export default function SelectRolePage() {
             roles.map((item) => (
               <div
                 key={item.id}
+                role="button"
+                tabIndex={item.type === 'pending' || !item.route ? -1 : 0}
+                aria-disabled={item.type === 'pending' || !item.route}
                 onClick={() => handleSelectRole(item)}
-                className={`bg-white border rounded-2xl p-4 transition shadow-sm relative group ${
-                  item.type === 'pending'
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    handleSelectRole(item);
+                  }
+                }}
+                className={`bg-white border rounded-2xl p-4 transition shadow-sm relative group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#008272] focus-visible:ring-offset-2 ${
+                  item.type === 'pending' || !item.route
                     ? 'border-slate-200/80 opacity-90 cursor-not-allowed bg-slate-50/50'
                     : 'border-slate-200 hover:border-[#008272] hover:shadow-md cursor-pointer'
                 }`}
@@ -226,13 +251,21 @@ export default function SelectRolePage() {
                       <Clock className="w-3 h-3" /> Waiting for verification
                     </span>
                   )}
+                  {!['Parent', 'Teacher', 'Waiting for verification'].includes(item.role) && (
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">
+                      {item.role}
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2 text-xs text-slate-500 pt-1 border-t border-slate-100">
                   {item.role === 'Parent' && <Users className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
                   {item.role === 'Teacher' && <BookOpen className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
                   {item.type === 'pending' && <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
-                  <span className="truncate">{item.details}</span>
+                  {item.type !== 'pending' && !['Parent', 'Teacher'].includes(item.role) && (
+                    <Shield className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  )}
+                  <span className="break-words">{item.details}</span>
                 </div>
               </div>
             ))
@@ -249,28 +282,33 @@ export default function SelectRolePage() {
 
       <div className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
         <button
-          onClick={() => setActiveNav('home')}
+          type="button"
+          onClick={() => { setActiveNav('home'); router.push('/'); }}
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'home' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
         >
           <LayoutGrid className="w-5 h-5" />
           <span>Home</span>
         </button>
         <button
+          type="button"
           onClick={() => setActiveNav('roles')}
+          aria-current="page"
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'roles' ? 'text-[#008272] font-semibold' : 'hover:text-slate-800'}`}
         >
           <Users className="w-5 h-5" />
           <span>Roles</span>
         </button>
         <button
-          onClick={() => setActiveNav('settings')}
+          type="button"
+          onClick={() => { setActiveNav('settings'); router.push('/settings'); }}
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'settings' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
         >
           <SettingsIcon className="w-5 h-5" />
           <span>Settings</span>
         </button>
         <button
-          onClick={() => setActiveNav('shield')}
+          type="button"
+          onClick={() => { setActiveNav('shield'); router.push('/settings'); }}
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'shield' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
         >
           <Shield className="w-5 h-5" />

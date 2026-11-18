@@ -137,7 +137,7 @@ export default function NotificationsPage() {
             <span className="font-bold text-slate-900 tracking-tight">Notifications</span>
           </div>
           <div className="flex items-center gap-3">
-            <button className="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition relative">
+            <button type="button" aria-label="Notifications" className="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition relative">
               <Bell className="w-4 h-4 text-[#008272]" />
               {unreadCount > 0 && (
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-rose-500"></span>
@@ -153,16 +153,21 @@ export default function NotificationsPage() {
         <div className="flex items-center justify-between pt-1">
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Notifications</h1>
           <button 
+            type="button"
             onClick={markAllAsRead}
-            className="text-xs font-semibold text-[#008272] hover:underline"
+            disabled={unreadCount === 0}
+            className="text-xs font-semibold text-[#008272] hover:underline disabled:cursor-not-allowed disabled:opacity-50"
           >
             Mark all as read
           </button>
         </div>
 
         {/* Filter Tabs (All / Unread) */}
-        <div className="flex bg-[#f2f8f7] p-1 rounded-2xl border border-slate-200 text-xs font-medium">
+        <div role="tablist" aria-label="Notification filters" className="flex bg-[#f2f8f7] p-1 rounded-2xl border border-slate-200 text-xs font-medium">
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'all'}
             onClick={() => setActiveTab('all')}
             className={`flex-1 py-2 rounded-xl transition ${
               activeTab === 'all' 
@@ -173,6 +178,9 @@ export default function NotificationsPage() {
             All
           </button>
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'unread'}
             onClick={() => setActiveTab('unread')}
             className={`flex-1 py-2 rounded-xl transition flex items-center justify-center gap-1.5 ${
               activeTab === 'unread' 
@@ -292,13 +300,15 @@ export default function NotificationsPage() {
       {/* Bottom Floating Navigation Bar */}
       <div className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
         <button 
-          onClick={() => setActiveNav('home')} 
+          type="button"
+          onClick={() => { setActiveNav('home'); router.push('/'); }} 
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'home' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
         >
           <LayoutGrid className="w-5 h-5" />
           <span>Home</span>
         </button>
         <button 
+          type="button"
           onClick={() => { setActiveNav('roles'); router.push('/select-role'); }} 
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'roles' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
         >
@@ -306,14 +316,17 @@ export default function NotificationsPage() {
           <span>Roles</span>
         </button>
         <button 
+          type="button"
           onClick={() => setActiveNav('alerts')} 
+          aria-current="page"
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'alerts' ? 'text-[#008272] font-semibold' : 'hover:text-slate-800'}`}
         >
           <Bell className="w-5 h-5" />
           <span>Alerts</span>
         </button>
         <button 
-          onClick={() => setActiveNav('settings')} 
+          type="button"
+          onClick={() => { setActiveNav('settings'); router.push('/settings'); }} 
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'settings' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
         >
           <SettingsIcon className="w-5 h-5" />

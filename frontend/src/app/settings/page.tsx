@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
+import {
   ShieldCheck, 
   Bell, 
   Lock, 
@@ -12,15 +12,22 @@ import {
   LogOut, 
   Globe
 } from 'lucide-react';
+import { clearStoredAuth, normalizeKenyanPhone } from '@/lib/auth';
 
 export default function AccountSettingsPage() {
   const router = useRouter();
   const [newPhone, setNewPhone] = useState('');
   const [isChangingPhone, setIsChangingPhone] = useState(false);
+  const [phoneMessage, setPhoneMessage] = useState('');
 
   const handleSendNewCode = (e: React.FormEvent) => {
     e.preventDefault();
-    router.push(`/verify?phone=${encodeURIComponent(newPhone)}`);
+    const normalized = normalizeKenyanPhone(newPhone);
+    if (!normalized) {
+      setPhoneMessage('Enter a valid Kenyan mobile number, for example 712 345 678.');
+      return;
+    }
+    setPhoneMessage('Phone-change verification is not connected to the backend yet. Your current number remains active.');
   };
 
   return (
@@ -49,12 +56,11 @@ export default function AccountSettingsPage() {
               <span className="px-3 py-1.5 bg-[#e0f2f1] text-[#008272] rounded-full font-semibold">Public Suite</span>
               <a href="#cbc" className="hover:text-slate-900 transition">CBC Strands</a>
               <a href="#resources" className="hover:text-slate-900 transition">Resources</a>
-              <a href="#health" className="hover:text-slate-900 transition">System Health</a>
             </nav>
           </div>
 
           <div className="flex items-center gap-4">
-            <button className="p-2.5 text-slate-600 hover:bg-slate-100 rounded-full transition relative">
+            <button type="button" aria-label="Notifications" className="p-2.5 text-slate-600 hover:bg-slate-100 rounded-full transition relative">
               <Bell className="w-5 h-5 text-slate-700" />
               <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-rose-500"></span>
             </button>
@@ -160,7 +166,7 @@ export default function AccountSettingsPage() {
 
               <form onSubmit={handleSendNewCode} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1.5">
+                  <label htmlFor="new-mobile-number" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1.5">
                     New mobile number
                   </label>
                   <div className="flex bg-white border border-slate-200 rounded-xl overflow-hidden focus-within:border-[#008272] transition">
@@ -169,10 +175,11 @@ export default function AccountSettingsPage() {
                       <span>+254</span>
                     </div>
                     <input 
+                      id="new-mobile-number"
                       type="tel" 
                       required
                       value={newPhone}
-                      onChange={(e) => setNewPhone(e.target.value)}
+                      onChange={(e) => { setNewPhone(e.target.value); setPhoneMessage(''); }}
                       placeholder="712 345 678"
                       className="w-full bg-transparent px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none text-sm font-mono"
                     />
@@ -180,6 +187,11 @@ export default function AccountSettingsPage() {
                   <p className="text-[11px] text-slate-500 mt-1.5">
                     Enter Safaricom, Airtel, or Telkom line.
                   </p>
+                  {phoneMessage && (
+                    <p role="alert" className="text-[11px] text-rose-600 mt-1.5">
+                      {phoneMessage}
+                    </p>
+                  )}
                 </div>
 
                 <button 
@@ -252,7 +264,11 @@ export default function AccountSettingsPage() {
         {/* Center Sign Out Button & Session ID Footer */}
         <div className="pt-6 flex flex-col items-center justify-center space-y-3">
           <button 
-            onClick={() => router.push('/login')}
+            type="button"
+            onClick={() => {
+              clearStoredAuth();
+              router.push('/login');
+            }}
             className="px-6 py-3 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 text-rose-600 font-semibold rounded-2xl transition shadow-sm flex items-center gap-2 text-xs"
           >
             <LogOut className="w-4 h-4" /> Sign out

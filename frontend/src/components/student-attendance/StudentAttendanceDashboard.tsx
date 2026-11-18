@@ -56,13 +56,6 @@ const SIDEBAR_ITEMS: NavItem[] = [
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-const STATUS_STYLES: Record<AttendanceStatus, string> = {
-  present: "bg-[#F0EBF9] text-[#6D4FA3]",
-  absent: "bg-[#FEF3D6] text-[#8A6A25]",
-  "not-marked": "bg-transparent text-slate-500",
-  "no-school": "bg-[#F1F5F4] text-slate-400",
-};
-
 const STATUS_LABELS: Record<AttendanceStatus, string> = {
   present: "Present",
   absent: "Absent",
