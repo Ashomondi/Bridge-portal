@@ -119,8 +119,52 @@ never handles money directly" from `AGENTS.md` and `SECURITY.md`.
   directly — enqueues via the notification system)
 
 ### Notifications
-- `POST /notifications/send` (internal use by jobs, not directly callable by
-  AI service without going through a job)
+
+Handler implementation status: `notifications.RegisterRoutes` implements the
+two HTTP handlers below in `backend/internal/notifications/http.go`, but they
+are **not yet mounted** in `backend/cmd/server/main.go` (still a placeholder
+pending auth/session middleware and server composition).
+
+- `GET /api/v1/notifications`
+  - **Auth & tenant scope:** Requires a valid `contracts.Principal` via
+    `contracts.RequireIdentity` (`401 UNAUTHENTICATED` when missing or invalid).
+    `Service.List` passes the `Principal` to `contracts.TenantDB.WithTenantTx`,
+    deriving `school_id` solely from `Principal.SchoolID` (query/header school
+    overrides are ignored).
+  - **Recipient access:** Returns only rows in `in_app_notifications` where
+    `school_id = Principal.SchoolID` and `recipient_user_id = Principal.UserID`,
+    ordered deterministically by `created_at DESC, id`.
+  - **Pagination:** Offset-based via `contracts.Pagination` (`page` default `1`,
+    max `1,000,000`; `per_page` default `25`, max `100`). Invalid values return
+    `422 INVALID_PAGINATION`. Out-of-range pages return `200` with `data: []`
+    and `meta.total` set to the caller's total notification count.
+  - **Success (`200`):** Uses the shared paginated envelope (`status: "success"`,
+    `data` array of `{id, category, title, body, metadata, is_read, read_at, created_at}`
+    with UTC RFC 3339 timestamps, and `meta: {page, per_page, total}`), with
+    `Content-Type: application/json` and `Cache-Control: no-store`.
+  - **Errors:** `401 UNAUTHENTICATED`, `422 INVALID_PAGINATION`,
+    `500 INTERNAL_ERROR`.
+- `PATCH /api/v1/notifications/{id}/read`
+  - **Auth & tenant scope:** Requires a valid `contracts.Principal` via
+    `contracts.RequireIdentity` (`401 UNAUTHENTICATED` when missing or invalid)
+    and derives `school_id` solely from `Principal.SchoolID` via
+    `contracts.TenantDB.WithTenantTx`.
+  - **Ownership & tenant isolation:** Updates only where
+    `school_id = Principal.SchoolID AND recipient_user_id = Principal.UserID AND id = {id}`,
+    additionally enforced by PostgreSQL forced RLS. Notices belonging to another
+    user or another school return `404 NOTIFICATION_NOT_FOUND` without disclosing
+    existence.
+  - **Request body:** None required.
+  - **Idempotent read timestamp:** Sets `is_read = true` and
+    `read_at = coalesce(read_at, now())`, so repeat calls succeed with `200`
+    and preserve the original `read_at` timestamp.
+  - **Success (`200`):** `{"status":"success","data":{"id":"<uuid>","is_read":true}}`
+    with `Cache-Control: no-store`.
+  - **Errors:** `400 INVALID_NOTIFICATION_ID` (non-UUID/zero `{id}`),
+    `401 UNAUTHENTICATED`, `404 NOTIFICATION_NOT_FOUND`, `500 INTERNAL_ERROR`.
+- `POST /notifications/send` *(planned/unimplemented — not built in
+  `internal/notifications`; internal job-queue scheduling remains pending in
+  `internal/jobs` and `cmd/worker`)*.
 
 ### AI-service-facing (internal only — never exposed to frontend directly)
 - `POST /internal/ai/parent-query` — resolves a parent's natural-language

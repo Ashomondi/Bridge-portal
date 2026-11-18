@@ -306,3 +306,89 @@ re-litigate them here. Open questions that affect this document:
 - Payment execution: the system records approved payments; whether it will
   ever initiate transfers itself (beyond the parent-initiated M-Pesa STK push)
   is undecided.
+
+## Notifications engine (`backend/internal/notifications`)
+
+The notifications package provides the Release 1 synchronous transactional SMS
+transport and transaction-bound in-app notifications service. Application-level
+wiring (`cmd/server/main.go`, `internal/config`, `internal/jobs`,
+`cmd/worker/main.go`, auth/onboarding callers) remains pending.
+
+### SMS transport versus SMS queue
+
+- **Synchronous SMS transport (implemented):** `notifications.SMSDispatcher`
+  (`DispatchSMS(context.Context, SMSMessage) error`) validates phone numbers
+  and allowed purposes, then dispatches synchronously via either
+  `NewSandboxSMSDispatcher` (local redacted logging for username `sandbox`) or
+  the Africa's Talking HTTP adapter (`NewSMSDispatcher`).
+- **Redis/Asynq SMS queue (pending future integration):** Asynchronous job
+  scheduling, Redis persistence, backoff retries, and dead-letter handling
+  belong to `internal/jobs` and `cmd/worker` (currently placeholders). No
+  durable queue exists yet in this codebase.
+- **Retry & error classification boundary:** The transport surfaces structured
+  `*SMSDeliveryError{Code, Retryable}` values (e.g., HTTP `408`/`429`/`5xx`,
+  transport timeouts, and provider `500`–`502` recipient codes marked
+  `Retryable: true`; redirects, `4xx` rejections, recipient mismatch, and
+  malformed/oversized responses marked `Retryable: false`) so the future Asynq
+  worker can decide whether to retry without inspecting raw provider bodies.
+  Ambiguous network failures after a request is sent cannot guarantee
+  exactly-once SMS delivery.
+
+### Transactional-only SMS purposes (Release 1)
+
+Release 1 SMS transport is restricted to four explicit `SMSPurpose` values
+(`C58`):
+
+- `app_login` — app login OTP
+- `whatsapp_session` — Release 3 WhatsApp session OTP purpose key (reserved in
+  the transport enum; WhatsApp integration itself is deferred to Release 3)
+- `phone_change` — guardian 2FA phone-change OTP to the new number
+- `phone_change_notice` — security alert to the old number on phone change
+
+Event-based messages (`absence`, `sickbay`, results, timetable, calendar, fee
+alerts) are explicitly rejected by `SMSMessage` validation (`ErrInvalidSMS`).
+Release 1 event notifications use `in_app_notifications` instead.
+
+### Africa's Talking provider boundary
+
+- **HTTP client & timeouts:** `NewSMSDispatcher` copies any caller-supplied
+  `*http.Client` (never mutating a shared client) and enforces a default
+  15-second timeout when `Timeout <= 0`.
+- **Redirect protection:** Installs `CheckRedirect` returning
+  `http.ErrUseLastResponse` so HTTP redirects are rejected (`Retryable: false`)
+  and `apiKey` headers / form bodies are never forwarded to redirect targets.
+- **Credential & error redaction:** `SMSConfig` carries `Username`, `APIKey`,
+  and optional `SenderID` (`AFRICASTALKING_*` env vars; config wiring is still
+  pending). Returned errors (`ErrInvalidPhone`, `ErrInvalidSMS`,
+  `*SMSDeliveryError`) never include the phone number, message body, OTP,
+  `APIKey`, or raw provider response body. Response reads are capped at 64 KiB
+  and verify single-recipient normalized phone matching.
+
+### In-app notifications
+
+- **Ownership & tenant isolation:** Every row in `in_app_notifications` belongs
+  to `(school_id, recipient_user_id)` with PostgreSQL `ENABLE` and `FORCE ROW
+  LEVEL SECURITY` (`school_id = current_school_id()`). `List` and `MarkRead`
+  derive `school_id` exclusively from `contracts.Principal` via
+  `contracts.TenantDB.WithTenantTx` and filter by `recipient_user_id =
+  Principal.UserID`.
+- **Transaction-bound creation (`contracts.InAppNotifier`):** Business services
+  begin their tenant-scoped transaction, perform domain writes, and call
+  `CreateInAppNotification(ctx, tx, notification)` using `contracts.SQLTx`
+  (`contracts.PgxTx` for `pgx.Tx`, `contracts.StdSQLTx` for `*sql.Tx`) inside
+  that same transaction. `notifications.Service` verifies an active
+  `memberships` + `users` row for `(school_id, recipient_user_id)` and inserts
+  the notification without starting its own transaction or sending SMS. Any
+  failure propagates to the caller so the entire business transaction rolls back
+  atomically.
+- **Read receipt semantics & pagination:** `MarkRead` sets `is_read = true` and
+  `read_at = coalesce(read_at, now())` so repeat marks preserve the first read
+  timestamp; cross-user or cross-school IDs return `404 NOTIFICATION_NOT_FOUND`.
+  `List` uses `contracts.Pagination` (default `page=1`, `per_page=25`, max
+  `per_page=100`) ordered by `created_at DESC, id`.
+- **Consumer integration status:** `internal/academics` adopts
+  `contracts.InAppNotifier` directly and executes all in-app notifications
+  (attendance absence, results release, results re-release, timetable update,
+  calendar event update) inside `Store.WithTx` with error propagation.
+  `internal/billing`, `internal/auth`, `internal/onboarding`, `internal/jobs`,
+  and `cmd/server` route mounting remain pending wiring.
