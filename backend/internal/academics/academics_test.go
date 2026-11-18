@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 const (
@@ -44,11 +46,22 @@ const (
 type fakeNotifier struct {
 	mu       sync.Mutex
 	notified []Notification
+	failAt   int // 1-based call index to fail on, 0 disables failure injection
+	err      error
 }
 
-func (f *fakeNotifier) CreateInAppNotification(_ context.Context, n Notification) error {
+func (f *fakeNotifier) CreateInAppNotification(_ context.Context, tx contracts.SQLTx, n Notification) error {
+	if tx == nil {
+		return errors.New("expected active transaction for CreateInAppNotification")
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failAt > 0 && len(f.notified)+1 >= f.failAt {
+		if f.err != nil {
+			return f.err
+		}
+		return errors.New("injected notification failure")
+	}
 	f.notified = append(f.notified, n)
 	return nil
 }
@@ -536,10 +549,38 @@ func TestRosterPrivacyScoping(t *testing.T) {
 	if err != nil || len(roster.Students) != 2 {
 		t.Fatalf("class teacher roster: %v %+v", err, roster)
 	}
+	if roster.StreamName != "East" || roster.Date == "" {
+		t.Fatalf("expected roster context, got %+v", roster)
+	}
 	if _, err := env.svc.GetRoster(mathTeacher, testClassID); err != nil {
 		t.Fatalf("assigned subject teacher should see roster: %v", err)
 	}
 	_, err = env.svc.GetRoster(otherTeacher, testClassID)
+	requireAPIError(t, err, http.StatusForbidden, CodeForbidden)
+}
+
+// TestTeacherClassesLookup verifies the roll-call route can resolve a default
+// class for the signed-in class teacher without a class id in the URL.
+func TestTeacherClassesLookup(t *testing.T) {
+	env := newTestEnv(t)
+
+	result, err := env.svc.GetTeacherClasses(identityCtx(testUserCT, testMemCT, RoleTeacher))
+	if err != nil {
+		t.Fatalf("teacher classes: %v", err)
+	}
+	if result.DefaultClassID != testClassID || len(result.Classes) != 1 {
+		t.Fatalf("expected default class %s, got %+v", testClassID, result)
+	}
+	if result.Classes[0].StreamName != "East" {
+		t.Fatalf("expected East stream, got %+v", result.Classes[0])
+	}
+
+	other, err := env.svc.GetTeacherClasses(identityCtx(testUserOther, testMemOther, RoleTeacher))
+	if err != nil || other.DefaultClassID != "" || len(other.Classes) != 0 {
+		t.Fatalf("unassigned teacher should have no default class: %v %+v", err, other)
+	}
+
+	_, err = env.svc.GetTeacherClasses(identityCtx(testUserParentA, testMemParentA, RoleParent))
 	requireAPIError(t, err, http.StatusForbidden, CodeForbidden)
 }
 
@@ -660,4 +701,84 @@ func findPerformanceSubject(t *testing.T, term TermPerformance, subjectID string
 	}
 	t.Fatalf("subject %s not found in %+v", subjectID, term.Subjects)
 	return PerformanceSubject{}
+}
+
+// TestNotificationFailuresPropagateErrors verifies that mandatory notification
+// failures inside academics workflows are not silently discarded.
+func TestNotificationFailuresPropagateErrors(t *testing.T) {
+	injected := errors.New("notification persistence failed")
+
+	t.Run("attendance", func(t *testing.T) {
+		env := newTestEnv(t)
+		env.notifier.failAt = 1
+		env.notifier.err = injected
+		_, err := env.svc.RecordAttendance(identityCtx(testUserCT, testMemCT, RoleTeacher), testClassID, AttendanceRequest{
+			Date:    "2026-01-10",
+			Records: []AttendanceRecordInput{{StudentID: testStudentB, Status: "absent"}},
+		})
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected error %v, got %v", injected, err)
+		}
+	})
+
+	t.Run("results release", func(t *testing.T) {
+		env := newTestEnv(t)
+		saveMarks(t, env, identityCtx(testUserMath, testMemMath, RoleTeacher), testMathID, map[string]float64{testStudentA: 70, testStudentB: 75})
+		saveMarks(t, env, identityCtx(testUserEng, testMemEng, RoleTeacher), testEngID, map[string]float64{testStudentA: 65, testStudentB: 68})
+		env.notifier.failAt = 2 // fail on second guardian notification
+		env.notifier.err = injected
+		_, err := env.svc.ReleaseResults(identityCtx(testUserCT, testMemCT, RoleTeacher), testClassID, ReleaseRequest{TermID: testTermID})
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected error %v, got %v", injected, err)
+		}
+	})
+
+	t.Run("results re-release", func(t *testing.T) {
+		env := newTestEnv(t)
+		releaseComplete(t, env, 70, 70, 65, 65)
+		ct := identityCtx(testUserCT, testMemCT, RoleTeacher)
+		if _, err := env.svc.ReopenResults(ct, testClassID, ReopenRequest{TermID: testTermID, Reason: "fix"}); err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		saveMarks(t, env, identityCtx(testUserMath, testMemMath, RoleTeacher), testMathID, map[string]float64{testStudentA: 80})
+		env.notifier.failAt = 1
+		env.notifier.err = injected
+		_, err := env.svc.RereleaseResults(ct, testClassID, RereleaseRequest{
+			TermID:          testTermID,
+			CorrectionNotes: []CorrectionNoteInput{{StudentID: testStudentA, SubjectID: testMathID, TeacherNote: "fixed"}},
+		})
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected error %v, got %v", injected, err)
+		}
+	})
+
+	t.Run("timetable", func(t *testing.T) {
+		env := newTestEnv(t)
+		env.notifier.failAt = 1
+		env.notifier.err = injected
+		_, err := env.svc.PutTimetable(identityCtx(testUserDean, testMemDean, RoleDean), TimetableRequest{
+			TermID:  testTermID,
+			ClassID: testClassID,
+			Slots: []TimetableSlotInput{{
+				SubjectID: testMathID, DayOfWeek: 1, StartTime: "08:00", EndTime: "08:40",
+			}},
+		})
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected error %v, got %v", injected, err)
+		}
+	})
+
+	t.Run("calendar", func(t *testing.T) {
+		env := newTestEnv(t)
+		env.notifier.failAt = 1
+		env.notifier.err = injected
+		_, err := env.svc.PutCalendar(identityCtx(testUserDean, testMemDean, RoleDean), CalendarRequest{
+			Events: []CalendarEventInput{{
+				TermID: testTermID, Title: "AGM", EventType: "meeting", StartAt: "2026-02-01T09:00:00Z", EndAt: "2026-02-01T11:00:00Z",
+			}},
+		})
+		if !errors.Is(err, injected) {
+			t.Fatalf("expected error %v, got %v", injected, err)
+		}
+	})
 }

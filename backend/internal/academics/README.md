@@ -34,7 +34,7 @@ on the request context with `academics.WithIdentity(ctx, identity)`.
 
 | Interface | Implemented by | Method |
 |---|---|---|
-| `InAppNotifier` | `internal/notifications` (Ian) | `CreateInAppNotification(ctx, Notification)` |
+| `InAppNotifier` | `internal/notifications` (Ian) | `CreateInAppNotification(ctx, contracts.SQLTx, contracts.InAppNotification)` |
 | `TermDateFeeSyncer` | `internal/billing` (Ian) | `OnTermStartDateChanged(ctx, schoolID, termID, newStart, actorUserID, note)` |
 | `CommentDrafter` | HTTP proxy to `ai_service` (Sos) | `DraftReportComment(ctx, DraftContext)` |
 | `Store` | `SQLStore` here; `MemoryStore` in tests | tenant-scoped persistence |
