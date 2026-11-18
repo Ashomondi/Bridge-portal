@@ -9,7 +9,6 @@ import (
 
 	"github.com/Ashomondi/ikonex-academy/backend/internal/billing"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/billing/testenv"
-	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -33,30 +32,50 @@ func assertStudentReconciliation(t *testing.T, ctx context.Context, db *testenv.
 		t.Fatalf("negative balance detected: current=%s credit=%s", current, credit)
 	}
 
-	var entriesBilled, entriesPaid, entriesCreditApplied billing.Money
+	var entriesBilled, entriesPaid, entriesCreditApplied, entriesTransferred billing.Money
 	err = db.Admin.QueryRow(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN entry_type IN ('charge', 'adjustment') THEN amount ELSE 0 END), 0)::numeric(12,2),
+			COALESCE(SUM(CASE WHEN entry_type = 'charge' OR (entry_type = 'adjustment' AND reference NOT LIKE 'XFER:%') THEN amount ELSE 0 END), 0)::numeric(12,2),
 			COALESCE(SUM(CASE WHEN entry_type = 'payment' THEN amount ELSE 0 END), 0)::numeric(12,2),
-			COALESCE(SUM(CASE WHEN entry_type = 'credit_applied' THEN amount ELSE 0 END), 0)::numeric(12,2)
+			COALESCE(SUM(CASE WHEN entry_type = 'credit_applied' THEN amount ELSE 0 END), 0)::numeric(12,2),
+			COALESCE(SUM(CASE WHEN entry_type = 'adjustment' AND reference LIKE 'XFER:%' THEN amount ELSE 0 END), 0)::numeric(12,2)
 		FROM ledger_entries
 		WHERE school_id = $1 AND student_id = $2`,
 		schoolID, studentID,
-	).Scan(&entriesBilled, &entriesPaid, &entriesCreditApplied)
+	).Scan(&entriesBilled, &entriesPaid, &entriesCreditApplied, &entriesTransferred)
 	if err != nil {
 		t.Fatalf("query ledger entries: %v", err)
 	}
 
 	if billed != entriesBilled {
-		t.Fatalf("reconciliation mismatch: summary billed=%s vs entries(charge+adjustment)=%s", billed, entriesBilled)
+		t.Fatalf("reconciliation mismatch: summary billed=%s vs entries=%s", billed, entriesBilled)
 	}
 	if paid != entriesPaid {
 		t.Fatalf("reconciliation mismatch: summary paid=%s vs entries(payment)=%s", paid, entriesPaid)
 	}
+	var ledgerCreditApplied, ledgerCreditTransferred billing.Money
+	var bothPositiveCount int
+	if err := db.Admin.QueryRow(ctx, `
+		SELECT COALESCE(SUM(credit_applied), 0)::numeric(12,2),
+		       COALESCE(SUM(credit_transferred), 0)::numeric(12,2),
+		       COUNT(*) FILTER (WHERE current_balance > 0 AND credit_balance > 0)
+		FROM fee_ledgers
+		WHERE school_id = $1 AND student_id = $2`,
+		schoolID, studentID,
+	).Scan(&ledgerCreditApplied, &ledgerCreditTransferred, &bothPositiveCount); err != nil {
+		t.Fatalf("query ledger credit totals: %v", err)
+	}
+	if bothPositiveCount != 0 {
+		t.Fatalf("found %d ledger rows with both current_balance > 0 and credit_balance > 0", bothPositiveCount)
+	}
+	if ledgerCreditApplied != entriesCreditApplied || ledgerCreditTransferred != entriesTransferred {
+		t.Fatalf("credit reconciliation mismatch: ledgers(applied=%s, xfer=%s) vs entries(applied=%s, xfer=%s)",
+			ledgerCreditApplied, ledgerCreditTransferred, entriesCreditApplied, entriesTransferred)
+	}
 	wantNet := opening + billed - paid
 	if wantNet >= 0 {
-		if current != wantNet || credit != 0 {
-			t.Fatalf("reconciliation mismatch: want current=%s credit=0, got current=%s credit=%s", wantNet, current, credit)
+		if current-credit != wantNet {
+			t.Fatalf("reconciliation mismatch: want net=%s, got current=%s credit=%s", wantNet, current, credit)
 		}
 	} else {
 		if current != 0 || credit != -wantNet {
@@ -81,13 +100,8 @@ func TestWorkedExampleCreditCarryForwardAndReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := &billing.Service{DB: db}
-	admin := contracts.Principal{
-		UserID:       school.UserID,
-		SchoolID:     school.ID,
-		MembershipID: school.MembershipID,
-		Role:         "ikonex_admin",
-	}
+	svc := newTestBillingService(db)
+	admin := seedMemberWithPermission(t, db, school.ID, "+254799000001", "Fee Admin", "bursar", billing.PermFeeStructuresManage)
 	rawAmt := func(s string) json.RawMessage { return json.RawMessage(`"` + s + `"`) }
 
 	// Step 1: Term 1 initial charge 10,000.00
@@ -193,8 +207,8 @@ func TestFullCreditAbsorptionAndEligibilityRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := &billing.Service{DB: db}
-	admin := contracts.Principal{UserID: school.UserID, SchoolID: school.ID, MembershipID: school.MembershipID, Role: "ikonex_admin"}
+	svc := newTestBillingService(db)
+	admin := seedMemberWithPermission(t, db, school.ID, "+254799000002", "Fee Admin", "bursar", billing.PermFeeStructuresManage)
 	rawAmt := func(s string) json.RawMessage { return json.RawMessage(`"` + s + `"`) }
 
 	// Load Grade 7 Term 1 (5,000.00) and Grade 8 Term 1 (7,500.00)
@@ -256,7 +270,7 @@ func TestConcurrentTermCharging20Goroutines(t *testing.T) {
 	school := db.SeedSchool(t, "01")
 	ctx := context.Background()
 
-	svc := &billing.Service{DB: db}
+	svc := newTestBillingService(db)
 	// Pre-fund the student with 3,000.00 credit before the 20 concurrent term charges hit
 	if err := db.WithTenantTx(ctx, school.ID, func(tx pgx.Tx) error {
 		return svc.RecordStudentPaymentTx(ctx, tx, school.ID, school.StudentID, "RCPT-PREFUND", "Prefund", 300000)
@@ -276,7 +290,7 @@ func TestConcurrentTermCharging20Goroutines(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	admin := contracts.Principal{UserID: school.UserID, SchoolID: school.ID, MembershipID: school.MembershipID, Role: "ikonex_admin"}
+	admin := seedMemberWithPermission(t, db, school.ID, "+254799000003", "Fee Admin", "bursar", billing.PermFeeStructuresManage)
 	loaded, err := svc.LoadFeeStructure(ctx, admin, billing.LoadFeeStructureInput{
 		AcademicYearID: year2ID,
 		TermID:         term2ID,

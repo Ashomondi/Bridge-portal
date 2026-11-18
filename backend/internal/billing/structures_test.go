@@ -26,13 +26,9 @@ func TestFeeStructureValidationAndLoading(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := &billing.Service{DB: db}
-	adminPrincipal := contracts.Principal{
-		UserID:       schoolA.UserID,
-		SchoolID:     schoolA.ID,
-		MembershipID: schoolA.MembershipID,
-		Role:         "ikonex_admin",
-	}
+	svc := newTestBillingService(db)
+	adminPrincipal := seedMemberWithPermission(t, db, schoolA.ID, "+254799000011", "Fee Manager A", "bursar", billing.PermFeeStructuresManage)
+	unauthorizedPrincipal := seedMemberWithPermission(t, db, schoolA.ID, "+254799000012", "Teacher No Badge", "teacher", "")
 
 	rawAmt := func(s string) json.RawMessage {
 		return json.RawMessage(`"` + s + `"`)
@@ -292,7 +288,9 @@ func TestFeeStructureValidationAndLoading(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := adminPrincipal
-			p.Role = tc.role
+			if tc.role == "parent" {
+				p = unauthorizedPrincipal
+			}
 			_, err := svc.LoadFeeStructure(ctx, p, tc.input)
 			var apiErr *contracts.APIError
 			if !errors.As(err, &apiErr) {
@@ -363,16 +361,12 @@ func TestFeeStructureValidationAndLoading(t *testing.T) {
 	}
 
 	// Rollback on mid-transaction failure (audit failure rolls back structure, items, and fee_period)
+	adminB := seedMemberWithPermission(t, db, schoolB.ID, "+254799000013", "Fee Manager B", "bursar", billing.PermFeeStructuresManage)
 	failingSvc := &billing.Service{
-		DB:    db,
+		DB:    contracts.TenantTxFunc(db.WithTenantTx),
 		Audit: failingAuditLogger{},
 	}
-	_, err = failingSvc.LoadFeeStructure(ctx, contracts.Principal{
-		UserID:       schoolB.UserID,
-		SchoolID:     schoolB.ID,
-		MembershipID: schoolB.MembershipID,
-		Role:         "ikonex_admin",
-	}, billing.LoadFeeStructureInput{
+	_, err = failingSvc.LoadFeeStructure(ctx, adminB, billing.LoadFeeStructureInput{
 		AcademicYearID: schoolB.YearID,
 		TermID:         schoolB.TermID,
 		GradeLevelID:   schoolB.GradeID,

@@ -47,10 +47,24 @@ const config: Config = {
           "0%": { opacity: "0" },
           "100%": { opacity: "1" },
         },
+        "assistant-attention": {
+          "0%, 100%": {
+            boxShadow: "0 0 0 0 rgba(0, 122, 120, 0.38)",
+          },
+          "50%": {
+            boxShadow: "0 0 0 14px rgba(0, 122, 120, 0)",
+          },
+        },
+        "assistant-logo": {
+          "0%, 100%": { transform: "scale(1)" },
+          "50%": { transform: "scale(1.12)" },
+        },
       },
       animation: {
         "drawer-in": "drawer-in 220ms ease-out",
         "fade-in": "fade-in 180ms ease-out",
+        "assistant-attention": "assistant-attention 2.8s ease-in-out infinite",
+        "assistant-logo": "assistant-logo 2.8s ease-in-out infinite",
       },
     },
   },
