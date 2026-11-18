@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getApiError, normalizeKenyanPhone, readApiResponse, roleRoute } from './auth';
+import { apiUrl, getApiError, getCooldownSeconds, normalizeKenyanPhone, readApiResponse, roleRoute } from './auth';
 
 describe('Kenyan phone normalization', () => {
   it('normalizes accepted Kenyan phone formats', () => {
@@ -39,6 +39,34 @@ describe('API response helpers', () => {
   it('maps recognized roles to existing portals', () => {
     expect(roleRoute('teacher')).toBe('/teacher');
     expect(roleRoute('Principal')).toBe('/admin');
+    expect(roleRoute('dean_of_studies')).toBe('/admin');
     expect(roleRoute('unknown')).toBeNull();
+  });
+
+  it('normalizes the configured API base without duplicating /api/v1', () => {
+    const original = process.env.NEXT_PUBLIC_API_URL;
+    try {
+      process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8080/api/v1';
+      expect(apiUrl('/auth/otp/request')).toBe('http://localhost:8080/api/v1/auth/otp/request');
+      expect(apiUrl('/api/v1/auth/otp/request')).toBe('http://localhost:8080/api/v1/auth/otp/request');
+
+      process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8080';
+      expect(apiUrl('/auth/otp/request')).toBe('http://localhost:8080/api/v1/auth/otp/request');
+
+      process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8080/api/v1/';
+      expect(apiUrl('/auth/otp/request')).toBe('http://localhost:8080/api/v1/auth/otp/request');
+
+      delete process.env.NEXT_PUBLIC_API_URL;
+      expect(apiUrl('/auth/otp/request')).toBe('/api/v1/auth/otp/request');
+    } finally {
+      if (original === undefined) delete process.env.NEXT_PUBLIC_API_URL;
+      else process.env.NEXT_PUBLIC_API_URL = original;
+    }
+  });
+
+  it('extracts a positive backend cooldown', () => {
+    expect(getCooldownSeconds({ error: { details: { cooldown_seconds: 42 } } })).toBe(42);
+    expect(getCooldownSeconds({ error: { details: { cooldown_seconds: 0 } } })).toBeNull();
+    expect(getCooldownSeconds(null)).toBeNull();
   });
 });

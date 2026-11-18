@@ -1,5 +1,13 @@
 /** @type {import('next').NextConfig} */
-const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+function backendOrigin(value) {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return 'http://localhost:8080';
+  }
+}
+
+const backendUrl = backendOrigin(process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080');
 
 const nextConfig = {
   reactStrictMode: true,

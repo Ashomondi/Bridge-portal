@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ShieldCheck, Phone, Loader2, ArrowRight } from 'lucide-react';
-import { apiUrl, getApiError, normalizeKenyanPhone, readApiResponse } from '@/lib/auth';
+import { apiUrl, getApiError, getCooldownSeconds, normalizeKenyanPhone, readApiResponse } from '@/lib/auth';
 
 export default function LoginPage() {
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -40,13 +40,21 @@ export default function LoginPage() {
 
     setLoading(true);
     try {
-      const res = await fetch(apiUrl('/api/v1/auth/otp/request'), {
+      const res = await fetch(apiUrl('/auth/otp/request'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone_number: normalizedPhone }),
       });
       const { ok, data } = await readApiResponse(res);
-      if (!ok) throw new Error(getApiError(data, 'Failed to dispatch SMS OTP'));
+      if (!ok) {
+        const cooldown = getCooldownSeconds(data);
+        if (cooldown !== null) {
+          const resendAt = Date.now() + cooldown * 1000;
+          sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone: normalizedPhone, resend_at: resendAt }));
+          setCountdown(cooldown);
+        }
+        throw new Error(getApiError(data, 'Failed to dispatch SMS OTP'));
+      }
 
       const resendAt = Date.now() + 60_000;
       sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone: normalizedPhone, resend_at: resendAt }));

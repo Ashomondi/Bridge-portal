@@ -3,9 +3,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ShieldCheck, ArrowRight, Edit3, AlertCircle, Loader2 } from 'lucide-react';
-import { apiUrl, getApiError, readApiResponse, roleRoute, Membership } from '@/lib/auth';
+import { apiUrl, getApiError, getCooldownSeconds, readApiResponse, roleRoute, Membership } from '@/lib/auth';
 
 type Challenge = { phone: string; resend_at: number };
+
+function clearStoredAuth() {
+  sessionStorage.removeItem('auth_token');
+  sessionStorage.removeItem('auth_expires_at');
+  sessionStorage.removeItem('auth_user');
+  sessionStorage.removeItem('auth_membership');
+}
 
 export default function VerifyPage() {
   const [code, setCode] = useState(['', '', '', '', '', '']);
@@ -77,12 +84,20 @@ export default function VerifyPage() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(apiUrl('/api/v1/auth/otp/request'), {
+      const res = await fetch(apiUrl('/auth/otp/request'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone_number: phone }),
       });
       const { ok, data } = await readApiResponse(res);
-      if (!ok) throw new Error(getApiError(data, 'Unable to resend the code'));
+      if (!ok) {
+        const cooldown = getCooldownSeconds(data);
+        if (cooldown !== null) {
+          const resendAt = Date.now() + cooldown * 1000;
+          sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: resendAt }));
+          setCountdown(cooldown);
+        }
+        throw new Error(getApiError(data, 'Unable to resend the code'));
+      }
       const resendAt = Date.now() + 60_000;
       sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: resendAt }));
       setCountdown(60);
@@ -103,7 +118,7 @@ export default function VerifyPage() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(apiUrl('/api/v1/auth/otp/verify'), {
+      const res = await fetch(apiUrl('/auth/otp/verify'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone_number: phone, otp: fullCode }),
       });
@@ -111,35 +126,57 @@ export default function VerifyPage() {
       if (!ok) throw new Error(getApiError(data, 'That code didn\'t match. Check the SMS and try again.'));
 
       const payload = data?.data;
-      if (!payload || typeof payload.token !== 'string' || !payload.token || typeof payload.expires_at !== 'string' || !payload.expires_at || typeof payload.user !== 'object') {
+      if (!payload || typeof payload.token !== 'string' || !payload.token || typeof payload.expires_at !== 'string' || !payload.expires_at || !payload.user || typeof payload.user !== 'object') {
         throw new Error('The login response was incomplete. Please try again.');
       }
       const expiry = Date.parse(payload.expires_at);
       if (!Number.isFinite(expiry) || expiry <= Date.now()) throw new Error('The login session has expired. Please request a new code.');
 
-      sessionStorage.setItem('auth_token', payload.token);
-      sessionStorage.setItem('auth_expires_at', payload.expires_at);
-      sessionStorage.setItem('auth_user', JSON.stringify(payload.user));
-      sessionStorage.removeItem('pending_otp_challenge');
-
-      const activeMemberships = Array.isArray(payload.memberships)
+      const activeMemberships: Membership[] = Array.isArray(payload.memberships)
         ? payload.memberships.filter((item: Membership) => item?.active !== false && item?.status !== 'inactive')
         : [];
 
+      sessionStorage.removeItem('pending_otp_challenge');
+      if (activeMemberships.length === 0) {
+        clearStoredAuth();
+        setError('No active school membership is available for this account.');
+        return;
+      }
+
+      sessionStorage.setItem('auth_token', payload.token);
+      sessionStorage.setItem('auth_expires_at', payload.expires_at);
+      sessionStorage.setItem('auth_user', JSON.stringify(payload.user));
+
       if (activeMemberships.length === 1) {
         const route = roleRoute(activeMemberships[0].role);
-        if (route) router.replace(route);
-        else setMemberships(activeMemberships);
-      } else if (activeMemberships.length > 1) {
-        setMemberships(activeMemberships);
+        if (route) {
+          sessionStorage.setItem('auth_membership', JSON.stringify(activeMemberships[0]));
+          router.replace(route);
+        } else {
+          clearStoredAuth();
+          setError(`No portal is configured for the ${activeMemberships[0].role || 'assigned'} role.`);
+        }
       } else {
-        setError('No active school membership is available for this account.');
+        setMemberships(activeMemberships);
+        if (!activeMemberships.some((membership) => roleRoute(membership.role))) {
+          setError('No portal is configured for the roles on this account.');
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Verification failed');
     } finally {
       setLoading(false);
     }
+  };
+
+  const selectMembership = (membership: Membership) => {
+    const route = roleRoute(membership.role);
+    if (!route) {
+      setError(`No portal is configured for the ${membership.role || 'assigned'} role.`);
+      return;
+    }
+    sessionStorage.setItem('auth_membership', JSON.stringify(membership));
+    router.replace(route);
   };
 
   return (
@@ -177,7 +214,7 @@ export default function VerifyPage() {
                       key={`${membership.school_id || 'school'}-${membership.role || index}`}
                       type="button"
                       disabled={!route}
-                      onClick={() => route && router.replace(route)}
+                      onClick={() => selectMembership(membership)}
                       className="w-full rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-[#008272] disabled:opacity-50"
                     >
                       <span className="font-semibold text-slate-900">{membership.role || 'School role'}</span>
@@ -256,7 +293,10 @@ export default function VerifyPage() {
                 <div className="text-center pt-2">
                   <button
                     type="button"
-                    onClick={() => router.replace('/login')}
+                    onClick={() => {
+                      sessionStorage.removeItem('pending_otp_challenge');
+                      router.replace('/login');
+                    }}
                     className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#008272] hover:underline"
                   >
                     <Edit3 className="w-3.5 h-3.5" /> Use a different number

@@ -25,8 +25,26 @@ export function normalizeKenyanPhone(value: string): string | null {
 }
 
 export function apiUrl(path: string): string {
-  const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '');
-  return base ? `${base}${path}` : path;
+  const rawBase = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/+$/, '');
+  const normalizedPath = path.startsWith('/api/v1')
+    ? path.slice('/api/v1'.length)
+    : path;
+  const suffix = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+
+  if (!rawBase) {
+    return `/api/v1${suffix}`;
+  }
+
+  const base = rawBase.endsWith('/api/v1') ? rawBase : `${rawBase}/api/v1`;
+  return `${base}${suffix}`;
+}
+
+/** Extracts a backend cooldown from the standard error envelope. */
+export function getCooldownSeconds(data: any): number | null {
+  const cooldown = data?.error?.details?.cooldown_seconds;
+  return typeof cooldown === 'number' && Number.isFinite(cooldown) && cooldown > 0
+    ? Math.ceil(cooldown)
+    : null;
 }
 
 export async function readApiResponse(res: Response): Promise<{ ok: boolean; data: any }> {
@@ -60,6 +78,7 @@ export function roleRoute(role?: string | null): string | null {
   const normalized = role?.toLowerCase().trim();
   const routes: Record<string, string> = {
     admin: '/admin', administrator: '/admin', principal: '/admin', deputy: '/admin',
+    dean: '/admin', dean_of_studies: '/admin',
     teacher: '/teacher', parent: '/parent', bursar: '/bursar', librarian: '/librarian', nurse: '/nurse',
   };
   return normalized ? routes[normalized] ?? null : null;
