@@ -50,7 +50,14 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 		return C2BProcessingResult{}, contracts.Fail(http.StatusUnprocessableEntity, "INVALID_PAYMENT_AMOUNT", "C2B TransAmount must be a positive decimal within NUMERIC(12,2).")
 	}
 
-	schoolID, err := s.resolveWebhookSchoolID(ctx, schoolIDHint, in.SchoolID, shortcode)
+	if s == nil {
+		return C2BProcessingResult{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return C2BProcessingResult{}, err
+	}
+
+	schoolID, err := s.resolveWebhookSchoolID(ctx, shortcode, schoolIDHint, in.SchoolID)
 	if err != nil {
 		return C2BProcessingResult{}, err
 	}
@@ -68,7 +75,7 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 	rawBillRef := strings.TrimSpace(in.BillRefNumber)
 
 	var out C2BProcessingResult
-	err = s.DB.WithTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+	err = s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
 		// Verify shortcode belongs to this school in school_mpesa_configs
 		var configuredShortcode string
 		if err := tx.QueryRow(ctx, `
@@ -80,7 +87,7 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 			return err
 		}
 
-		// Idempotency check if payment receipt already exists
+		// Idempotency check if payment receipt already exists for this school
 		var existingStatus string
 		var existingStudentID *string
 		err := tx.QueryRow(ctx, `
@@ -145,11 +152,7 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 			schoolID, receipt, amtNum, payerPhone, payerName, rawBytes,
 		).Scan(&paymentID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			out = C2BProcessingResult{
-				TransactionRef: receipt,
-				MatchedStatus:  "unmatched",
-			}
-			return nil
+			return contracts.Fail(http.StatusConflict, "DUPLICATE_PAYMENT_REFERENCE", "Transaction reference already exists.")
 		}
 		if err != nil {
 			return err
@@ -163,6 +166,20 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 			ON CONFLICT (school_id, payment_id) DO NOTHING`,
 			schoolID, paymentID, receipt, amtNum, payerPhone, payerName, rawBillRef,
 		); err != nil {
+			return err
+		}
+
+		if err := s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+			SchoolID:     schoolID,
+			Action:       "billing.mpesa.c2b_unmatched",
+			ResourceType: "payment",
+			ResourceID:   paymentID,
+			Details: map[string]any{
+				"transaction_ref": receipt,
+				"amount":          amount.String(),
+				"raw_account_ref": rawBillRef,
+			},
+		}); err != nil {
 			return err
 		}
 
