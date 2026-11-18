@@ -1,11 +1,20 @@
-import './globals.css';
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from "next";
+import "./globals.css";
+import AssistantWidget from "@/components/assistant/AssistantWidget";
 
 export const metadata: Metadata = {
-  title: 'Ikonex Academy Institutional Portal',
-  description: 'High-security operational B2B EdTech SaaS for schools',
+  title: "Bridge Portal | School Portal",
+  description:
+    "Multi-school portal for Kenyan secondary schools, with role-based access for staff, teachers and parents.",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#007A78",
+};
+
+/** Renders the document shell shared by every portal route. */
 export default function RootLayout({
   children,
 }: {
@@ -13,8 +22,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-[#0d1b1e] text-slate-100 antialiased selection:bg-[#008272] selection:text-white">
+      <body>
         {children}
+        <AssistantWidget />
       </body>
     </html>
   );
