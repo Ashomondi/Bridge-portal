@@ -110,9 +110,24 @@ Legend: **[M]** must have · **[S]** should have · **[C]** could have ·
   inappropriate content before the patron publishes
 - [S] Other clubs get their own patron posting
 
-**Bursar**
-- [M] Fee structure per school and grade, reviewed yearly
-- [M] Per-student fee ledger with arrears carried forward
+**Bursar & Billing (Release 1 reconciled scope — C46–C49)**
+- [M] Fee structure per school and grade, reviewed yearly: in Release 1, fee
+  structure loading (`POST /api/v1/billing/fee-structures`) and active-term
+  charge triggering (`POST /api/v1/billing/fee-structures/charge-current`)
+  require the `billing.fee_structures.manage` badge permission (held by
+  authorized bursar or school-assigned platform/admin staff); Release 1 supports
+  only `boarding_status = 'all'` (O13)
+- [M] Per-student fee ledger with arrears carried forward: read-only bursar
+  visibility (`GET /api/v1/students/{id}/fee-balance` and
+  `GET /api/v1/students/{id}/ledger`) requires `billing.ledgers.view` (least
+  privilege; separate from structure loading and payment mutation). Per-term
+  balances are preserved, unallocated payments allocate oldest-due-first (or to
+  an explicitly targeted term), and overpayments carry forward via paired
+  cross-term credit transfers
+- [M] Guardian financial visibility (resolved): only guardians linked in
+  `student_guardians` with `is_fee_payer = TRUE` (the designated fee payer(s))
+  can view student fee balances/ledgers and receive fee-change notifications;
+  guardians with `is_fee_payer = FALSE` receive `403 FORBIDDEN`
 - [AI] M-Pesa reconciliation: proposes the likely student for payments with
   wrong/missing admission numbers; bursar confirms with one click
 - [M] Payments to suppliers/bills with signatory approval workflow
@@ -192,7 +207,7 @@ calendar updates, and fee-change notices) are delivered **in-app only**
 
 - Sports/activities scoring: patron-entered scores vs. participation records
   only
-- Guardian fee visibility: both guardians, or only the one flagged as fee
-  payer
 - Legacy 8-4-4 (Form 3/4) support: in or out of scope
 - Store/caterer module: not yet designed
+- Boarding-variant fee structures (`O13` — `boarder` / `day` classification and
+  mid-term dormitory changes): deferred past Release 1 (`all` only in R1)

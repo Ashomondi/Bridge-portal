@@ -109,14 +109,63 @@ never handles money directly" from `AGENTS.md` and `SECURITY.md`.
 - `GET /students/{id}/performance-history` (parent/teacher, scoped)
 
 ### Fees & payments
-- `GET /students/{id}/fee-balance` (parent-scoped, or bursar)
-- `POST /payments/stk-push` — AI service calls this after confirming child +
-  amount with the parent; never initiates without that confirmation step
-- `GET /payments/unmatched` (bursar) — feeds the AI reconciliation feature
-- `POST /payments/{id}/match` (bursar confirms an AI-suggested match)
-- `POST /payment-plans/{id}/reminder-check` — AI service reads pledge vs.
-  actual payments and arrears, triggers a reminder job (does not send
-  directly — enqueues via the notification system)
+
+Handler implementation status: `billing.RegisterRoutes` implements the four
+endpoints below (`POST /api/v1/billing/fee-structures`,
+`POST /api/v1/billing/fee-structures/charge-current`,
+`GET /api/v1/students/{id}/fee-balance`, and `GET /api/v1/students/{id}/ledger`)
+in `backend/internal/billing`, but route mounting in `backend/cmd/server/main.go`
+remains pending application composition. All monetary fields serialize as
+fixed two-decimal KES strings (e.g. `"10000.00"`).
+
+- `POST /api/v1/billing/fee-structures`
+  - **Auth & tenant scope:** Requires a valid `contracts.Principal` via
+    `contracts.RequireIdentity` (`401 UNAUTHENTICATED`). `Service.LoadFeeStructure`
+    binds the transaction solely to `Principal.SchoolID` via `contracts.TenantDB.WithTenantTx`.
+  - **Permission:** Requires an active non-parent `memberships` row (`status = 'active'`)
+    with an active, unexpired school-wide badge granting `billing.fee_structures.manage`
+    (`403 FORBIDDEN` otherwise). Requires a configured `AuditLogger` (`500 AUDIT_LOGGER_REQUIRED` if nil).
+  - **Request body (`LoadFeeStructureInput`, `Decode` unknown fields rejected):**
+    `{academic_year_id, term_id, grade_level_id, boarding_status?, items: [{title|name, amount, is_compulsory?}]}`.
+  - **Validation & variants:** Validates that `academic_year_id`, `term_id`
+    (belonging to `academic_year_id`), and `grade_level_id` exist in `Principal.SchoolID`;
+    rejects empty items, duplicate case-insensitive item titles, non-positive amounts,
+    >2 decimal places, and overflow beyond `NUMERIC(12,2)` (`422`).
+    In Release 1, `boarding_status` defaults to `"all"` and rejects `"boarder"` / `"day"`
+    (`422 UNSUPPORTED_BOARDING_VARIANT`) or unknown values (`422 INVALID_BOARDING_STATUS`).
+  - **Idempotency, conflict & charging:** Upserts the term `fee_periods` row.
+    If an identical structure already exists for `(school_id, academic_year_id, grade_level_id, term_id, 'all')`,
+    returns it idempotently; if items/amounts differ, returns `409 FEE_STRUCTURE_CONFLICT`.
+    Whenever `academic_years.is_current` or `terms.is_current` is true (on initial insert
+    or identical replay), triggers idempotent `ChargeGradeForTerm` for active enrolled students.
+    Persists a `billing.fee_structure.load` audit event in the same transaction.
+  - **Success (`201`):** `{"status":"success","data":{id, school_id, academic_year_id, term_id, grade_level_id, fee_period_id, boarding_status, due_date, total_amount, items, created_at}}`.
+- `POST /api/v1/billing/fee-structures/charge-current`
+  - **Auth & permission:** Same `RequireIdentity` + `billing.fee_structures.manage` badge check + mandatory `AuditLogger`.
+  - **Behavior:** Idempotently charges all preloaded `'all'`-variant fee structures in
+    `Principal.SchoolID` whose academic year or term is now `is_current = true`.
+    Emits `billing.fee_structure.charge_current` audit event.
+  - **Success (`200`):** `{"status":"success","data":{"structures_processed":<int>,"charges_created":<int>}}`.
+- `GET /api/v1/students/{id}/fee-balance`
+  - **Auth & tenant scope:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`).
+    Validates UUID `{id}` (`400 INVALID_STUDENT_ID`). Looks up student strictly in
+    `Principal.SchoolID` (`404 STUDENT_NOT_FOUND` when missing or in another school).
+  - **Visibility:** Allowed for either (a) an active non-parent staff/bursar membership
+    holding an active school-wide `billing.ledgers.view` badge, or (b) an active
+    guardian linked in `student_guardians` with `is_fee_payer = TRUE`. Non-fee-paying
+    guardians (`is_fee_payer = FALSE`), unlinked guardians, and staff without
+    `billing.ledgers.view` receive `403 FORBIDDEN`.
+  - **Success (`200`):** `{"status":"success","data":{student_id, admission_number, student_name, opening_balance, billed_amount, paid_amount, current_balance, credit_balance, due_date, terms: [{academic_year_id, year, term_id, term_number, due_date, opening_balance, billed_amount, paid_amount, credit_applied, credit_transferred, current_balance, credit_balance}], items, fee_change_notes}}`.
+    Aggregate balances equal the sum across preserved per-term `fee_ledgers` rows (`terms`).
+- `GET /api/v1/students/{id}/ledger`
+  - **Auth & visibility:** Identical authentication, tenant isolation, `billing.ledgers.view` / `is_fee_payer = TRUE` rules as `fee-balance`.
+  - **Success (`200`):** Returns the `StudentFeeBalance` fields plus `entries: [{id, term_id, entry_type, amount, reference, description, created_at}]`
+    ordered deterministically by `created_at ASC, id ASC` (`entry_type` in `charge | payment | credit_applied | adjustment`).
+  - **Note on pagination:** Currently returns the student's full entry list without query pagination parameters.
+- `POST /payments/stk-push` *(planned/unimplemented on this branch)* — AI service calls this after confirming child + amount with the parent; never initiates without that confirmation step
+- `GET /payments/unmatched` *(planned/unimplemented on this branch)* — feeds the AI reconciliation feature
+- `POST /payments/{id}/match` *(planned/unimplemented on this branch)* — bursar confirms an AI-suggested match
+- `POST /payment-plans/{id}/reminder-check` *(planned/unimplemented on this branch)* — AI service reads pledge vs. actual payments and arrears, triggers a reminder job (does not send directly — enqueues via the notification system)
 
 ### Notifications
 
