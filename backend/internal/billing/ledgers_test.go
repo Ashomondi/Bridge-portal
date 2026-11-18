@@ -20,16 +20,12 @@ func TestAdmissionHookAndLedgerAuthorization(t *testing.T) {
 	schoolB := db.SeedSchool(t, "02")
 	ctx := context.Background()
 
-	svc := &billing.Service{DB: db}
+	svc := newTestBillingService(db)
 	var chargeHook billing.StudentChargeHook = svc
 	var billingHook billing.StudentBillingHook = svc
 
-	adminA := contracts.Principal{
-		UserID:       schoolA.UserID,
-		SchoolID:     schoolA.ID,
-		MembershipID: schoolA.MembershipID,
-		Role:         "ikonex_admin",
-	}
+	adminA := seedMemberWithPermission(t, db, schoolA.ID, "+254799000021", "Fee Manager A", "bursar", billing.PermFeeStructuresManage)
+	bursarViewA := seedMemberWithPermission(t, db, schoolA.ID, "+254799000022", "Bursar Viewer A", "bursar", billing.PermLedgersView)
 
 	// Load Term 1 fee structure in School A (12,000.00)
 	if _, err := svc.LoadFeeStructure(ctx, adminA, billing.LoadFeeStructureInput{
@@ -140,13 +136,19 @@ func TestAdmissionHookAndLedgerAuthorization(t *testing.T) {
 		t.Fatalf("expected 404 on cross-school student access, got %v", err)
 	}
 
-	// Ikonex team in School A can view any student in School A, but not School B's student
-	if _, err := svc.GetStudentLedger(ctx, adminA, newStudentID); err != nil {
-		t.Fatalf("expected adminA to view student in schoolA, got %v", err)
+	// Bursar with billing.ledgers.view in School A can view any student in School A,
+	// while adminA (with only billing.fee_structures.manage) is denied ledger reads (least privilege),
+	// and bursarViewA cannot see School B's student (404).
+	if _, err := svc.GetStudentLedger(ctx, bursarViewA, newStudentID); err != nil {
+		t.Fatalf("expected bursarViewA to view student in schoolA, got %v", err)
 	}
-	_, err = svc.GetStudentLedger(ctx, adminA, schoolB.StudentID)
+	_, err = svc.GetStudentLedger(ctx, adminA, newStudentID)
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("expected 403 when adminA without billing.ledgers.view queries student ledger, got %v", err)
+	}
+	_, err = svc.GetStudentLedger(ctx, bursarViewA, schoolB.StudentID)
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
-		t.Fatalf("expected 404 when adminA queries schoolB student, got %v", err)
+		t.Fatalf("expected 404 when bursarViewA queries schoolB student, got %v", err)
 	}
 
 	// Verify HTTP endpoints GET /api/v1/students/{id}/fee-balance and GET /api/v1/students/{id}/ledger

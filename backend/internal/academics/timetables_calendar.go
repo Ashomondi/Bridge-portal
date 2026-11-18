@@ -2,6 +2,7 @@ package academics
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"sort"
 	"strings"
@@ -354,11 +355,17 @@ func (s *Service) PutCalendar(ctx context.Context, req CalendarRequest) (Calenda
 				return err
 			}
 			if startChanged {
-				out.FeeDueDatesShifted = true
 				details["fee_change_note"] = update.input.FeeChangeNote
-				if err := s.feeSyncer.OnTermStartDateChanged(ctx, actor.SchoolID, update.input.TermID, update.start, actor.UserID, update.input.FeeChangeNote); err != nil {
+				syncCtx := ctx
+				if provider, ok := tx.(interface{ SQLTx() *sql.Tx }); ok {
+					if sqlTx := provider.SQLTx(); sqlTx != nil {
+						syncCtx = WithSQLTx(syncCtx, sqlTx)
+					}
+				}
+				if err := s.feeSyncer.OnTermStartDateChanged(syncCtx, actor.SchoolID, update.input.TermID, update.start, actor.UserID, update.input.FeeChangeNote); err != nil {
 					return err
 				}
+				out.FeeDueDatesShifted = true
 			}
 		}
 
