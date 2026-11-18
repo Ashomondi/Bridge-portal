@@ -57,7 +57,7 @@ export function useFocusTrap<T extends HTMLElement>(
       getFocusable()[0] ??
       container;
 
-    window.setTimeout(() => {
+    const focusTimer = window.setTimeout(() => {
       initialTarget.focus();
     }, 0);
 
@@ -83,6 +83,12 @@ export function useFocusTrap<T extends HTMLElement>(
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
 
+      if (!container.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
@@ -95,8 +101,15 @@ export function useFocusTrap<T extends HTMLElement>(
     document.addEventListener("keydown", handleKeyDown);
 
     return () => {
+      window.clearTimeout(focusTimer);
       document.removeEventListener("keydown", handleKeyDown);
-      previouslyFocused?.focus();
+
+      if (
+        previouslyFocused?.isConnected &&
+        previouslyFocused.getAttribute("aria-hidden") !== "true"
+      ) {
+        previouslyFocused.focus();
+      }
     };
   }, [active]);
 

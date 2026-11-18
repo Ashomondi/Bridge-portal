@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // SQLStore is the PostgreSQL implementation of Store. It uses database/sql so
@@ -54,6 +56,33 @@ func (s *SQLStore) WithTx(ctx context.Context, schoolID string, fn func(tx Store
 		return err
 	}
 	return tx.Commit()
+}
+
+// NotificationTx returns the active *sql.Tx adapted to contracts.SQLTx.
+func (s *SQLStore) NotificationTx() contracts.SQLTx {
+	return contracts.StdSQLTx(s.tx)
+}
+
+// SQLTx returns the active *sql.Tx for transaction-bound collaborators.
+func (s *SQLStore) SQLTx() *sql.Tx {
+	return s.tx
+}
+
+type sqlTxContextKey struct{}
+
+// WithSQLTx attaches an active *sql.Tx to ctx so collaborators invoked within
+// Store.WithTx (such as TermDateFeeSyncer) share the caller's transaction.
+func WithSQLTx(ctx context.Context, tx *sql.Tx) context.Context {
+	if tx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sqlTxContextKey{}, tx)
+}
+
+// SQLTxFromContext extracts an active *sql.Tx attached by WithSQLTx.
+func SQLTxFromContext(ctx context.Context) (*sql.Tx, bool) {
+	tx, ok := ctx.Value(sqlTxContextKey{}).(*sql.Tx)
+	return tx, ok && tx != nil
 }
 
 func (s *SQLStore) CurrentAcademicYearID(ctx context.Context, schoolID string) (string, error) {

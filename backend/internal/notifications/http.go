@@ -22,8 +22,11 @@ type Notification struct {
 }
 
 func (s *Service) List(ctx context.Context, p contracts.Principal, page *contracts.Page) ([]Notification, error) {
+	if s == nil || s.DB == nil {
+		return nil, contracts.Fail(500, "INTERNAL_ERROR", "The request could not be completed.")
+	}
 	notices := []Notification{}
-	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, "SELECT count(*) FROM in_app_notifications WHERE school_id=$1 AND recipient_user_id=$2", p.SchoolID, p.UserID).Scan(&page.Total); err != nil {
 			return err
 		}
@@ -52,10 +55,13 @@ func (s *Service) List(ctx context.Context, p contracts.Principal, page *contrac
 }
 
 func (s *Service) MarkRead(ctx context.Context, p contracts.Principal, id string) error {
+	if s == nil || s.DB == nil {
+		return contracts.Fail(500, "INTERNAL_ERROR", "The request could not be completed.")
+	}
 	if !contracts.ValidID(id) {
 		return contracts.Fail(400, "INVALID_NOTIFICATION_ID", "A valid notification ID is required.")
 	}
-	return s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+	return s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		result, err := tx.Exec(ctx, `UPDATE in_app_notifications SET is_read=true,read_at=coalesce(read_at,now())
 			WHERE school_id=$1 AND recipient_user_id=$2 AND id=$3`, p.SchoolID, p.UserID, id)
 		if err != nil {

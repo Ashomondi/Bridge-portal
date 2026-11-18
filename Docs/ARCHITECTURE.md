@@ -306,3 +306,184 @@ re-litigate them here. Open questions that affect this document:
 - Payment execution: the system records approved payments; whether it will
   ever initiate transfers itself (beyond the parent-initiated M-Pesa STK push)
   is undecided.
+
+## Notifications engine (`backend/internal/notifications`)
+
+The notifications package provides the Release 1 synchronous transactional SMS
+transport and transaction-bound in-app notifications service. Application-level
+wiring (`cmd/server/main.go`, `internal/config`, `internal/jobs`,
+`cmd/worker/main.go`, auth/onboarding callers) remains pending.
+
+### SMS transport versus SMS queue
+
+- **Synchronous SMS transport (implemented):** `notifications.SMSDispatcher`
+  (`DispatchSMS(context.Context, SMSMessage) error`) validates phone numbers
+  and allowed purposes, then dispatches synchronously via either
+  `NewSandboxSMSDispatcher` (local redacted logging for username `sandbox`) or
+  the Africa's Talking HTTP adapter (`NewSMSDispatcher`).
+- **Redis/Asynq SMS queue (pending future integration):** Asynchronous job
+  scheduling, Redis persistence, backoff retries, and dead-letter handling
+  belong to `internal/jobs` and `cmd/worker` (currently placeholders). No
+  durable queue exists yet in this codebase.
+- **Retry & error classification boundary:** The transport surfaces structured
+  `*SMSDeliveryError{Code, Retryable}` values (e.g., HTTP `408`/`429`/`5xx`,
+  transport timeouts, and provider `500`–`502` recipient codes marked
+  `Retryable: true`; redirects, `4xx` rejections, recipient mismatch, and
+  malformed/oversized responses marked `Retryable: false`) so the future Asynq
+  worker can decide whether to retry without inspecting raw provider bodies.
+  Ambiguous network failures after a request is sent cannot guarantee
+  exactly-once SMS delivery.
+
+### Transactional-only SMS purposes (Release 1)
+
+Release 1 SMS transport is restricted to four explicit `SMSPurpose` values
+(`C58`):
+
+- `app_login` — app login OTP
+- `whatsapp_session` — Release 3 WhatsApp session OTP purpose key (reserved in
+  the transport enum; WhatsApp integration itself is deferred to Release 3)
+- `phone_change` — guardian 2FA phone-change OTP to the new number
+- `phone_change_notice` — security alert to the old number on phone change
+
+Event-based messages (`absence`, `sickbay`, results, timetable, calendar, fee
+alerts) are explicitly rejected by `SMSMessage` validation (`ErrInvalidSMS`).
+Release 1 event notifications use `in_app_notifications` instead.
+
+### Africa's Talking provider boundary
+
+- **HTTP client & timeouts:** `NewSMSDispatcher` copies any caller-supplied
+  `*http.Client` (never mutating a shared client) and enforces a default
+  15-second timeout when `Timeout <= 0`.
+- **Redirect protection:** Installs `CheckRedirect` returning
+  `http.ErrUseLastResponse` so HTTP redirects are rejected (`Retryable: false`)
+  and `apiKey` headers / form bodies are never forwarded to redirect targets.
+- **Credential & error redaction:** `SMSConfig` carries `Username`, `APIKey`,
+  and optional `SenderID` (`AFRICASTALKING_*` env vars; config wiring is still
+  pending). Returned errors (`ErrInvalidPhone`, `ErrInvalidSMS`,
+  `*SMSDeliveryError`) never include the phone number, message body, OTP,
+  `APIKey`, or raw provider response body. Response reads are capped at 64 KiB
+  and verify single-recipient normalized phone matching.
+
+### In-app notifications
+
+- **Ownership & tenant isolation:** Every row in `in_app_notifications` belongs
+  to `(school_id, recipient_user_id)` with PostgreSQL `ENABLE` and `FORCE ROW
+  LEVEL SECURITY` (`school_id = current_school_id()`). `List` and `MarkRead`
+  derive `school_id` exclusively from `contracts.Principal` via
+  `contracts.TenantDB.WithTenantTx` and filter by `recipient_user_id =
+  Principal.UserID`.
+- **Transaction-bound creation (`contracts.InAppNotifier`):** Business services
+  begin their tenant-scoped transaction, perform domain writes, and call
+  `CreateInAppNotification(ctx, tx, notification)` using `contracts.SQLTx`
+  (`contracts.PgxTx` for `pgx.Tx`, `contracts.StdSQLTx` for `*sql.Tx`) inside
+  that same transaction. `notifications.Service` verifies an active
+  `memberships` + `users` row for `(school_id, recipient_user_id)` and inserts
+  the notification without starting its own transaction or sending SMS. Any
+  failure propagates to the caller so the entire business transaction rolls back
+  atomically.
+- **Read receipt semantics & pagination:** `MarkRead` sets `is_read = true` and
+  `read_at = coalesce(read_at, now())` so repeat marks preserve the first read
+  timestamp; cross-user or cross-school IDs return `404 NOTIFICATION_NOT_FOUND`.
+  `List` uses `contracts.Pagination` (default `page=1`, `per_page=25`, max
+  `per_page=100`) ordered by `created_at DESC, id`.
+- **Consumer integration status:** `internal/academics` adopts
+  `contracts.InAppNotifier` directly and executes all in-app notifications
+  (attendance absence, results release, results re-release, timetable update,
+  calendar event update) inside `Store.WithTx` with error propagation.
+  `internal/billing`, `internal/auth`, `internal/onboarding`, `internal/jobs`,
+  and `cmd/server` route mounting remain pending wiring.
+
+## Release 1 billing core (`backend/internal/billing`)
+
+The billing package implements exact integer money arithmetic, fee structure
+validation and loading, idempotent term charging, per-term student ledgers,
+credit carry-forward, payment allocation, and atomic academic term-date sync.
+HTTP routes are defined in `billing.RegisterRoutes`, while `cmd/server` and
+scheduled `internal/jobs` triggers remain pending application composition.
+
+### Money representation (`billing.Money`)
+
+- All monetary quantities use `billing.Money` (`int64` KES minor units / cents)
+  bounded strictly to `[-999999999999, +999999999999]`, matching PostgreSQL
+  `NUMERIC(12,2)`. Floating-point arithmetic is prohibited.
+- `ParseMoney` and `UnmarshalJSON` accept integer or decimal strings/numbers
+  with at most 2 fractional digits and reject commas, whitespace, scientific
+  notation, `NaN`, `Infinity`, and precision beyond 2 decimal places.
+- `NumericValue` / `ScanNumeric` convert directly to/from `pgtype.Numeric` via
+  exact `math/big` scaling without floating-point intermediaries.
+
+### Fee structures, Release 1 variants, and term charging
+
+- **Release 1 variant policy (`all` only):** Although `000004` adds
+  `boarding_status IN ('all', 'boarder', 'day')` for future flexibility,
+  Release 1 rejects `'boarder'` and `'day'` with `422 UNSUPPORTED_BOARDING_VARIANT`
+  and charges exclusively `'all'` structures so charge selection never depends on
+  load order or unapproved boarder-reclassification rules.
+- **Validation & replay:** `LoadFeeStructureTx` validates school-scoped
+  `academic_years`, `terms` (matching year), and `grade_levels`, normalizes and
+  sorts items deterministically, upserts the generic term `fee_periods` row, and
+  returns `409 FEE_STRUCTURE_CONFLICT` if a differing structure already exists.
+  Whether newly inserted or identically replayed, if `academic_years.is_current`
+  or `terms.is_current` is true, it triggers idempotent `ChargeGradeForTerm`.
+- **Preloaded structures trigger:** `ChargeCurrentTermStructures`
+  (`POST /api/v1/billing/fee-structures/charge-current`) and
+  `ChargeCurrentTermStructuresTx` idempotently charge all `'all'` structures in
+  a school whose academic year or term has become `is_current = true`.
+- **Term-date synchronization (`academics.TermDateFeeSyncer`):**
+  `billing.Service.OnTermStartDateChanged` implements `academics.TermDateFeeSyncer`
+  and executes inside `academics.PutCalendar`'s active SQL transaction (via
+  `academics.SQLTxFromContext`), updating `fee_periods.due_date`, `fee_charges.due_date`,
+  and `fee_ledgers.due_date`, inserting `fee_change_notes` (`change_type = 'due_date'`)
+  plus `fee_change_note_students`, notifying active `is_fee_payer = TRUE` guardians
+  via `contracts.InAppNotifier`, and writing an `audit_log` entry atomically.
+
+### `fee_charges`, `ledger_entries`, and `fee_ledgers`
+
+- **`fee_charges`** is the authoritative student-term charge assessment record
+  enforced by `UNIQUE (school_id, student_id, fee_period_id)`.
+- **`ledger_entries`** is an immutable, append-only **single-sided financial
+  transaction ledger** (`charge`, `payment`, `credit_applied`, `adjustment`)
+  keyed idempotently by `UNIQUE (school_id, student_id, term_id, entry_type, reference)`.
+  It is not double-entry accounting (no chart of accounts or debit/credit legs).
+- **`fee_ledgers`** stores **materialized per-(school, student, year, term)
+  balances**. Prior terms' `current_balance` and `credit_balance` are preserved
+  (never zeroed into a later term). Student-wide aggregates in `GetStudentFeeBalance`
+  are summed across the student's per-term rows alongside the `Terms` breakdown.
+
+### Payment allocation and credit carry-forward
+
+- **Idempotency:** Payment posting locks the student and all `fee_ledgers` rows
+  (`FOR UPDATE`) and checks whether `(school_id, student_id, 'payment', reference)`
+  already exists in `ledger_entries` before allocating, ensuring replays never
+  re-apply amounts to newly charged terms.
+- **Explicit vs automatic allocation:**
+  - `RecordStudentPaymentForTermTx` allocates to the specified `targetTermID`
+    first; any excess over that term's `current_balance` settles other owing
+    terms oldest-due-first via paired transfers, leaving any remaining surplus
+    as `credit_balance` on `targetTermID`.
+  - `RecordStudentPaymentTx` / `RecordStudentPaymentWithActorTx` allocate
+    unallocated payments deterministically **oldest-due-first**
+    (`COALESCE(fl.due_date, t.start_date) ASC, ay.year ASC, t.term_number ASC, fl.id ASC`),
+    recording any overpayment surplus as `credit_balance` on the active/current term.
+- **Credit carry-forward:** When a new charge is applied on term `T`, same-term
+  `credit_balance` is consumed first, followed by deterministic transfers from
+  prior-term ledgers with `credit_balance > 0`: each transfer decrements source
+  `credit_balance`, increments source `credit_transferred`, records an
+  `adjustment` entry (`XFER:<chargeID>:<srcTermID>`) on the source term,
+  increments destination `credit_applied`, and records a `credit_applied` entry
+  (`CRD:<chargeID>:<srcTermID>`) on the destination term.
+
+### Authorization and mandatory audit
+
+- **Staff/bursar permissions:** Evaluated in PostgreSQL via active `memberships`,
+  active `users`, and active unexpired school-wide badges (`membership_badges` ->
+  `badges` -> `badge_permissions` -> `permissions`):
+  - `billing.fee_structures.manage` for `LoadFeeStructure` and `ChargeCurrentTermStructures`
+  - `billing.ledgers.view` for read-only staff/bursar balance and ledger reads
+    (least privilege: does not grant fee structure management or payment mutation).
+- **Guardian visibility:** `GetStudentFeeBalance` and `GetStudentLedger` allow
+  guardians only when `student_guardians.is_fee_payer = TRUE` (with active
+  membership/user in the same school). Cross-school IDs return `404 STUDENT_NOT_FOUND`.
+- **Mandatory audit:** Financial mutations require a non-nil `AuditLogger`
+  (`PostgresAuditLogger` writes `audit_log` inside the active transaction) and
+  fail closed with `500 AUDIT_LOGGER_REQUIRED` if missing.
