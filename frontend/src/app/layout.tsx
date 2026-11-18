@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import AssistantWidget from "@/components/assistant/AssistantWidget";
 
 export const metadata: Metadata = {
   title: "Bridge Portal | School Portal",
@@ -13,6 +14,7 @@ export const viewport: Viewport = {
   themeColor: "#007A78",
 };
 
+/** Renders the document shell shared by every portal route. */
 export default function RootLayout({
   children,
 }: {
@@ -20,7 +22,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        {children}
+        <AssistantWidget />
+      </body>
     </html>
   );
 }

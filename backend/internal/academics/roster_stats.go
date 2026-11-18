@@ -2,6 +2,7 @@ package academics
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -11,8 +12,25 @@ import (
 
 // RosterResponse is the full roster visible only to authorised staff of a class.
 type RosterResponse struct {
-	ClassID  string            `json:"class_id"`
-	Students []EnrolledStudent `json:"students"`
+	ClassID    string            `json:"class_id"`
+	StreamName string            `json:"stream_name,omitempty"`
+	TermID     string            `json:"term_id,omitempty"`
+	TermLabel  string            `json:"term_label,omitempty"`
+	Date       string            `json:"date,omitempty"`
+	Students   []EnrolledStudent `json:"students"`
+}
+
+// TeacherClassSummary is the class-teacher scope returned to the roll-call UI.
+type TeacherClassSummary struct {
+	ID         string `json:"id"`
+	StreamName string `json:"stream_name"`
+}
+
+// TeacherClassesResponse resolves the teacher's default class without requiring
+// the UI to know an internal class id up front.
+type TeacherClassesResponse struct {
+	DefaultClassID string                `json:"default_class_id"`
+	Classes        []TeacherClassSummary `json:"classes"`
 }
 
 // GetRoster implements GET /api/v1/classes/{id}/roster. The caller must be the
@@ -29,7 +47,8 @@ func (s *Service) GetRoster(ctx context.Context, classID string) (RosterResponse
 	}
 	var out RosterResponse
 	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
-		if _, err := tx.ClassByID(ctx, actor.SchoolID, classID); err != nil {
+		class, err := tx.ClassByID(ctx, actor.SchoolID, classID)
+		if err != nil {
 			return err
 		}
 		allowed := false
@@ -50,7 +69,50 @@ func (s *Service) GetRoster(ctx context.Context, classID string) (RosterResponse
 		if err != nil {
 			return err
 		}
-		out = RosterResponse{ClassID: classID, Students: students}
+		out = RosterResponse{
+			ClassID:    classID,
+			StreamName: class.StreamName,
+			Date:       timeNow().Format("2006-01-02"),
+			Students:   students,
+		}
+		if term, termErr := tx.TermForDate(ctx, actor.SchoolID, timeNow()); termErr == nil {
+			out.TermID = term.ID
+			out.TermLabel = fmt.Sprintf("Term %d · %d", term.TermNumber, term.Year)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// GetTeacherClasses resolves the class-teacher scope for the signed-in teacher.
+// The roll-call route calls this when no class id is present in the URL.
+func (s *Service) GetTeacherClasses(ctx context.Context) (TeacherClassesResponse, error) {
+	actor, err := s.actor(ctx)
+	if err != nil {
+		return TeacherClassesResponse{}, err
+	}
+	switch actor.Role {
+	case RoleTeacher, RoleDean, RolePrincipal, RoleDeputy:
+	default:
+		return TeacherClassesResponse{}, errForbidden(CodeForbidden, "Only staff may view class-teacher assignments.")
+	}
+
+	var out TeacherClassesResponse
+	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
+		classes, err := tx.ClassesForTeacher(ctx, actor.SchoolID, actor.MembershipID)
+		if err != nil {
+			return err
+		}
+		out.Classes = make([]TeacherClassSummary, 0, len(classes))
+		for _, class := range classes {
+			out.Classes = append(out.Classes, TeacherClassSummary{
+				ID:         class.ID,
+				StreamName: class.StreamName,
+			})
+		}
+		if len(out.Classes) > 0 {
+			out.DefaultClassID = out.Classes[0].ID
+		}
 		return nil
 	})
 	return out, err
@@ -229,7 +291,19 @@ func (s *Service) handleClassStats(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, result)
 }
 
+func (s *Service) handleTeacherClasses(w http.ResponseWriter, r *http.Request) {
+	result, err := s.GetTeacherClasses(r.Context())
+	if err != nil {
+		respondError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
 func init() {
+	registerRoute(http.MethodGet, "/api/v1/academics/my-classes", func(s *Service, w http.ResponseWriter, r *http.Request) {
+		s.handleTeacherClasses(w, r)
+	})
 	registerRoute(http.MethodGet, "/api/v1/classes/{id}/roster", func(s *Service, w http.ResponseWriter, r *http.Request) {
 		s.handleRoster(w, r)
 	})
