@@ -1,7 +1,16 @@
 /** @type {import('next').NextConfig} */
+const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+
 const nextConfig = {
   reactStrictMode: true,
-  // PWA & offline support configuration
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path*',
+        destination: `${backendUrl}/api/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;
