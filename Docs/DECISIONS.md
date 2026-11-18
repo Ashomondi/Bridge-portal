@@ -236,4 +236,55 @@ deleted on exit (unchanged).
 - **Rationale:** Placing the contract in `contracts` avoids circular dependencies between `academics` and `notifications`, `contracts.SQLTx` bridges `pgx.Tx` (billing) and `*sql.Tx` (academics) within the caller's real database transaction without forcing a driver rewrite, and executing inside `Store.WithTx` prevents silent partial commits where a domain change succeeds without its required parent/teacher notice.
 - **Consequences:** All Release 1 `academics` notification calls (attendance absence, results release/re-release, timetable updates, calendar event updates) are mandatory within their business transaction: if recipient membership validation or notification persistence fails, the entire transaction rolls back and returns an error. Best-effort post-commit fan-out is not used for these paths.
 - **Alternatives considered:** Leaving notifications post-commit with best-effort error logging (rejected because it violates atomic business/notice guarantees and silently drops required notices on failure) or rewriting `academics.SQLStore` from `database/sql` to `pgx` (rejected to preserve `academics`'s driver-neutral store boundary).
+<<<<<<< HEAD
 >>>>>>> 7e300ec074132fac5cb72ca2428a933bfcbc5172
+=======
+
+**2026-11-18 — ADR: Integer Minor-Unit Money (`billing.Money`)**
+
+- **Context:** Financial amounts in KES must match PostgreSQL `NUMERIC(12,2)` across JSON APIs, fee structures, term charges, payments, and balance calculations without rounding drift.
+- **Decision:** Represent all monetary quantities in `backend/internal/billing` as `Money` (`int64` minor units / cents) bounded to `[-999999999999, +999999999999]`, parse/serialize via strict decimal strings (rejecting >2 decimal places, scientific notation, commas, and floats), and convert to/from `pgtype.Numeric` via exact `math/big` scaling.
+- **Rationale:** Binary IEEE-754 floats cannot represent base-10 cents exactly; integer minor units guarantee exact addition, subtraction, and balance reconciliation.
+- **Consequences:** All billing DTOs serialize amounts as exact two-decimal strings (`"10000.00"`), and overflow/precision errors fail loudly with `ErrInvalidMoney` / `422`.
+- **Alternatives considered:** `float64` (rejected for rounding loss) or `math/big.Rat` everywhere (rejected as unnecessarily complex when `int64` covers `NUMERIC(12,2)` cleanly).
+
+**2026-11-18 — ADR: Fee Ledgers and Immutable Single-Sided Ledger Entries**
+
+- **Context:** Release 1 billing requires both fast per-student/per-term balance reads and an immutable posting trail, while avoiding inventing a full chart-of-accounts general ledger not specified in the schema or Release 1 requirements.
+- **Decision:** Treat `fee_charges` (assessments) and `payments` (settled receipts) as authoritative source events, `ledger_entries` as an immutable append-only single-sided posting log (`charge`, `payment`, `credit_applied`, `adjustment`), and `fee_ledgers` as the materialized per-(school, student, year, term) balance snapshot. Do not claim double-entry accounting.
+- **Rationale:** Matches migration `000004`'s schema constraints (`UNIQUE (school_id, student_id, term_id, entry_type, reference)` and `fee_ledgers` balance columns) while keeping reconciliation deterministic.
+- **Consequences:** All mutations write source records, ledger entries, balance updates, and audit rows in a single locked transaction; corrections use new entries/notes rather than mutating history.
+- **Alternatives considered:** Implementing a synthetic debit/credit chart of accounts in `ledger_entries` (rejected as unsupported by the schema and unrequested scope for Release 1).
+
+**2026-11-18 — ADR: Explicit Credit Carry-Forward and Cross-Term Transfers**
+
+- **Context:** Prior logic aggregated all terms into one row and zeroed historical terms, while recording `credit_applied` without pairing cross-term movement.
+- **Decision:** Keep each term's `fee_ledgers` row independent. When a new charge or an explicit-term overpayment draws credit from another term, atomically lock the student's ledgers, decrement source `credit_balance`, increment source `credit_transferred`, insert a paired `'adjustment'` entry (`XFER:...`) on the source term, increment destination `credit_applied`, and insert a `'credit_applied'` entry (`CRD:...`) on the destination term.
+- **Rationale:** Preserves historical per-term financial positions, makes cross-term credit transfers auditable and idempotent, and guarantees `SUM(credit_transferred) == SUM(credit_applied_from_transfers)` and conservation of money.
+- **Consequences:** Rebuilding or auditing a student's balance across terms can trace every shilling of carried-forward credit to its origin term without double-counting.
+- **Alternatives considered:** Zeroing prior term balances into the latest term (rejected because it destroys historical term balances) or implicitly summing payments across terms without transfer entries (rejected because cross-term movement lacks an audit trail).
+
+**2026-11-18 — ADR: Release 1 Boarding Fee Variants (`all` Only per O13)**
+
+- **Context:** Migration `000004` allows `boarding_status IN ('all', 'boarder', 'day')` on `fee_structures`, while `fee_charges` enforces `UNIQUE (school_id, student_id, fee_period_id)`. Charging multiple variants through `ChargeGradeForTerm` made charged amounts depend on insertion order, and product policy O13 deferred boarding-tier rules.
+- **Decision:** Restrict Release 1 fee structure loading and charging to `boarding_status = 'all'` only; reject `'boarder'` and `'day'` with `422 UNSUPPORTED_BOARDING_VARIANT`.
+- **Rationale:** Prevents order-dependent financial bugs and avoids inventing unapproved mid-term dormitory transfer/re-billing rules while keeping the `000004` schema ready for future variant activation.
+- **Consequences:** All active enrolled students in a grade/term/year receive the deterministic `'all'` fee structure; enabling `'boarder'`/`'day'` later will require explicit O13 rules for classification and mid-term status changes.
+- **Alternatives considered:** Implementing automatic `current_dormitory_id IS NOT NULL` precedence in Release 1 (rejected because O13 is unresolved and mid-term boarding changes are undefined).
+
+**2026-11-18 — ADR: Term Payment Allocation (Explicit Target or Oldest-Due-First) and Per-Term Balances**
+
+- **Context:** Posting every payment to the latest term by `start_date` misallocated payments when multiple terms were precharged and obscured arrears on earlier terms.
+- **Decision:** Preserve each term's `fee_ledgers` balances independently. Support explicit target-term allocation (`RecordStudentPaymentForTermTx`) and deterministic **oldest-due-first** allocation (`COALESCE(fl.due_date, t.start_date) ASC, ay.year ASC, t.term_number ASC, fl.id ASC`) for unallocated payments (`RecordStudentPaymentTx`), holding remaining overpayments as `credit_balance` on the active/current term. Check payment reference idempotency across `ledger_entries` under the student lock before allocating.
+- **Rationale:** Matches standard school fee arrears settlement and prevents replayed payment references from applying to newly charged future terms.
+- **Consequences:** `GetStudentFeeBalance` reports both exact aggregate totals and per-term `Terms` breakdowns, and historical unpaid terms remain accurately visible until paid.
+- **Alternatives considered:** Posting all payments to the latest term (rejected as financially misleading).
+
+**2026-11-18 — ADR: Billing Authorization — Badge Permissions, Bursar Visibility, and Designated Fee-Payer Guardians**
+
+- **Context:** Hardcoded platform role strings (`ikonex_admin`, `ikonex_team`, `platform_admin`) did not exist in the `000001` schema, bursar access to ledgers was blocked, and guardian fee visibility (`is_fee_payer`) was unenforced.
+- **Decision:** Enforce database-backed badge permissions (`billing.fee_structures.manage` for structure loading/charging triggers; `billing.ledgers.view` for read-only bursar/staff ledger visibility) requiring active non-parent memberships and active unexpired school-wide badges. Restrict guardian balance/ledger reads and fee-change notifications to `student_guardians.is_fee_payer = TRUE` (with active membership/user).
+- **Rationale:** Aligns with `API_CONTRACTS.md` and `000001_init_schema.up.sql`, enforces least privilege (bursar read access does not grant structure loading or payment mutation), and protects financial privacy between co-guardians using the existing `is_fee_payer` column.
+- **Consequences:** Staff without explicit badge grants, inactive memberships, expired badges, and guardians with `is_fee_payer = FALSE` receive `403 FORBIDDEN` (`404` across schools).
+- **Alternatives considered:** Hardcoding role name strings (rejected as schema-inconsistent and bypassing badges) or allowing all guardians regardless of `is_fee_payer` (rejected as ignoring the schema's explicit fee-payer flag).
+>>>>>>> fef894bb73d2e07250091ef2c4bfc2e3802e68a1

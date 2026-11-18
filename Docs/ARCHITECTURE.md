@@ -435,3 +435,98 @@ Release 1 event notifications use `in_app_notifications` instead.
   calendar event update) inside `Store.WithTx` with error propagation.
   `internal/billing`, `internal/auth`, `internal/onboarding`, `internal/jobs`,
   and `cmd/server` route mounting remain pending wiring.
+
+## Release 1 billing core (`backend/internal/billing`)
+
+The billing package implements exact integer money arithmetic, fee structure
+validation and loading, idempotent term charging, per-term student ledgers,
+credit carry-forward, payment allocation, and atomic academic term-date sync.
+HTTP routes are defined in `billing.RegisterRoutes`, while `cmd/server` and
+scheduled `internal/jobs` triggers remain pending application composition.
+
+### Money representation (`billing.Money`)
+
+- All monetary quantities use `billing.Money` (`int64` KES minor units / cents)
+  bounded strictly to `[-999999999999, +999999999999]`, matching PostgreSQL
+  `NUMERIC(12,2)`. Floating-point arithmetic is prohibited.
+- `ParseMoney` and `UnmarshalJSON` accept integer or decimal strings/numbers
+  with at most 2 fractional digits and reject commas, whitespace, scientific
+  notation, `NaN`, `Infinity`, and precision beyond 2 decimal places.
+- `NumericValue` / `ScanNumeric` convert directly to/from `pgtype.Numeric` via
+  exact `math/big` scaling without floating-point intermediaries.
+
+### Fee structures, Release 1 variants, and term charging
+
+- **Release 1 variant policy (`all` only):** Although `000004` adds
+  `boarding_status IN ('all', 'boarder', 'day')` for future flexibility,
+  Release 1 rejects `'boarder'` and `'day'` with `422 UNSUPPORTED_BOARDING_VARIANT`
+  and charges exclusively `'all'` structures so charge selection never depends on
+  load order or unapproved boarder-reclassification rules.
+- **Validation & replay:** `LoadFeeStructureTx` validates school-scoped
+  `academic_years`, `terms` (matching year), and `grade_levels`, normalizes and
+  sorts items deterministically, upserts the generic term `fee_periods` row, and
+  returns `409 FEE_STRUCTURE_CONFLICT` if a differing structure already exists.
+  Whether newly inserted or identically replayed, if `academic_years.is_current`
+  or `terms.is_current` is true, it triggers idempotent `ChargeGradeForTerm`.
+- **Preloaded structures trigger:** `ChargeCurrentTermStructures`
+  (`POST /api/v1/billing/fee-structures/charge-current`) and
+  `ChargeCurrentTermStructuresTx` idempotently charge all `'all'` structures in
+  a school whose academic year or term has become `is_current = true`.
+- **Term-date synchronization (`academics.TermDateFeeSyncer`):**
+  `billing.Service.OnTermStartDateChanged` implements `academics.TermDateFeeSyncer`
+  and executes inside `academics.PutCalendar`'s active SQL transaction (via
+  `academics.SQLTxFromContext`), updating `fee_periods.due_date`, `fee_charges.due_date`,
+  and `fee_ledgers.due_date`, inserting `fee_change_notes` (`change_type = 'due_date'`)
+  plus `fee_change_note_students`, notifying active `is_fee_payer = TRUE` guardians
+  via `contracts.InAppNotifier`, and writing an `audit_log` entry atomically.
+
+### `fee_charges`, `ledger_entries`, and `fee_ledgers`
+
+- **`fee_charges`** is the authoritative student-term charge assessment record
+  enforced by `UNIQUE (school_id, student_id, fee_period_id)`.
+- **`ledger_entries`** is an immutable, append-only **single-sided financial
+  transaction ledger** (`charge`, `payment`, `credit_applied`, `adjustment`)
+  keyed idempotently by `UNIQUE (school_id, student_id, term_id, entry_type, reference)`.
+  It is not double-entry accounting (no chart of accounts or debit/credit legs).
+- **`fee_ledgers`** stores **materialized per-(school, student, year, term)
+  balances**. Prior terms' `current_balance` and `credit_balance` are preserved
+  (never zeroed into a later term). Student-wide aggregates in `GetStudentFeeBalance`
+  are summed across the student's per-term rows alongside the `Terms` breakdown.
+
+### Payment allocation and credit carry-forward
+
+- **Idempotency:** Payment posting locks the student and all `fee_ledgers` rows
+  (`FOR UPDATE`) and checks whether `(school_id, student_id, 'payment', reference)`
+  already exists in `ledger_entries` before allocating, ensuring replays never
+  re-apply amounts to newly charged terms.
+- **Explicit vs automatic allocation:**
+  - `RecordStudentPaymentForTermTx` allocates to the specified `targetTermID`
+    first; any excess over that term's `current_balance` settles other owing
+    terms oldest-due-first via paired transfers, leaving any remaining surplus
+    as `credit_balance` on `targetTermID`.
+  - `RecordStudentPaymentTx` / `RecordStudentPaymentWithActorTx` allocate
+    unallocated payments deterministically **oldest-due-first**
+    (`COALESCE(fl.due_date, t.start_date) ASC, ay.year ASC, t.term_number ASC, fl.id ASC`),
+    recording any overpayment surplus as `credit_balance` on the active/current term.
+- **Credit carry-forward:** When a new charge is applied on term `T`, same-term
+  `credit_balance` is consumed first, followed by deterministic transfers from
+  prior-term ledgers with `credit_balance > 0`: each transfer decrements source
+  `credit_balance`, increments source `credit_transferred`, records an
+  `adjustment` entry (`XFER:<chargeID>:<srcTermID>`) on the source term,
+  increments destination `credit_applied`, and records a `credit_applied` entry
+  (`CRD:<chargeID>:<srcTermID>`) on the destination term.
+
+### Authorization and mandatory audit
+
+- **Staff/bursar permissions:** Evaluated in PostgreSQL via active `memberships`,
+  active `users`, and active unexpired school-wide badges (`membership_badges` ->
+  `badges` -> `badge_permissions` -> `permissions`):
+  - `billing.fee_structures.manage` for `LoadFeeStructure` and `ChargeCurrentTermStructures`
+  - `billing.ledgers.view` for read-only staff/bursar balance and ledger reads
+    (least privilege: does not grant fee structure management or payment mutation).
+- **Guardian visibility:** `GetStudentFeeBalance` and `GetStudentLedger` allow
+  guardians only when `student_guardians.is_fee_payer = TRUE` (with active
+  membership/user in the same school). Cross-school IDs return `404 STUDENT_NOT_FOUND`.
+- **Mandatory audit:** Financial mutations require a non-nil `AuditLogger`
+  (`PostgresAuditLogger` writes `audit_log` inside the active transaction) and
+  fail closed with `500 AUDIT_LOGGER_REQUIRED` if missing.

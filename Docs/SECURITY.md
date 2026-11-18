@@ -149,7 +149,6 @@ This is the section most specific to this project's AI features — see also
 
 ## Retention
 
-<<<<<<< HEAD
 Policy is per record type. Periods are to be set with a Kenyan data
 protection lawyer; the rules below are the starting point.
 
@@ -164,7 +163,6 @@ protection lawyer; the rules below are the starting point.
 | Financial ledger | Kept as the law requires | Proposed; period open |
 
 What happens to a leftover ledger credit when a student leaves is undecided.
-=======
 Under Kenya's Data Protection Act, 2019, personal data must not be kept longer
 than necessary for its lawful purpose. **Formal retention schedules have not yet
 been established** for this platform: every post-session, post-reconciliation,
@@ -198,7 +196,6 @@ Operational cleanup requirements (pending worker implementation):
 - Audit deletion counts and policy outcomes without recording the deleted
   personal data. Review new metadata keys and provider fields against the
   redaction rules above before storage.
->>>>>>> 7e300ec074132fac5cb72ca2428a933bfcbc5172
 
 ## Breach response
 
@@ -256,3 +253,34 @@ WhatsApp; the chat sends a link to the app instead.
 - Pending registrations are not active records and grant no access until a
   staff verifier confirms them in person. Verification can be delegated only
   to staff, only while the QR is active (12 hours).
+## Billing access control and financial auditability
+
+- **Authorization & least privilege:** Billing endpoints never rely on
+  hardcoded platform role strings. Every staff operation checks an active,
+  non-parent `memberships` row, active `users.is_active`, and an active,
+  unexpired school-wide badge permission (`billing.fee_structures.manage` for
+  `LoadFeeStructure` and `ChargeCurrentTermStructures`; `billing.ledgers.view`
+  for read-only `GetStudentFeeBalance` and `GetStudentLedger`).
+- **Guardian & fee-payer boundary:** Guardian access to student fee balances,
+  ledgers, and fee-due-date change notifications requires an active
+  `student_guardians` relationship in the same school with `is_fee_payer = TRUE`.
+  Non-fee-paying guardians (`is_fee_payer = FALSE`), unlinked guardians, and
+  unrelated users receive `403 FORBIDDEN`.
+- **Tenant isolation:** All billing HTTP and service entry points derive
+  `school_id` exclusively from the authenticated `contracts.Principal` via
+  `contracts.TenantDB.WithTenantTx`, backed by PostgreSQL `FORCE ROW LEVEL SECURITY`.
+  Requests targeting a student in another school return `404 STUDENT_NOT_FOUND`
+  without disclosing existence.
+- **Mandatory transactional audit:** All billing mutations (`LoadFeeStructure`,
+  `ChargeCurrentTermStructures`, `ChargeGradeForTerm`, `ChargeStudent`,
+  `ChargeAdmittedStudent`, `RecordStudentPayment*`, `OnTermStartDateChanged*`)
+  require a non-nil `AuditLogger` (`PostgresAuditLogger` writes to `audit_log`
+  within the caller's transaction) and fail closed (`500 AUDIT_LOGGER_REQUIRED`)
+  if omitted. Audit failures roll back the financial mutation atomically.
+- **Redaction & immutability:** Audit `details` record actor user ID, school ID,
+  action, resource IDs, references, and minor-unit amounts — never phone numbers,
+  PINs, or raw provider payloads. `fee_charges`, `ledger_entries`, and
+  `fee_change_notes` are append-only; corrections are represented via new
+  compensating entries/notes rather than mutating historical records. Financial
+  retention schedules remain subject to the controller-confirmed policy in the
+  Retention table above.
