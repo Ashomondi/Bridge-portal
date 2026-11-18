@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 const quickStats = [
 	{ label: 'Overall performance', value: 'B+' },
 	{ label: 'Attendance', value: '96%' },
@@ -59,4 +60,24 @@ export default function ParentPage() {
 			</div>
 		</main>
 	);
+=======
+import ParentHomeDashboard from "@/components/parent-home/ParentHomeDashboard";
+import { loadParentHome } from "@/components/parent-home/parent-home-source";
+
+export const dynamic = "force-dynamic";
+
+export default async function ParentHomePage({
+  searchParams,
+}: {
+  searchParams: { studentId?: string | string[] };
+}) {
+  const data = await loadParentHome({
+    studentId:
+      typeof searchParams.studentId === "string"
+        ? searchParams.studentId
+        : undefined,
+  });
+
+  return <ParentHomeDashboard data={data} />;
+>>>>>>> 7e300ec074132fac5cb72ca2428a933bfcbc5172
 }

@@ -32,14 +32,47 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
 
 ## Commands
 
-> Fill these in as the project scaffolding is created — an AI assistant should
-> never guess at commands.
-
-- Backend tests: `TODO`
-- Backend run (dev): `TODO`
-- Frontend run (dev): `TODO`
-- Migrations: `TODO`
-- AI service run (dev): `TODO`
+- **Prerequisites:** Go **1.22.2+** (`backend/go.mod`) and **PostgreSQL 16**
+  (`postgres:16-alpine`).
+- Backend build & static check:
+  `cd backend && go mod verify && go build ./... && go vet ./...`
+- Backend unit tests (no database required):
+  `cd backend && go test -count=1 -v ./internal/internalapi/contracts ./internal/academics`
+  and SMS transport unit tests:
+  `cd backend && go test -count=1 -v ./internal/notifications -run 'Test(AfricaTalking|SMS|Normalize|Sandbox|Transactional)'`
+- PostgreSQL 16 integration tests: start an isolated PostgreSQL 16 test server
+  (e.g., `docker compose up -d --wait postgres` from the repo root), configure
+  `DEV05_TEST_DATABASE_URL`, and run all tests with `CI=true` so database tests
+  cannot skip silently:
+  ```sh
+  export DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'
+  cd backend && CI=true go test -count=1 -v ./...
+  ```
+  Run notification integration tests specifically with:
+  ```sh
+  cd backend && CI=true DEV05_TEST_DATABASE_URL="$DEV05_TEST_DATABASE_URL" go test -count=1 -v ./internal/notifications
+  ```
+  Adjust the URL for your local credentials/port. Use a dedicated local test
+  server with a superuser capable of creating/dropping disposable `dev05_*`
+  databases and non-superuser, non-`BYPASSRLS` roles; never run against a
+  production or shared database. Missing `DEV05_TEST_DATABASE_URL` skips DB
+  tests locally without `CI`, but fails when `CI` is nonempty.
+  `.github/workflows/backend.yml` provisions PostgreSQL 16 and runs the full
+  validation suite.
+- Complete validation suite:
+  ```sh
+  cd backend && go mod verify && go build ./... && go vet ./... && CI=true DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable' go test -count=1 -v ./...
+  ```
+- Backend run (dev): `make backend-run` (entry point is still a placeholder)
+- Frontend run (dev): `make frontend-run`
+- Migrations: apply paired SQL files using a PostgreSQL migration runner in
+  exact sequence **`000001` → `000003` → `000004`**
+  (`000001_init_schema` → `000003_r1_academics` →
+  `000004_r1_billing_whatsapp_notifications`). **Migration `000002` is absent
+  from this branch.** `make migrate-up` in `Makefile` is advertised in help
+  output but not implemented. The test harness applies the SQL files directly;
+  see `README.md` for downgrade rules.
+- AI service run (dev): `make ai-run`
 
 ## Non-negotiable rules
 
@@ -81,9 +114,38 @@ These override convenience or "helpfulness" in any single task. See
 > don't invent conventions here that the code doesn't actually follow.
 
 - Go package layout: `TODO`
-- Error handling style: `TODO`
+- Shared consumer contracts: `backend/internal/internalapi/contracts`;
+  `TenantTxFunc.WithTenantTx` takes the principal from trusted `RequireIdentity`,
+  never a school chosen from request input. See `API_CONTRACTS.md` for envelopes,
+  limits and the distinction between contracts and pending runtime wiring.
+- Error handling style: shared `Fail` / `WriteError` helpers redact unexpected
+  failures. `AuditLogger` is only an interface; do not claim AC-29 is addressed
+  without a wired durable implementation.
 - Naming conventions (DB, API, frontend): `TODO`
 - Commit message style: `TODO`
+- Notifications package (`backend/internal/notifications`):
+  - **SMS purpose restrictions (`C58`):** `SMSDispatcher` only accepts
+    `app_login`, `whatsapp_session` (Release 3 reserved purpose key),
+    `phone_change`, and `phone_change_notice`. Never add event notifications
+    (`absence`, `sickbay`, results, timetable, calendar, fee reminders) to the
+    Release 1 SMS transport; those go to `in_app_notifications`.
+  - **Provider security:** Normalize phones via `NormalizePhone`; never log
+    message bodies, OTPs, full phone numbers, `APIKey`, or raw provider
+    responses; preserve `http.ErrUseLastResponse` redirect blocking, copied
+    HTTP clients with explicit timeouts, 64 KiB response bounds, and safe
+    `*SMSDeliveryError{Code, Retryable}` error classification.
+  - **Tenant transactions:** `notifications.Service.List` and `MarkRead` must
+    receive a `contracts.Principal` from `contracts.RequireIdentity` and pass it
+    to `contracts.TenantDB.WithTenantTx(ctx, principal, fn)` — never pass a raw
+    school ID string or accept school overrides from request inputs.
+  - **Transaction-bound in-app notifications:** Implement and consume
+    `contracts.InAppNotifier` (`CreateInAppNotification(context.Context,
+    contracts.SQLTx, contracts.InAppNotification) error`) inside the caller's
+    active tenant transaction (`contracts.PgxTx(tx)` or `contracts.StdSQLTx(tx)`),
+    verifying `var _ contracts.InAppNotifier = (*notifications.Service)(nil)` at
+    compile time. Never start a separate transaction inside `CreateInAppNotification`,
+    never send SMS from it, and always propagate mandatory notification errors
+    so the caller's transaction rolls back atomically.
 
 ## Where to look before asking the user
 

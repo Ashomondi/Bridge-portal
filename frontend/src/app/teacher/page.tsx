@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 const summary = [
   { label: 'Classes', value: '6' },
   { label: 'Attendance', value: '94%' },
@@ -43,4 +44,18 @@ export default function TeacherPage() {
       </div>
     </main>
   );
+=======
+// Teacher portal: personal timetable rendered from school-configured data.
+import TimetableDashboard from "@/components/timetable/TimetableDashboard";
+import { buildWeek } from "@/components/timetable/timetable-data";
+import { loadMyTimetable } from "@/components/timetable/timetable-source";
+
+export const dynamic = "force-dynamic";
+
+export default async function TeacherPage() {
+  const timetable = await loadMyTimetable();
+  const week = buildWeek(new Date(), timetable?.settings ?? null);
+
+  return <TimetableDashboard timetable={timetable} week={week} />;
+>>>>>>> 7e300ec074132fac5cb72ca2428a933bfcbc5172
 }
