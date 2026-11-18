@@ -3,6 +3,8 @@ package internalapi
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,9 +14,27 @@ import (
 
 	"github.com/Ashomondi/ikonex-academy/backend/internal/billing"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
-	"github.com/Ashomondi/ikonex-academy/backend/internal/whatsapp"
 	"github.com/jackc/pgx/v5"
 )
+
+// AIParentQueryInput is the delegated parent query envelope forwarded to the AI service.
+type AIParentQueryInput struct {
+	UserID         string    `json:"user_id"`
+	SchoolID       string    `json:"school_id"`
+	MembershipID   string    `json:"membership_id"`
+	Role           string    `json:"role"`
+	Channel        string    `json:"channel"`
+	SessionID      string    `json:"session_id"`
+	StudentID      string    `json:"student_id"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	Message        string    `json:"message"`
+	DelegatedToken string    `json:"-"`
+}
+
+// AIForwarder forwards verified parent queries to the external AI service.
+type AIForwarder interface {
+	ForwardParentQuery(ctx context.Context, input AIParentQueryInput) (string, error)
+}
 
 type AttendanceSummary struct {
 	StudentID       string `json:"student_id"`
@@ -103,21 +123,15 @@ type Service struct {
 }
 
 func (s *Service) signingKey() string {
-	if s != nil && strings.TrimSpace(s.ContextSigningKey) != "" {
-		return strings.TrimSpace(s.ContextSigningKey)
-	}
 	if s != nil {
-		return strings.TrimSpace(s.InternalServiceToken)
+		return strings.TrimSpace(s.ContextSigningKey)
 	}
 	return ""
 }
 
 func (s *Service) aiServiceToken() string {
-	if s != nil && strings.TrimSpace(s.AIServiceToken) != "" {
-		return strings.TrimSpace(s.AIServiceToken)
-	}
 	if s != nil {
-		return strings.TrimSpace(s.InternalServiceToken)
+		return strings.TrimSpace(s.AIServiceToken)
 	}
 	return ""
 }
@@ -165,58 +179,18 @@ func (s *Service) portalBaseURL() string {
 	return "https://portal.ikonex.ac.ke"
 }
 
-// AuthenticateInternalRequest validates X-Internal-Service-Token and HMAC-signed X-User-Context,
-// and verifies active membership (and active WhatsApp session when channel=='whatsapp') inside the tenant DB.
+// AuthenticateInternalRequest validates the internal service credential (Authorization: Bearer
+// or X-Internal-Service-Token), HMAC-signed X-User-Context, and X-Delegated-Session, then
+// verifies active membership and active chat_sessions delegation inside the tenant DB.
 func (s *Service) AuthenticateInternalRequest(r *http.Request) (UserContext, contracts.Principal, error) {
 	if s == nil || s.DB == nil {
 		return UserContext{}, contracts.Principal{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 	}
-	if err := VerifyServiceToken(r.Header.Get(HeaderInternalServiceToken), s.InternalServiceToken); err != nil {
+	if err := VerifyServiceToken(ExtractServiceToken(r), s.InternalServiceToken); err != nil {
 		return UserContext{}, contracts.Principal{}, err
 	}
 	now := s.now()
 	uctx, err := VerifyUserContext(r.Header.Get(HeaderUserContext), s.signingKey(), now)
-	if err != nil {
-		return UserContext{}, contracts.Principal{}, err
-	}
-
-	err = s.DB.WithTenantTx(r.Context(), uctx.SchoolID, func(tx pgx.Tx) error {
-		var activeMembership bool
-		if err := tx.QueryRow(r.Context(), `
-			SELECT EXISTS(
-				SELECT 1 FROM memberships m
-				JOIN users u ON u.id = m.user_id
-				WHERE m.school_id = $1 AND m.id = $2 AND m.user_id = $3 AND m.status = 'active' AND u.is_active
-			)`,
-			uctx.SchoolID, uctx.MembershipID, uctx.UserID,
-		).Scan(&activeMembership); err != nil {
-			return err
-		}
-		if !activeMembership {
-			return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "User does not have an active membership in this school.")
-		}
-
-		if uctx.Channel == "whatsapp" {
-			var sessionValid bool
-			if err := tx.QueryRow(r.Context(), `
-				SELECT EXISTS(
-					SELECT 1 FROM chat_sessions
-					WHERE school_id = $1
-					  AND id = $2
-					  AND guardian_user_id = $3
-					  AND state = 'VERIFIED'
-					  AND expires_at > $4
-				)`,
-				uctx.SchoolID, uctx.SessionID, uctx.UserID, now,
-			).Scan(&sessionValid); err != nil {
-				return err
-			}
-			if !sessionValid {
-				return contracts.Fail(http.StatusUnauthorized, "SESSION_EXPIRED", "WhatsApp session is not verified or has expired.")
-			}
-		}
-		return nil
-	})
 	if err != nil {
 		return UserContext{}, contracts.Principal{}, err
 	}
@@ -227,6 +201,57 @@ func (s *Service) AuthenticateInternalRequest(r *http.Request) (UserContext, con
 		MembershipID: uctx.MembershipID,
 		Role:         uctx.Role,
 	}
+	delegatedRaw := strings.TrimSpace(r.Header.Get(HeaderDelegatedSession))
+	if uctx.Channel == "whatsapp" && delegatedRaw == "" {
+		return UserContext{}, contracts.Principal{}, contracts.Fail(http.StatusUnauthorized, "MISSING_DELEGATED_SESSION", "X-Delegated-Session header is required for chat sessions.")
+	}
+
+	err = s.DB.WithTenantTx(r.Context(), p, func(tx pgx.Tx) error {
+		var activeMembership bool
+		if err := tx.QueryRow(r.Context(), `
+			SELECT EXISTS(
+				SELECT 1 FROM memberships m
+				JOIN users u ON u.id = m.user_id
+				WHERE m.school_id = $1 AND m.id = $2 AND m.user_id = $3 AND m.status = 'active' AND u.is_active
+			)`,
+			p.SchoolID, p.MembershipID, p.UserID,
+		).Scan(&activeMembership); err != nil {
+			return err
+		}
+		if !activeMembership {
+			return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "User does not have an active membership in this school.")
+		}
+
+		if uctx.Channel == "whatsapp" || delegatedRaw != "" {
+			if delegatedRaw == "" {
+				return contracts.Fail(http.StatusUnauthorized, "MISSING_DELEGATED_SESSION", "X-Delegated-Session header is required.")
+			}
+			tokenHash := HashDelegatedToken(delegatedRaw)
+			var sessionValid bool
+			if err := tx.QueryRow(r.Context(), `
+				SELECT EXISTS(
+					SELECT 1 FROM chat_sessions
+					WHERE school_id = $1
+					  AND ($2 = '' OR id = NULLIF($2, '')::uuid)
+					  AND guardian_user_id = $3
+					  AND access_token_hash = $4
+					  AND state = 'VERIFIED'
+					  AND expires_at > $5
+				)`,
+				p.SchoolID, uctx.SessionID, p.UserID, tokenHash, now,
+			).Scan(&sessionValid); err != nil {
+				return err
+			}
+			if !sessionValid {
+				return contracts.Fail(http.StatusUnauthorized, "SESSION_EXPIRED", "Delegated session is not verified or has expired.")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return UserContext{}, contracts.Principal{}, err
+	}
+
 	return uctx, p, nil
 }
 
@@ -257,14 +282,14 @@ func (s *Service) requireGuardianOwnsStudentTx(ctx context.Context, tx pgx.Tx, s
 	return nil
 }
 
-func (s *Service) GetSchoolProfile(ctx context.Context, uctx UserContext) (SchoolProfile, error) {
+func (s *Service) GetSchoolProfile(ctx context.Context, p contracts.Principal) (SchoolProfile, error) {
 	var profile SchoolProfile
-	err := s.DB.WithTenantTx(ctx, uctx.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			SELECT id, code, name, county
 			FROM schools
 			WHERE id = $1`,
-			uctx.SchoolID,
+			p.SchoolID,
 		).Scan(&profile.SchoolID, &profile.Code, &profile.Name, &profile.County); errors.Is(err, pgx.ErrNoRows) {
 			return contracts.Fail(http.StatusNotFound, "SCHOOL_NOT_FOUND", "School not found.")
 		} else if err != nil {
@@ -282,7 +307,7 @@ func (s *Service) GetSchoolProfile(ctx context.Context, uctx UserContext) (Schoo
 				SELECT contact_phone, contact_email, office_hours
 				FROM school_profile
 				WHERE school_id = $1`,
-				uctx.SchoolID,
+				p.SchoolID,
 			).Scan(&profile.ContactPhone, &profile.ContactEmail, &profile.OfficeHours)
 		}
 		return nil
@@ -290,15 +315,15 @@ func (s *Service) GetSchoolProfile(ctx context.Context, uctx UserContext) (Schoo
 	return profile, err
 }
 
-func (s *Service) GetParentChildren(ctx context.Context, uctx UserContext, pathUserID string) ([]ParentChild, error) {
+func (s *Service) GetParentChildren(ctx context.Context, p contracts.Principal, pathUserID string) ([]ParentChild, error) {
 	if !contracts.ValidID(pathUserID) {
 		return nil, contracts.Fail(http.StatusBadRequest, "INVALID_USER_ID", "A valid user_id is required.")
 	}
-	if pathUserID != uctx.UserID {
+	if pathUserID != p.UserID {
 		return nil, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Parents may only query their own linked children.")
 	}
 	children := []ParentChild{}
-	err := s.DB.WithTenantTx(ctx, uctx.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT s.id, s.admission_number, s.full_name,
 			       COALESCE(g.name, ''), COALESCE(c.stream_name, ''), sg.relationship
@@ -308,7 +333,7 @@ func (s *Service) GetParentChildren(ctx context.Context, uctx UserContext, pathU
 			LEFT JOIN grade_levels g ON g.school_id = c.school_id AND g.id = c.grade_level_id
 			WHERE sg.school_id = $1 AND sg.user_id = $2 AND s.status = 'active'
 			ORDER BY s.full_name ASC, s.id ASC`,
-			uctx.SchoolID, uctx.UserID,
+			p.SchoolID, p.UserID,
 		)
 		if err != nil {
 			return err
@@ -331,7 +356,7 @@ func (s *Service) GetInternalStudentFeeBalance(ctx context.Context, uctx UserCon
 		return billing.StudentFeeBalance{}, contracts.Fail(http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "Billing service is not configured.")
 	}
 	var out billing.StudentFeeBalance
-	err := s.DB.WithTenantTx(ctx, uctx.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		if err := s.requireGuardianOwnsStudentTx(ctx, tx, uctx.SchoolID, uctx.UserID, studentID); err != nil {
 			return err
 		}
@@ -342,8 +367,8 @@ func (s *Service) GetInternalStudentFeeBalance(ctx context.Context, uctx UserCon
 	return out, err
 }
 
-func (s *Service) GetInternalAttendanceSummary(ctx context.Context, uctx UserContext, studentID string) (AttendanceSummary, error) {
-	err := s.DB.WithTenantTx(ctx, uctx.SchoolID, func(tx pgx.Tx) error {
+func (s *Service) GetInternalAttendanceSummary(ctx context.Context, uctx UserContext, p contracts.Principal, studentID string) (AttendanceSummary, error) {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		return s.requireGuardianOwnsStudentTx(ctx, tx, uctx.SchoolID, uctx.UserID, studentID)
 	})
 	if err != nil {
@@ -355,8 +380,8 @@ func (s *Service) GetInternalAttendanceSummary(ctx context.Context, uctx UserCon
 	return s.Academics.GetStudentAttendanceSummary(ctx, uctx.SchoolID, studentID)
 }
 
-func (s *Service) GetInternalMarksSummary(ctx context.Context, uctx UserContext, studentID string) (MarksSummary, error) {
-	err := s.DB.WithTenantTx(ctx, uctx.SchoolID, func(tx pgx.Tx) error {
+func (s *Service) GetInternalMarksSummary(ctx context.Context, uctx UserContext, p contracts.Principal, studentID string) (MarksSummary, error) {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		return s.requireGuardianOwnsStudentTx(ctx, tx, uctx.SchoolID, uctx.UserID, studentID)
 	})
 	if err != nil {
@@ -388,26 +413,19 @@ func (s *Service) InitiateInternalSTKPush(ctx context.Context, uctx UserContext,
 func isSensitiveKey(k string) bool {
 	lower := strings.ToLower(strings.TrimSpace(k))
 	clean := strings.ReplaceAll(strings.ReplaceAll(lower, "-", "_"), " ", "_")
+	if strings.Contains(clean, "x_internal") || strings.Contains(clean, "x_user_context") || strings.Contains(clean, "x_delegated") {
+		return true
+	}
 	for _, part := range strings.Split(clean, "_") {
 		switch part {
-		case "key", "keys", "token", "tokens", "secret", "secrets",
+		case "key", "keys", "apikey", "privkey", "pubkey",
+			"token", "tokens", "secret", "secrets",
 			"password", "passwords", "otp", "passkey", "passkeys",
-			"auth", "authorization", "signature", "signatures",
-			"credential", "credentials":
+			"auth", "authorization", "bearer", "cookie", "cookies",
+			"signature", "signatures", "credential", "credentials",
+			"pin", "pins", "cvv", "delegated":
 			return true
 		}
-	}
-	sensitiveSubstrings := []string{
-		"token", "secret", "password", "passkey", "otp", "auth",
-		"signature", "credential", "x-internal", "x-user-context",
-	}
-	for _, sub := range sensitiveSubstrings {
-		if strings.Contains(clean, sub) {
-			return true
-		}
-	}
-	if strings.Contains(clean, "api_key") || strings.Contains(clean, "priv_key") || strings.Contains(clean, "pub_key") || clean == "key" {
-		return true
 	}
 	return false
 }
@@ -451,7 +469,15 @@ func sanitizeMetadata(in map[string]any) map[string]any {
 	return SanitizeMetadata(in)
 }
 
-func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, in AIAuditLogInput) (string, error) {
+func generateDelegatedSessionToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, p contracts.Principal, in AIAuditLogInput) (string, error) {
 	feature := strings.TrimSpace(in.Feature)
 	if feature == "" {
 		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_AI_AUDIT_LOG", "feature is required.")
@@ -479,16 +505,23 @@ func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, in AIA
 	}
 
 	var logID string
-	err = s.DB.WithTenantTx(ctx, uctx.SchoolID, func(tx pgx.Tx) error {
+	err = s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		var validSessionID *string
 		if sessionID != "" {
 			var sessionExists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE school_id = $1 AND id = $2)`, uctx.SchoolID, sessionID).Scan(&sessionExists); err != nil {
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM chat_sessions
+					WHERE school_id = $1 AND id = $2 AND guardian_user_id = $3
+				)`,
+				p.SchoolID, sessionID, p.UserID,
+			).Scan(&sessionExists); err != nil {
 				return err
 			}
-			if sessionExists {
-				validSessionID = &sessionID
+			if !sessionExists {
+				return contracts.Fail(http.StatusUnprocessableEntity, "INVALID_AI_AUDIT_LOG", "session_id does not reference an owned chat session.")
 			}
+			validSessionID = &sessionID
 		}
 		return tx.QueryRow(ctx, `
 			INSERT INTO ai_action_logs (
@@ -496,15 +529,15 @@ func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, in AIA
 			)
 			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9)
 			RETURNING id`,
-			uctx.SchoolID, uctx.UserID, validSessionID, uctx.Channel,
+			p.SchoolID, p.UserID, validSessionID, uctx.Channel,
 			feature, strings.TrimSpace(in.Intent), endpointsJSON, strings.TrimSpace(in.ActionTaken), metaJSON,
 		).Scan(&logID)
 	})
 	return logID, err
 }
 
-// ForwardParentQuery implements whatsapp.AIForwarder and also powers the in-app chat proxy.
-func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParentQueryInput) (string, error) {
+// ForwardParentQuery implements AIForwarder and powers the in-app chat proxy.
+func (s *Service) ForwardParentQuery(ctx context.Context, input AIParentQueryInput) (string, error) {
 	aiURL := s.aiBaseURL()
 	isProd := false
 	if s != nil && (strings.EqualFold(s.Environment, "production") || strings.EqualFold(s.Environment, "prod")) {
@@ -512,6 +545,10 @@ func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParen
 	}
 	if isProd && !strings.HasPrefix(strings.ToLower(aiURL), "https://") {
 		return "", contracts.Fail(http.StatusBadGateway, "INSECURE_AI_TRANSPORT", "AI service URL must use HTTPS in production environment.")
+	}
+	aiToken := s.aiServiceToken()
+	if aiToken == "" {
+		return "", contracts.Fail(http.StatusInternalServerError, "AI_SERVICE_NOT_CONFIGURED", "AI service authorization token is not configured.")
 	}
 
 	now := s.now()
@@ -548,8 +585,12 @@ func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParen
 		return "", contracts.Fail(http.StatusBadGateway, "AI_SERVICE_UNAVAILABLE", "Could not build AI assistant request.")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(HeaderInternalServiceToken, s.aiServiceToken())
+	req.Header.Set(HeaderAuthorization, "Bearer "+aiToken)
+	req.Header.Set(HeaderInternalServiceToken, aiToken)
 	req.Header.Set(HeaderUserContext, signedCtx)
+	if strings.TrimSpace(input.DelegatedToken) != "" {
+		req.Header.Set(HeaderDelegatedSession, strings.TrimSpace(input.DelegatedToken))
+	}
 
 	resp, err := s.httpClient().Do(req)
 	if err != nil {
@@ -582,31 +623,82 @@ func (s *Service) ForwardParentQuery(ctx context.Context, input whatsapp.AIParen
 
 // HandleChatProxy serves POST /api/v1/chat/message for authenticated in-app parents.
 func (s *Service) HandleChatProxy(ctx context.Context, p contracts.Principal, in ChatMessageInput) (ChatMessageResponse, error) {
-	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return ChatMessageResponse{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
 	}
 	msg := strings.TrimSpace(in.Message)
 	if msg == "" {
 		return ChatMessageResponse{}, contracts.Fail(http.StatusUnprocessableEntity, "EMPTY_CHAT_MESSAGE", "A non-empty message is required.")
 	}
-	if in.StudentID != "" {
-		if err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
-			return s.requireGuardianOwnsStudentTx(ctx, tx, p.SchoolID, p.UserID, in.StudentID)
+	if in.SessionID != "" && !contracts.ValidID(in.SessionID) {
+		return ChatMessageResponse{}, contracts.Fail(http.StatusUnprocessableEntity, "INVALID_SESSION_ID", "session_id must be a valid UUID.")
+	}
+
+	now := s.now()
+	expiresAt := now.Add(s.contextTTL())
+	delegatedToken, err := generateDelegatedSessionToken()
+	if err != nil {
+		return ChatMessageResponse{}, err
+	}
+	tokenHash := HashDelegatedToken(delegatedToken)
+	sessionID := strings.TrimSpace(in.SessionID)
+
+	if s.DB != nil {
+		if err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+			if in.StudentID != "" {
+				if err := s.requireGuardianOwnsStudentTx(ctx, tx, p.SchoolID, p.UserID, in.StudentID); err != nil {
+					return err
+				}
+			}
+			var studentPtr *string
+			if in.StudentID != "" {
+				sid := in.StudentID
+				studentPtr = &sid
+			}
+			if sessionID != "" {
+				res, err := tx.Exec(ctx, `
+					UPDATE chat_sessions
+					SET access_token_hash = $1,
+					    verified_at = $2,
+					    expires_at = $3,
+					    student_id = COALESCE($4, student_id),
+					    updated_at = NOW()
+					WHERE school_id = $5 AND id = $6 AND guardian_user_id = $7 AND channel = 'in_app'`,
+					tokenHash, now, expiresAt, studentPtr, p.SchoolID, sessionID, p.UserID,
+				)
+				if err != nil {
+					return err
+				}
+				if res.RowsAffected() == 0 {
+					return contracts.Fail(http.StatusNotFound, "SESSION_NOT_FOUND", "In-app chat session not found.")
+				}
+				return nil
+			}
+			return tx.QueryRow(ctx, `
+				INSERT INTO chat_sessions (
+					school_id, channel, student_id, guardian_user_id, state,
+					access_token_hash, verified_at, expires_at
+				)
+				VALUES ($1, 'in_app', $2, $3, 'VERIFIED', $4, $5, $6)
+				RETURNING id`,
+				p.SchoolID, studentPtr, p.UserID, tokenHash, now, expiresAt,
+			).Scan(&sessionID)
 		}); err != nil {
 			return ChatMessageResponse{}, err
 		}
 	}
 
-	reply, err := s.ForwardParentQuery(ctx, whatsapp.AIParentQueryInput{
-		UserID:       p.UserID,
-		SchoolID:     p.SchoolID,
-		MembershipID: p.MembershipID,
-		Role:         p.Role,
-		Channel:      "in_app",
-		SessionID:    in.SessionID,
-		StudentID:    in.StudentID,
-		ExpiresAt:    s.now().Add(s.contextTTL()),
-		Message:      msg,
+	reply, err := s.ForwardParentQuery(ctx, AIParentQueryInput{
+		UserID:         p.UserID,
+		SchoolID:       p.SchoolID,
+		MembershipID:   p.MembershipID,
+		Role:           p.Role,
+		Channel:        "in_app",
+		SessionID:      sessionID,
+		StudentID:      in.StudentID,
+		ExpiresAt:      expiresAt,
+		Message:        msg,
+		DelegatedToken: delegatedToken,
 	})
 	if err != nil {
 		return ChatMessageResponse{}, err
@@ -614,7 +706,7 @@ func (s *Service) HandleChatProxy(ctx context.Context, p contracts.Principal, in
 	return ChatMessageResponse{
 		Reply:     reply,
 		Channel:   "in_app",
-		SessionID: in.SessionID,
+		SessionID: sessionID,
 	}, nil
 }
 
@@ -623,12 +715,12 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 		service = &Service{}
 	}
 	mux.HandleFunc("GET /api/v1/internal/school-profile", func(w http.ResponseWriter, r *http.Request) {
-		uctx, _, err := service.AuthenticateInternalRequest(r)
+		_, p, err := service.AuthenticateInternalRequest(r)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
 		}
-		profile, err := service.GetSchoolProfile(r.Context(), uctx)
+		profile, err := service.GetSchoolProfile(r.Context(), p)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
@@ -637,12 +729,12 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 	})
 
 	mux.HandleFunc("GET /api/v1/internal/parents/{user_id}/children", func(w http.ResponseWriter, r *http.Request) {
-		uctx, _, err := service.AuthenticateInternalRequest(r)
+		_, p, err := service.AuthenticateInternalRequest(r)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
 		}
-		children, err := service.GetParentChildren(r.Context(), uctx, r.PathValue("user_id"))
+		children, err := service.GetParentChildren(r.Context(), p, r.PathValue("user_id"))
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
@@ -665,12 +757,12 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 	})
 
 	mux.HandleFunc("GET /api/v1/internal/students/{id}/attendance-summary", func(w http.ResponseWriter, r *http.Request) {
-		uctx, _, err := service.AuthenticateInternalRequest(r)
+		uctx, p, err := service.AuthenticateInternalRequest(r)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
 		}
-		summary, err := service.GetInternalAttendanceSummary(r.Context(), uctx, r.PathValue("id"))
+		summary, err := service.GetInternalAttendanceSummary(r.Context(), uctx, p, r.PathValue("id"))
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
@@ -679,12 +771,12 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 	})
 
 	mux.HandleFunc("GET /api/v1/internal/students/{id}/marks-summary", func(w http.ResponseWriter, r *http.Request) {
-		uctx, _, err := service.AuthenticateInternalRequest(r)
+		uctx, p, err := service.AuthenticateInternalRequest(r)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
 		}
-		summary, err := service.GetInternalMarksSummary(r.Context(), uctx, r.PathValue("id"))
+		summary, err := service.GetInternalMarksSummary(r.Context(), uctx, p, r.PathValue("id"))
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
@@ -712,7 +804,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 	})
 
 	mux.HandleFunc("POST /api/v1/internal/ai/audit-log", func(w http.ResponseWriter, r *http.Request) {
-		uctx, _, err := service.AuthenticateInternalRequest(r)
+		uctx, p, err := service.AuthenticateInternalRequest(r)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
@@ -722,7 +814,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 			contracts.WriteError(w, err)
 			return
 		}
-		logID, err := service.RecordAIAuditLog(r.Context(), uctx, input)
+		logID, err := service.RecordAIAuditLog(r.Context(), uctx, p, input)
 		if err != nil {
 			contracts.WriteError(w, err)
 			return
@@ -750,4 +842,4 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 	})
 }
 
-var _ whatsapp.AIForwarder = (*Service)(nil)
+var _ AIForwarder = (*Service)(nil)

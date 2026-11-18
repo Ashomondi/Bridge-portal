@@ -16,6 +16,8 @@ import (
 )
 
 const (
+	HeaderAuthorization        = "Authorization"
+	HeaderDelegatedSession     = "X-Delegated-Session"
 	HeaderInternalServiceToken = "X-Internal-Service-Token"
 	HeaderUserContext          = "X-User-Context"
 )
@@ -63,6 +65,12 @@ func SignUserContext(ctx UserContext, signingKey string) (string, error) {
 	}
 	if !contracts.ValidID(ctx.UserID) || !contracts.ValidID(ctx.SchoolID) || !contracts.ValidID(ctx.MembershipID) || strings.TrimSpace(ctx.Role) == "" || (ctx.Channel != "whatsapp" && ctx.Channel != "in_app") || ctx.Exp <= 0 {
 		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_USER_CONTEXT", "Cannot sign an incomplete user context.")
+	}
+	if ctx.Channel == "whatsapp" && !contracts.ValidID(ctx.SessionID) {
+		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_USER_CONTEXT", "WhatsApp user context requires a valid session_id.")
+	}
+	if ctx.SessionID != "" && !contracts.ValidID(ctx.SessionID) {
+		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_USER_CONTEXT", "session_id must be a valid UUID.")
 	}
 	payloadBytes, err := json.Marshal(ctx)
 	if err != nil {
@@ -119,12 +127,32 @@ func VerifyUserContext(headerValue, signingKey string, now time.Time) (UserConte
 	return parsed, nil
 }
 
-// VerifyServiceToken performs a constant-time comparison of X-Internal-Service-Token.
+// VerifyServiceToken performs a constant-time comparison of the service credential.
 func VerifyServiceToken(providedToken, expectedToken string) error {
 	expected := strings.TrimSpace(expectedToken)
 	provided := strings.TrimSpace(providedToken)
 	if expected == "" || provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
-		return contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_INTERNAL_SERVICE", "Valid X-Internal-Service-Token is required.")
+		return contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_INTERNAL_SERVICE", "Valid internal service authorization is required.")
 	}
 	return nil
+}
+
+// ExtractServiceToken reads the internal service credential from Authorization: Bearer <token>
+// (primary per ADR) or X-Internal-Service-Token.
+func ExtractServiceToken(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if auth := strings.TrimSpace(r.Header.Get(HeaderAuthorization)); len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
+		if tok := strings.TrimSpace(auth[7:]); tok != "" {
+			return tok
+		}
+	}
+	return strings.TrimSpace(r.Header.Get(HeaderInternalServiceToken))
+}
+
+// HashDelegatedToken returns the lowercase SHA-256 hex digest matching chat_sessions.access_token_hash.
+func HashDelegatedToken(raw string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return hex.EncodeToString(sum[:])
 }
