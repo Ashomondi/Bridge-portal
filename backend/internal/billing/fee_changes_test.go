@@ -72,19 +72,31 @@ func TestMidYearFeeChangesAndTermStartDateSync(t *testing.T) {
 	}
 
 	auditLog := &recordingAuditLogger{}
-	notifSvc := &notifications.Service{DB: db}
+	tenantDB := contracts.TenantTxFunc(db.WithTenantTx)
+	notifSvc := &notifications.Service{DB: tenantDB}
 	svc := &billing.Service{
-		DB:       db,
+		DB:       tenantDB,
 		Audit:    auditLog,
 		Notifier: notifSvc,
 	}
 
-	admin := contracts.Principal{
-		UserID:       school.UserID,
-		SchoolID:     school.ID,
-		MembershipID: school.MembershipID,
-		Role:         "ikonex_admin",
+	admin := seedMemberWithPermission(t, db, school.ID, "+254711000010", "Fee Manager", "bursar", billing.PermFeeStructuresManage)
+	noPermStaff := seedMemberWithPermission(t, db, school.ID, "+254711000011", "Teacher Without Badge", "teacher", "")
+
+	// Non-fee-paying co-guardian on student1 must NOT receive fee change notifications
+	var nonFeePayerID string
+	if err := db.Admin.QueryRow(ctx, `INSERT INTO users(phone_number,full_name) VALUES('+254799001122','Non Fee Payer') RETURNING id`).Scan(&nonFeePayerID); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := db.Admin.Exec(ctx, `INSERT INTO memberships(school_id,user_id,role,status) VALUES($1,$2,'parent','active')`, school.ID, nonFeePayerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Admin.Exec(ctx, `INSERT INTO student_guardians(school_id,student_id,user_id,relationship,is_fee_payer) VALUES($1,$2,$3,'uncle',false)`, school.ID, school.StudentID, nonFeePayerID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Grant viewer permission to read student fee balances cleanly in assertions
+	grantBadgePermission(t, db, school.ID, admin.MembershipID, billing.PermLedgersView)
 
 	// Load Grade 7 and Grade 8 structures for Term 1
 	g7Struct, err := svc.LoadFeeStructure(ctx, admin, billing.LoadFeeStructureInput{
@@ -117,21 +129,27 @@ func TestMidYearFeeChangesAndTermStartDateSync(t *testing.T) {
 		t.Fatalf("expected 422 FEE_CHANGE_NOTE_REQUIRED, got %v", err)
 	}
 
-	// 2. Non-admin role forbidden
-	parentPrincipal := admin
-	parentPrincipal.Role = "parent"
-	_, err = svc.ApplyFeeChange(ctx, parentPrincipal, billing.ApplyFeeChangeInput{
-		FeePeriodID: g7Struct.FeePeriodID,
-		AmountDelta: json.RawMessage(`"1500.00"`),
-		Note:        "Valid note",
-	})
-	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
-		t.Fatalf("expected 403 FORBIDDEN for parent role, got %v", err)
+	// 2. Non-admin / unbadged roles forbidden
+	parentPrincipal := contracts.Principal{
+		UserID:       school.UserID,
+		SchoolID:     school.ID,
+		MembershipID: school.MembershipID,
+		Role:         "parent",
+	}
+	for _, unauth := range []contracts.Principal{parentPrincipal, noPermStaff} {
+		_, err = svc.ApplyFeeChange(ctx, unauth, billing.ApplyFeeChangeInput{
+			FeePeriodID: g7Struct.FeePeriodID,
+			AmountDelta: json.RawMessage(`"1500.00"`),
+			Note:        "Valid note",
+		})
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+			t.Fatalf("expected 403 FORBIDDEN for role %s, got %v", unauth.Role, err)
+		}
 	}
 
 	// 3. Valid Grade 7 fee increase (+1,500.00) updates both Grade 7 students, leaves Grade 8 untouched,
-	// writes fee_change_notes + audit event, and sends exactly ONE notification to the shared Grade 7 guardian
-	// and ZERO notifications to the Grade 8 guardian.
+	// writes fee_change_notes + audit event, and sends exactly ONE notification to the shared Grade 7 fee-paying guardian
+	// and ZERO notifications to non-fee-paying co-guardians or the Grade 8 guardian.
 	noteView, err := svc.ApplyFeeChange(ctx, admin, billing.ApplyFeeChangeInput{
 		FeePeriodID:  g7Struct.FeePeriodID,
 		GradeLevelID: school.GradeID,
@@ -155,9 +173,12 @@ func TestMidYearFeeChangesAndTermStartDateSync(t *testing.T) {
 		t.Fatalf("expected Grade 8 student untouched at 15000.00, got %s", billed3)
 	}
 
-	var affectedGuardianNotices, unaffectedGuardianNotices int
+	var affectedGuardianNotices, nonFeePayerNotices, unaffectedGuardianNotices int
 	if err := db.Admin.QueryRow(ctx, `SELECT count(*) FROM in_app_notifications WHERE school_id=$1 AND recipient_user_id=$2`, school.ID, school.UserID).Scan(&affectedGuardianNotices); err != nil || affectedGuardianNotices != 1 {
 		t.Fatalf("expected exactly 1 deduplicated notification to affected guardian, got %d (%v)", affectedGuardianNotices, err)
+	}
+	if err := db.Admin.QueryRow(ctx, `SELECT count(*) FROM in_app_notifications WHERE school_id=$1 AND recipient_user_id=$2`, school.ID, nonFeePayerID).Scan(&nonFeePayerNotices); err != nil || nonFeePayerNotices != 0 {
+		t.Fatalf("expected 0 notifications to non-fee-payer guardian, got %d (%v)", nonFeePayerNotices, err)
 	}
 	if err := db.Admin.QueryRow(ctx, `SELECT count(*) FROM in_app_notifications WHERE school_id=$1 AND recipient_user_id=$2`, school.ID, unaffectedGuardianID).Scan(&unaffectedGuardianNotices); err != nil || unaffectedGuardianNotices != 0 {
 		t.Fatalf("expected 0 notifications to unaffected guardian, got %d (%v)", unaffectedGuardianNotices, err)
@@ -173,13 +194,13 @@ func TestMidYearFeeChangesAndTermStartDateSync(t *testing.T) {
 		t.Fatalf("expected 0 fee change notes on unaffected student, got %+v (%v)", balUnaffected.FeeChangeNotes, err)
 	}
 
-	// 4. OnTermStartDateChanged shifts due_date on fee_periods, fee_charges, and fee_ledgers,
-	// records a due_date fee_change_note, and notifies affected guardians.
+	// 4. OnTermStartDateChangedTx shifts due_date on fee_periods, fee_charges, and fee_ledgers,
+	// records a due_date fee_change_note, and notifies affected fee-paying guardians.
 	newStart := time.Date(2026, 1, 19, 0, 0, 0, 0, time.UTC)
 	if err := db.WithTenantTx(ctx, school.ID, func(tx pgx.Tx) error {
-		return svc.OnTermStartDateChanged(ctx, tx, school.ID, school.TermID, newStart, school.UserID, "Term 1 opening pushed by 2 weeks")
+		return svc.OnTermStartDateChangedTx(ctx, tx, school.ID, school.TermID, newStart, admin.UserID, "Term 1 opening pushed by 2 weeks")
 	}); err != nil {
-		t.Fatalf("OnTermStartDateChanged failed: %v", err)
+		t.Fatalf("OnTermStartDateChangedTx failed: %v", err)
 	}
 
 	balAfterShift, err := svc.GetStudentFeeBalance(ctx, admin, school.StudentID)

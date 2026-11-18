@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -40,20 +41,35 @@ type MatchedPaymentResult struct {
 	ResolvedAt     time.Time `json:"resolved_at"`
 }
 
-// ListUnmatchedPayments returns paginated unresolved payments for the authenticated Ikonex team member's school.
+// ListUnmatchedPayments returns paginated unresolved payments for an authorized
+// school staff member holding billing.ledgers.view or billing.fee_structures.manage.
 func (s *Service) ListUnmatchedPayments(ctx context.Context, p contracts.Principal, page *contracts.Page) ([]UnmatchedPayment, error) {
-	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return nil, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
-	}
-	if !isIkonexTeamRole(p.Role) {
-		return nil, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only Ikonex administrators may view unmatched payments.")
 	}
 	if s == nil || s.DB == nil {
 		return nil, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 	}
+	if page == nil {
+		return nil, contracts.Fail(http.StatusUnprocessableEntity, "INVALID_PAGINATION", "Valid pagination parameters are required.")
+	}
 
 	items := []UnmatchedPayment{}
-	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+		allowedView, err := hasActiveSchoolPermissionTx(ctx, tx, p, PermLedgersView)
+		if err != nil {
+			return err
+		}
+		if !allowedView {
+			allowedManage, err := hasActiveSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage)
+			if err != nil {
+				return err
+			}
+			if !allowedManage {
+				return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only authorized finance staff may view unmatched payments.")
+			}
+		}
+
 		if err := tx.QueryRow(ctx, `
 			SELECT count(*) FROM unmatched_payments
 			WHERE school_id = $1 AND status = 'unmatched'`,
@@ -93,13 +109,10 @@ func (s *Service) ListUnmatchedPayments(ctx context.Context, p contracts.Princip
 
 // MatchUnmatchedPayment manually assigns an unmatched payment (by payment_id or unmatched_payments.id)
 // to a valid student in the school, credits the student's ledger, marks the unmatched record resolved,
-// notifies linked guardians, and writes an audit log entry.
+// notifies linked fee-paying guardians, and writes an audit log entry.
 func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Principal, id string, in MatchPaymentInput) (MatchedPaymentResult, error) {
-	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return MatchedPaymentResult{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
-	}
-	if !isIkonexTeamRole(p.Role) {
-		return MatchedPaymentResult{}, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only Ikonex administrators may resolve unmatched payments.")
 	}
 	if !contracts.ValidID(id) {
 		return MatchedPaymentResult{}, contracts.Fail(http.StatusBadRequest, "INVALID_PAYMENT_ID", "A valid payment ID is required.")
@@ -110,9 +123,15 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 	if s == nil || s.DB == nil {
 		return MatchedPaymentResult{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 	}
+	if err := s.requireAuditLogger(); err != nil {
+		return MatchedPaymentResult{}, err
+	}
 
 	var out MatchedPaymentResult
-	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+		if err := requireSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage, "Only authorized finance administrators may resolve unmatched payments."); err != nil {
+			return err
+		}
 		var unmatchedID, paymentID, receipt, status string
 		var amount Money
 		err := tx.QueryRow(ctx, `
@@ -170,7 +189,7 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 			return err
 		}
 
-		if err := s.RecordStudentPaymentTx(ctx, tx, p.SchoolID, in.StudentID, receipt, "Manually matched payment ("+receipt+")", amount); err != nil {
+		if err := s.RecordStudentPaymentWithActorTx(ctx, tx, p.SchoolID, p.UserID, in.StudentID, receipt, "Manually matched payment ("+receipt+")", amount); err != nil {
 			return err
 		}
 
@@ -189,23 +208,21 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 			return err
 		}
 
-		if s.Audit != nil {
-			if err := s.Audit.Log(ctx, tx, contracts.AuditEvent{
-				SchoolID:     p.SchoolID,
-				UserID:       p.UserID,
-				Action:       "billing.payment.manual_match",
-				ResourceType: "payment",
-				ResourceID:   paymentID,
-				Details: map[string]any{
-					"unmatched_id":    unmatchedID,
-					"student_id":      in.StudentID,
-					"transaction_ref": receipt,
-					"amount":          amount.String(),
-					"resolution_note": note,
-				},
-			}); err != nil {
-				return err
-			}
+		if err := s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+			SchoolID:     p.SchoolID,
+			UserID:       p.UserID,
+			Action:       "billing.payment.manual_match",
+			ResourceType: "payment",
+			ResourceID:   paymentID,
+			Details: map[string]any{
+				"unmatched_id":    unmatchedID,
+				"student_id":      in.StudentID,
+				"transaction_ref": receipt,
+				"amount":          amount.String(),
+				"resolution_note": note,
+			},
+		}); err != nil {
+			return err
 		}
 
 		out = MatchedPaymentResult{
@@ -224,17 +241,23 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 
 func (s *Service) isCallbackAuthorized(r *http.Request) bool {
 	if s == nil {
-		return true
+		return false
 	}
 	if s.VerifyCallback != nil {
 		return s.VerifyCallback(r)
 	}
 	if token := strings.TrimSpace(s.CallbackAuthToken); token != "" {
 		headerToken := strings.TrimSpace(r.Header.Get("X-Callback-Token"))
-		queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
-		return headerToken == token || queryToken == token
+		if headerToken != "" && subtle.ConstantTimeCompare([]byte(headerToken), []byte(token)) == 1 {
+			return true
+		}
+		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			bearerToken := strings.TrimSpace(auth[len("Bearer "):])
+			return subtle.ConstantTimeCompare([]byte(bearerToken), []byte(token)) == 1
+		}
+		return false
 	}
-	return true
+	return false
 }
 
 func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {
