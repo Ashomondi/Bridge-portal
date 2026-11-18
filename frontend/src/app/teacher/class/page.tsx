@@ -1,10 +1,20 @@
-import TeacherComingSoon from "@/components/teacher/TeacherComingSoon";
+// Teacher portal: class roster with learner details and guardian/attendance context.
+import ClassRosterDashboard from "@/components/class-roster/ClassRosterDashboard";
+import {
+  CLASS_ROSTER_IS_PREVIEW,
+  loadClassRoster,
+} from "@/components/class-roster/class-roster-source";
 
-export default function TeacherClassPage() {
+export const dynamic = "force-dynamic";
+
+export const metadata = {
+  title: "My Class Roster (Preview) | Bridge Portal",
+};
+
+export default async function ClassRosterPage() {
+  const roster = await loadClassRoster();
+
   return (
-    <TeacherComingSoon
-      title="Class roster coming soon"
-      description="The class roster is being prepared. Use the timetable or class means in the meantime."
-    />
+    <ClassRosterDashboard roster={roster} isPreview={CLASS_ROSTER_IS_PREVIEW} />
   );
 }
