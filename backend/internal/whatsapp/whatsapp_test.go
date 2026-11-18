@@ -3,6 +3,9 @@ package whatsapp_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -121,9 +124,10 @@ func TestWhatsAppStateMachineTenantIsolationAndRateLimits(t *testing.T) {
 	currentNow := time.Date(2026, 3, 1, 8, 0, 0, 0, time.UTC)
 
 	svc := &whatsapp.Service{
-		DB:  db,
-		SMS: smsSpy,
-		AI:  aiSpy,
+		DB:       contracts.TenantTxFunc(db.WithTenantTx),
+		SystemDB: db.WithTenantTx,
+		SMS:      smsSpy,
+		AI:       aiSpy,
 		ResolveBot: func(_ context.Context, phoneNumberID, displayPhone string) (string, error) {
 			switch {
 			case phoneNumberID == "pnid-school-a" || displayPhone == "+254700111001":
@@ -281,9 +285,10 @@ func TestWhatsAppStateMachineTenantIsolationAndRateLimits(t *testing.T) {
 
 	// Security Regression 6.5: Max OTP Verification Attempt Limits
 	currentNow = currentNow.Add(5 * time.Minute)
+	exhaustWA := "+254722111499"
 	resExhaust, err := svc.StartOrAdvanceSession(ctx, whatsapp.StartSessionInput{
 		SchoolID:            schoolA.ID,
-		SenderWANumber:      "+254722111482",
+		SenderWANumber:      exhaustWA,
 		AdmissionNumber:     "ADM-A-100",
 		GuardianChoiceIndex: &choiceOne,
 	})
@@ -303,7 +308,16 @@ func TestWhatsAppStateMachineTenantIsolationAndRateLimits(t *testing.T) {
 		t.Fatalf("expected OTP_ATTEMPTS_EXHAUSTED on 5th failure, got %v", err)
 	}
 
-	// Security Regression 6.1: Webhook Signature Verification
+	// 10-point Security Regression: Webhook Signature Verification (fail-closed when empty & Meta extra fields allowed with valid HMAC)
+	svcUnconfigured := &whatsapp.Service{DB: svc.DB, SystemDB: svc.SystemDB}
+	muxUnconfigured := http.NewServeMux()
+	whatsapp.RegisterRoutes(muxUnconfigured, svcUnconfigured, nil)
+	recFailClosed := httptest.NewRecorder()
+	muxUnconfigured.ServeHTTP(recFailClosed, httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook?school_id="+schoolA.ID, bytes.NewBufferString(`{"entry":[]}`)))
+	if recFailClosed.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 fail-closed when WebhookAppSecret unset, got %d", recFailClosed.Code)
+	}
+
 	svc.WebhookAppSecret = "meta-webhook-app-secret"
 	muxSecure := http.NewServeMux()
 	whatsapp.RegisterRoutes(muxSecure, svc, nil)
@@ -323,5 +337,18 @@ func TestWhatsAppStateMachineTenantIsolationAndRateLimits(t *testing.T) {
 	muxSecure.ServeHTTP(recBadSig, reqBadSig)
 	if recBadSig.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 on invalid webhook signature, got %d", recBadSig.Code)
+	}
+
+	// Valid HMAC signature with Meta extra fields (contacts/timestamp) succeeds
+	metaBody := []byte(`{"object":"whatsapp_business_account","entry":[{"id":"e1","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"pnid-school-a"},"contacts":[{"wa_id":"254722111482"}],"messages":[{"from":"254722111482","id":"wamid.1","timestamp":"1700000000","type":"text","text":{"body":"hi"}}]}}]}]}`)
+	mac := hmac.New(sha256.New, []byte(svc.WebhookAppSecret))
+	_, _ = mac.Write(metaBody)
+	validSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	reqValidMeta := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/webhook", bytes.NewReader(metaBody))
+	reqValidMeta.Header.Set("X-Hub-Signature-256", validSig)
+	recValidMeta := httptest.NewRecorder()
+	muxSecure.ServeHTTP(recValidMeta, reqValidMeta)
+	if recValidMeta.Code != http.StatusOK {
+		t.Fatalf("expected 200 on valid signed Meta webhook with unknown fields, got %d: %s", recValidMeta.Code, recValidMeta.Body.String())
 	}
 }

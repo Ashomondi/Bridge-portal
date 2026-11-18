@@ -1,7 +1,6 @@
 package whatsapp
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -107,6 +106,7 @@ func newRateLimiterState() *rateLimiterState {
 
 type Service struct {
 	DB                  contracts.TenantDB
+	SystemDB            func(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error
 	SMS                 notifications.SMSDispatcher
 	ResolveBot          BotResolver
 	AI                  AIForwarder
@@ -124,6 +124,22 @@ type Service struct {
 
 	once    sync.Once
 	limiter *rateLimiterState
+}
+
+func (s *Service) withSystemTenantTx(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error {
+	if !contracts.ValidID(schoolID) {
+		return contracts.Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school_id is required.")
+	}
+	if s == nil {
+		return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if s.SystemDB != nil {
+		return s.SystemDB(ctx, schoolID, fn)
+	}
+	if txFn, ok := s.DB.(contracts.TenantTxFunc); ok && txFn != nil {
+		return txFn(ctx, schoolID, fn)
+	}
+	return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 }
 
 func (s *Service) initLimiter() *rateLimiterState {
@@ -185,14 +201,24 @@ func (s *Service) otpTTL() time.Duration {
 }
 
 func (s *Service) resolveSchoolID(ctx context.Context, explicitSchoolID, phoneNumberID, displayPhone string) (string, error) {
-	if contracts.ValidID(strings.TrimSpace(explicitSchoolID)) {
-		return strings.TrimSpace(explicitSchoolID), nil
-	}
-	if s != nil && s.ResolveBot != nil {
-		schoolID, err := s.ResolveBot(ctx, strings.TrimSpace(phoneNumberID), strings.TrimSpace(displayPhone))
+	explicit := strings.TrimSpace(explicitSchoolID)
+	pnid := strings.TrimSpace(phoneNumberID)
+	display := strings.TrimSpace(displayPhone)
+	var resolvedFromBot string
+	if (pnid != "" || display != "") && s != nil && s.ResolveBot != nil {
+		schoolID, err := s.ResolveBot(ctx, pnid, display)
 		if err == nil && contracts.ValidID(schoolID) {
-			return schoolID, nil
+			resolvedFromBot = schoolID
 		}
+	}
+	if contracts.ValidID(explicit) {
+		if resolvedFromBot != "" && resolvedFromBot != explicit {
+			return "", contracts.Fail(http.StatusBadRequest, "UNKNOWN_WHATSAPP_BOT", "WhatsApp bot metadata does not match the school.")
+		}
+		return explicit, nil
+	}
+	if resolvedFromBot != "" {
+		return resolvedFromBot, nil
 	}
 	return "", contracts.Fail(http.StatusBadRequest, "UNKNOWN_WHATSAPP_BOT", "Could not resolve school for the WhatsApp Business number.")
 }
@@ -200,6 +226,40 @@ func (s *Service) resolveSchoolID(ctx context.Context, explicitSchoolID, phoneNu
 func hashSecret(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func hashSaltedOTP(code string) (string, error) {
+	var salt [16]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return "", err
+	}
+	saltHex := hex.EncodeToString(salt[:])
+	mac := hmac.New(sha256.New, salt[:])
+	_, _ = mac.Write([]byte(code))
+	return "v1:" + saltHex + ":" + hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func verifySaltedOTP(code, stored string) bool {
+	parts := strings.Split(stored, ":")
+	if len(parts) != 3 || parts[0] != "v1" {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, salt)
+	_, _ = mac.Write([]byte(code))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(parts[2])) == 1
+}
+
+func generateOpaqueToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 func generateSixDigitOTP() (string, error) {
@@ -230,24 +290,23 @@ func (s *Service) HandleIncomingText(ctx context.Context, schoolID, phoneNumberI
 	var resp SessionResponse
 	var pendingSMS *notifications.SMSMessage
 	var pendingAI *AIParentQueryInput
+	var postTxErr error
 
-	err = s.DB.WithTenantTx(ctx, resolvedSchoolID, func(tx pgx.Tx) error {
-		if phoneNumberID != "" || displayPhone != "" {
-			var botActive bool
-			if err := tx.QueryRow(ctx, `
-				SELECT EXISTS(
-					SELECT 1 FROM school_whatsapp_bots
-					WHERE school_id = $1 AND is_active
-					  AND ($2 = '' OR phone_number_id = $2)
-					  AND ($3 = '' OR display_phone_number = $3)
-				)`,
-				resolvedSchoolID, strings.TrimSpace(phoneNumberID), strings.TrimSpace(displayPhone),
-			).Scan(&botActive); err != nil {
-				return err
-			}
-			if !botActive {
-				return contracts.Fail(http.StatusBadRequest, "UNKNOWN_WHATSAPP_BOT", "WhatsApp bot is not active for this school.")
-			}
+	err = s.withSystemTenantTx(ctx, resolvedSchoolID, func(tx pgx.Tx) error {
+		var botActive bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM school_whatsapp_bots
+				WHERE school_id = $1 AND is_active = TRUE
+				  AND ($2 = '' OR phone_number_id = $2)
+				  AND ($3 = '' OR display_phone_number = $3)
+			)`,
+			resolvedSchoolID, strings.TrimSpace(phoneNumberID), strings.TrimSpace(displayPhone),
+		).Scan(&botActive); err != nil {
+			return err
+		}
+		if !botActive {
+			return contracts.Fail(http.StatusBadRequest, "UNKNOWN_WHATSAPP_BOT", "WhatsApp bot is not active for this school.")
 		}
 
 		session, createdNew, err := s.getOrCreateSessionTx(ctx, tx, resolvedSchoolID, senderWA)
@@ -304,7 +363,7 @@ func (s *Service) HandleIncomingText(ctx context.Context, schoolID, phoneNumberI
 			return s.transitionGuardianSelectionToOTPTx(ctx, tx, resolvedSchoolID, senderWA, &session, trimmedText, &resp, &pendingSMS)
 
 		case StateAwaitingOTP:
-			return s.transitionVerifyOTPTx(ctx, tx, resolvedSchoolID, &session, trimmedText, &resp)
+			return s.transitionVerifyOTPTx(ctx, tx, resolvedSchoolID, &session, trimmedText, &resp, &postTxErr)
 
 		case StateVerified:
 			var membershipID, role string
@@ -345,6 +404,9 @@ func (s *Service) HandleIncomingText(ctx context.Context, schoolID, phoneNumberI
 	if err != nil {
 		return SessionResponse{}, err
 	}
+	if postTxErr != nil {
+		return SessionResponse{}, postTxErr
+	}
 
 	if pendingSMS != nil && s.SMS != nil {
 		if err := s.SMS.DispatchSMS(ctx, *pendingSMS); err != nil {
@@ -365,7 +427,9 @@ func (s *Service) HandleIncomingText(ctx context.Context, schoolID, phoneNumberI
 	}
 
 	if s.Outbound != nil && strings.TrimSpace(phoneNumberID) != "" && strings.TrimSpace(resp.Reply) != "" {
-		_ = s.Outbound.SendTextMessage(ctx, resolvedSchoolID, phoneNumberID, senderWA, resp.Reply)
+		if err := s.Outbound.SendTextMessage(ctx, resolvedSchoolID, phoneNumberID, senderWA, resp.Reply); err != nil {
+			return SessionResponse{}, err
+		}
 	}
 
 	return resp, nil
@@ -417,6 +481,8 @@ func (s *Service) getOrCreateSessionTx(ctx context.Context, tx pgx.Tx, schoolID,
 	err = tx.QueryRow(ctx, `
 		INSERT INTO chat_sessions (school_id, channel, sender_wa_number, state)
 		VALUES ($1, 'whatsapp', $2, $3)
+		ON CONFLICT (school_id, sender_wa_number) WHERE channel = 'whatsapp'
+		DO UPDATE SET updated_at = NOW()
 		RETURNING id, school_id, sender_wa_number, student_id, guardian_user_id, state,
 		          otp_hash, otp_expires_at, otp_attempts, verified_at, expires_at`,
 		schoolID, senderWA, StateAwaitingAdmissionNumber,
@@ -523,11 +589,12 @@ func (s *Service) transitionAdmissionLookupTx(ctx context.Context, tx pgx.Tx, sc
 
 func loadMaskedGuardiansForStudentTx(ctx context.Context, tx pgx.Tx, schoolID, studentID string) ([]GuardianOption, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT u.id, u.phone_number
+		SELECT DISTINCT u.id, u.phone_number
 		FROM student_guardians sg
 		JOIN users u ON u.id = sg.user_id
-		WHERE sg.school_id = $1 AND sg.student_id = $2 AND u.is_active
-		ORDER BY sg.is_primary DESC, sg.created_at ASC, u.id ASC`,
+		JOIN memberships m ON m.school_id = sg.school_id AND m.user_id = sg.user_id AND m.status = 'active'
+		WHERE sg.school_id = $1 AND sg.student_id = $2 AND u.is_active = TRUE
+		ORDER BY u.id ASC`,
 		schoolID, studentID,
 	)
 	if err != nil {
@@ -617,7 +684,10 @@ func (s *Service) transitionGuardianSelectionToOTPTx(
 	}
 	now := s.now()
 	otpExpires := now.Add(s.otpTTL())
-	otpHash := hashSecret(otpCode)
+	otpHash, err := hashSaltedOTP(otpCode)
+	if err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE chat_sessions
@@ -682,6 +752,19 @@ func (s *Service) enforceOTPRateLimitsTx(ctx context.Context, tx pgx.Tx, schoolI
 		return contracts.Fail(http.StatusTooManyRequests, "WA_SENDER_BLOCKED_24H", "This WhatsApp number is temporarily blocked for 24 hours due to excessive OTP requests.")
 	}
 
+	// Prune expired blocks and stale cooldown entries to bound map growth
+	for k, until := range lim.senderBlockedUntil {
+		if !now.Before(until) {
+			delete(lim.senderBlockedUntil, k)
+		}
+	}
+	cooldownCutoff := now.Add(-s.otpCooldown())
+	for k, ts := range lim.admissionLastSentAt {
+		if ts.Before(cooldownCutoff) {
+			delete(lim.admissionLastSentAt, k)
+		}
+	}
+
 	// Prune requests outside the 30-minute window
 	windowCutoff := now.Add(-s.otpWindow())
 	history := lim.senderRequests[senderWA]
@@ -741,11 +824,15 @@ func tableExistsTx(ctx context.Context, tx pgx.Tx, tableName string) (bool, erro
 	return exists, err
 }
 
-func (s *Service) transitionVerifyOTPTx(ctx context.Context, tx pgx.Tx, schoolID string, session *chatSessionRow, codeInput string, resp *SessionResponse) error {
+func (s *Service) transitionVerifyOTPTx(ctx context.Context, tx pgx.Tx, schoolID string, session *chatSessionRow, codeInput string, resp *SessionResponse, postTxErr *error) error {
 	now := s.now()
 	code := strings.TrimSpace(codeInput)
-	if len(code) != 6 || session.OTPHash == nil || session.OTPExpiresAt == nil || !now.Before(*session.OTPExpiresAt) {
-		return contracts.Fail(http.StatusUnauthorized, "INVALID_OTP", "The verification code is invalid or has expired.")
+	if session.OTPHash == nil || session.OTPExpiresAt == nil || !now.Before(*session.OTPExpiresAt) {
+		if err := s.resetSessionToAwaitingAdmissionTx(ctx, tx, schoolID, session.ID); err != nil {
+			return err
+		}
+		*postTxErr = contracts.Fail(http.StatusUnauthorized, "INVALID_OTP", "The verification code has expired. Please enter your child's admission number to start again.")
+		return nil
 	}
 
 	maxAttempts := s.MaxOTPAttempts
@@ -753,20 +840,28 @@ func (s *Service) transitionVerifyOTPTx(ctx context.Context, tx pgx.Tx, schoolID
 		maxAttempts = 5
 	}
 	if session.OTPAttempts >= maxAttempts {
-		_, _ = tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE chat_sessions
 			SET state = $1, otp_hash = NULL, otp_expires_at = NULL, updated_at = NOW()
 			WHERE school_id = $2 AND id = $3`,
 			StateAwaitingAdmissionNumber, schoolID, session.ID,
-		)
-		return contracts.Fail(http.StatusTooManyRequests, "OTP_ATTEMPTS_EXHAUSTED", "Too many invalid verification attempts. Please start over and request a new code.")
+		); err != nil {
+			return err
+		}
+		*postTxErr = contracts.Fail(http.StatusTooManyRequests, "OTP_ATTEMPTS_EXHAUSTED", "Too many invalid verification attempts. Please start over and request a new code.")
+		return nil
 	}
 
-	candidateHash := hashSecret(code)
-	if subtle.ConstantTimeCompare([]byte(candidateHash), []byte(*session.OTPHash)) != 1 {
+	isSixDigits := len(code) == 6
+	for i := 0; i < len(code) && isSixDigits; i++ {
+		if code[i] < '0' || code[i] > '9' {
+			isSixDigits = false
+		}
+	}
+	if !isSixDigits || !verifySaltedOTP(code, *session.OTPHash) {
 		newAttempts := session.OTPAttempts + 1
 		if newAttempts >= maxAttempts {
-			_, _ = tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				UPDATE chat_sessions
 				SET state = $1,
 				    otp_hash = NULL,
@@ -775,17 +870,29 @@ func (s *Service) transitionVerifyOTPTx(ctx context.Context, tx pgx.Tx, schoolID
 				    updated_at = NOW()
 				WHERE school_id = $3 AND id = $4`,
 				StateAwaitingAdmissionNumber, newAttempts, schoolID, session.ID,
-			)
-			return contracts.Fail(http.StatusTooManyRequests, "OTP_ATTEMPTS_EXHAUSTED", "Too many invalid verification attempts. Please start over and request a new code.")
+			); err != nil {
+				return err
+			}
+			*postTxErr = contracts.Fail(http.StatusTooManyRequests, "OTP_ATTEMPTS_EXHAUSTED", "Too many invalid verification attempts. Please start over and request a new code.")
+			return nil
 		}
-		_, _ = tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE chat_sessions
 			SET otp_attempts = $1, updated_at = NOW()
 			WHERE school_id = $2 AND id = $3`,
 			newAttempts, schoolID, session.ID,
-		)
-		return contracts.Fail(http.StatusUnauthorized, "INVALID_OTP", "The verification code is invalid or has expired.")
+		); err != nil {
+			return err
+		}
+		*postTxErr = contracts.Fail(http.StatusUnauthorized, "INVALID_OTP", "The verification code is invalid or has expired.")
+		return nil
 	}
+
+	delegatedToken, err := generateOpaqueToken()
+	if err != nil {
+		return err
+	}
+	accessTokenHash := hashSecret(delegatedToken)
 
 	verifiedAt := now
 	expiresAt := now.Add(s.sessionTTL())
@@ -795,11 +902,12 @@ func (s *Service) transitionVerifyOTPTx(ctx context.Context, tx pgx.Tx, schoolID
 		    otp_hash = NULL,
 		    otp_expires_at = NULL,
 		    otp_attempts = 0,
-		    verified_at = $2,
-		    expires_at = $3,
+		    access_token_hash = $2,
+		    verified_at = $3,
+		    expires_at = $4,
 		    updated_at = NOW()
-		WHERE school_id = $4 AND id = $5`,
-		StateVerified, verifiedAt, expiresAt, schoolID, session.ID,
+		WHERE school_id = $5 AND id = $6`,
+		StateVerified, accessTokenHash, verifiedAt, expiresAt, schoolID, session.ID,
 	); err != nil {
 		return err
 	}
@@ -845,7 +953,7 @@ func (s *Service) HandleSessionOTP(ctx context.Context, schoolIDHint, sessionID 
 		return SessionResponse{}, err
 	}
 	var senderWA string
-	err = s.DB.WithTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+	err = s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			SELECT sender_wa_number
 			FROM chat_sessions
@@ -898,7 +1006,7 @@ type MetaWebhookPayload struct {
 
 func verifyWebhookSignature(appSecret, signatureHeader string, body []byte) bool {
 	if strings.TrimSpace(appSecret) == "" {
-		return true
+		return false
 	}
 	sig := strings.TrimPrefix(strings.TrimSpace(signatureHeader), "sha256=")
 	mac := hmac.New(sha256.New, []byte(appSecret))
@@ -931,17 +1039,13 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 			contracts.WriteError(w, contracts.Fail(http.StatusBadRequest, "INVALID_REQUEST", "Could not read webhook body."))
 			return
 		}
-		if service.WebhookAppSecret != "" {
-			sigHeader := r.Header.Get("X-Hub-Signature-256")
-			if !verifyWebhookSignature(service.WebhookAppSecret, sigHeader, bodyBytes) {
-				contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "WEBHOOK_SIGNATURE_INVALID", "Invalid or missing WhatsApp webhook signature."))
-				return
-			}
+		sigHeader := r.Header.Get("X-Hub-Signature-256")
+		if !verifyWebhookSignature(service.WebhookAppSecret, sigHeader, bodyBytes) {
+			contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "WEBHOOK_SIGNATURE_INVALID", "Invalid or missing WhatsApp webhook signature."))
+			return
 		}
 		var payload MetaWebhookPayload
-		decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&payload); err != nil {
+		if err := json.Unmarshal(bodyBytes, &payload); err != nil {
 			contracts.WriteError(w, contracts.Fail(http.StatusBadRequest, "INVALID_JSON", "A valid JSON request is required."))
 			return
 		}
