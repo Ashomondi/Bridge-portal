@@ -124,10 +124,34 @@ Legend: **[M]** must have · **[S]** should have · **[C]** could have ·
   balances are preserved, unallocated payments allocate oldest-due-first (or to
   an explicitly targeted term), and overpayments carry forward via paired
   cross-term credit transfers
-- [M] Guardian financial visibility (resolved): only guardians linked in
-  `student_guardians` with `is_fee_payer = TRUE` (the designated fee payer(s))
-  can view student fee balances/ledgers and receive fee-change notifications;
+- [M] Guardian financial visibility & payment eligibility (resolved): only
+  guardians linked in `student_guardians` with `is_fee_payer = TRUE` (the
+  designated fee payer(s)) can view student fee balances/ledgers, receive
+  fee-change and payment notifications, and initiate M-Pesa STK Push payments;
   guardians with `is_fee_payer = FALSE` receive `403 FORBIDDEN`
+- [M] M-Pesa STK Push & Direct Paybill C2B (Release 1 reconciled scope — AC-23,
+  AC-25, AC-26):
+  - **Paybill-only in Release 1:** Per-school M-Pesa configuration supports
+    Paybill (`CustomerPayBillOnline`) only; Till (`CustomerBuyGoodsOnline`) is
+    deferred because Till payments do not carry `BillRefNumber` admission-number
+    references
+  - **AC-23 (STK payment amounts):** STK Push requires whole KES amounts
+    (`>= 1.00 KES`); overpayments above the student's balance are accepted and
+    carried forward as `credit_balance`. Callbacks must include an exact
+    matching `Amount` and `MpesaReceiptNumber` before crediting the ledger
+  - **AC-25 (School-scoped C2B matching):** C2B confirmations resolve the
+    receiving school strictly from `BusinessShortCode`, match
+    `UPPER(TRIM(admission_number)) = UPPER(TRIM(BillRefNumber))` within that
+    school only, and route unknown admission numbers into `unmatched_payments`
+    without discarding money
+  - **AC-26 (Unmatched queue & chat payment safeguards):** School-scoped
+    bursars and finance staff holding `billing.unmatched_payments.manage` (or
+    `billing.fee_structures.manage`) list and manually match unmatched payments
+    within their school. Chat-initiated payments (`chat`, `whatsapp`, `in_app`)
+    unconditionally require explicit `"parent_confirmed": true`, enforce the
+    24-hour phone-change freeze (`users.chat_payment_paused_until`, failing
+    closed if unavailable), and restrict target phone to the guardian's verified
+    registered phone number
 - [AI] M-Pesa reconciliation: proposes the likely student for payments with
   wrong/missing admission numbers; bursar confirms with one click
 - [M] Payments to suppliers/bills with signatory approval workflow

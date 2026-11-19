@@ -229,3 +229,47 @@ Operational cleanup requirements (pending worker implementation):
   compensating entries/notes rather than mutating historical records. Financial
   retention schedules remain subject to the controller-confirmed policy in the
   Retention table above.
+
+## Safaricom Daraja (M-Pesa) payment security
+
+- **Callback authentication (fail-closed):**
+  - *Per-request STK path token:* `InitiateSTKPush` generates a 32-byte
+    cryptographically random hex token, stores only its SHA-256 hash in
+    `mpesa_stk_requests.callback_token_hash`, and embeds the raw token in the
+    `CallBackURL` path (`/api/v1/billing/mpesa/callback/{callback_token}`). The
+    callback handler validates the hash in constant time and verifies strict
+    binding to `CheckoutRequestID`, `school_id`, and `school_mpesa_configs`.
+  - *Trusted reverse proxy / API gateway (static STK & C2B routes):* Because
+    Safaricom does not send custom auth headers directly, static callback routes
+    require `VerifyCallback` OR both `MPESA_CALLBACK_TOKEN` and
+    `MPESA_TRUSTED_CALLBACK_PROXIES`. The reverse proxy must validate
+    Safaricom's source IP allowlist / mTLS, **strip any caller-supplied
+    `X-Callback-Token` and `Authorization` headers**, and inject
+    `X-Callback-Token`. Requests from untrusted remote IPs or with query-string
+    tokens (`?token=...`) are rejected with `401`. Unconfigured authentication
+    fails closed.
+- **Credential & secret handling:** Daraja OAuth credentials
+  (`DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`), per-school encrypted
+  passkeys (`school_mpesa_configs.passkey_encrypted`), `MPESA_CALLBACK_TOKEN`,
+  and per-request callback tokens are never exposed to frontend clients, never
+  stored in query strings, and never written to application logs or `audit_log`.
+- **Tenant isolation & amount integrity:** STK callback tenant resolution derives
+  `school_id` exclusively from `mpesa_stk_requests`, never from caller-supplied
+  `school_id` query parameters or `BusinessShortCode`. Successful STK callbacks
+  require a valid `MpesaReceiptNumber` and an exact `Amount` match against
+  `mpesa_stk_requests.amount` (`422 MPESA_AMOUNT_MISMATCH` on missing, invalid,
+  zero, negative, or mismatched amounts, with zero ledger mutation and a
+  durable `billing.mpesa.stk_callback_rejected` audit event).
+- **Chat-initiated payment controls:** All chat-sourced STK requests (`chat`,
+  `whatsapp`, `in_app`) unconditionally require `"parent_confirmed": true`,
+  verify `users.chat_payment_paused_until` (24-hour phone-change freeze,
+  failing closed with `503 CHAT_PAYMENT_FREEZE_UNAVAILABLE` if unreadable),
+  require a valid registered phone number (`422 INVALID_REGISTERED_PHONE`), and
+  reject destination phone overrides (`422 CHAT_PHONE_OVERRIDE_FORBIDDEN`).
+- **Mandatory dependencies & audit:** Payment initiation and settlement require
+  non-nil `AuditLogger`, `InAppNotifier`, and `STKPollQueue` (for STK) and fail
+  closed if missing or if transactional audit recording fails.
+- **Safaricom data sharing:** Only the minimum fields required by Daraja
+  (Paybill shortcode, payer phone number, whole-KES amount, and student
+  admission number as `AccountReference`) are transmitted to Safaricom. Student
+  names, academic records, and clinical data are never sent to Daraja.

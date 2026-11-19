@@ -3,28 +3,87 @@ package billing
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/notifications"
 	"github.com/jackc/pgx/v5"
 )
 
+var nairobiLocation = func() *time.Location {
+	loc, err := time.LoadLocation("Africa/Nairobi")
+	if err != nil {
+		return time.FixedZone("Africa/Nairobi", 3*60*60)
+	}
+	return loc
+}()
+
+// DarajaTimestamp formats an instant in Africa/Nairobi (EAT, UTC+3) using the
+// YYYYMMDDHHmmss layout required by Safaricom Daraja APIs.
+func DarajaTimestamp(t time.Time) string {
+	return t.In(nairobiLocation).Format("20060102150405")
+}
+
+// HashCallbackToken returns the lowercase hex SHA-256 digest of a per-request
+// STK callback token so raw tokens are never stored in the database or logs.
+func HashCallbackToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
+}
+
+func generateCallbackToken() (raw string, hash string, err error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", "", err
+	}
+	raw = hex.EncodeToString(buf[:])
+	return raw, HashCallbackToken(raw), nil
+}
+
+func computeSTKRequestHash(schoolID, guardianUserID, studentID string, amount Money, normalizedPhone, source string) string {
+	material := strings.Join([]string{
+		schoolID,
+		guardianUserID,
+		studentID,
+		amount.String(),
+		normalizedPhone,
+		source,
+	}, "|")
+	sum := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(sum[:])
+}
+
 type DarajaSchoolConfig struct {
 	SchoolID       string
 	Shortcode      string
+	ShortcodeType  string
 	Environment    string
 	Passkey        string
 	ConsumerKey    string
 	ConsumerSecret string
 	CallbackURL    string
+}
+
+func validateShortcodeType(shortcodeType string) error {
+	norm := strings.ToLower(strings.TrimSpace(shortcodeType))
+	if norm == "" || norm == "paybill" {
+		return nil
+	}
+	return contracts.Fail(http.StatusUnprocessableEntity, "UNSUPPORTED_MPESA_SHORTCODE_TYPE", "Release 1 supports Paybill shortcodes only; Till (Buy Goods) is not supported.")
 }
 
 type DarajaSTKPushRequest struct {
@@ -33,6 +92,7 @@ type DarajaSTKPushRequest struct {
 	Amount           Money
 	AccountReference string
 	Description      string
+	CallbackToken    string
 }
 
 type DarajaSTKPushResponse struct {
@@ -111,9 +171,9 @@ func (c *HTTPDarajaClient) baseURL(env string) string {
 
 func (c *HTTPDarajaClient) now() time.Time {
 	if c != nil && c.Now != nil {
-		return c.Now().UTC()
+		return c.Now()
 	}
-	return time.Now().UTC()
+	return time.Now()
 }
 
 func (c *HTTPDarajaClient) FetchOAuthToken(ctx context.Context, cfg DarajaSchoolConfig) (string, error) {
@@ -167,6 +227,12 @@ func (c *HTTPDarajaClient) resolvePasskey(raw string) (string, error) {
 }
 
 func (c *HTTPDarajaClient) InitiateSTKPush(ctx context.Context, in DarajaSTKPushRequest) (DarajaSTKPushResponse, error) {
+	if err := validateShortcodeType(in.Config.ShortcodeType); err != nil {
+		return DarajaSTKPushResponse{}, err
+	}
+	if in.Amount < 100 || in.Amount%100 != 0 {
+		return DarajaSTKPushResponse{}, validationFail("amount", "INVALID_PAYMENT_AMOUNT", "M-Pesa STK push amounts must be whole shillings >= 1.00 KES.")
+	}
 	token, err := c.FetchOAuthToken(ctx, in.Config)
 	if err != nil {
 		return DarajaSTKPushResponse{}, err
@@ -180,13 +246,14 @@ func (c *HTTPDarajaClient) InitiateSTKPush(ctx context.Context, in DarajaSTKPush
 		callbackURL = strings.TrimSpace(c.CallbackURL)
 	}
 	if callbackURL == "" {
-		callbackURL = "https://example.invalid/api/v1/billing/mpesa/callback"
+		return DarajaSTKPushResponse{}, contracts.Fail(http.StatusServiceUnavailable, "MPESA_NOT_CONFIGURED", "M-Pesa callback URL is not configured.")
 	}
-	timestamp := c.now().Format("20060102150405")
+	if cbToken := strings.TrimSpace(in.CallbackToken); cbToken != "" {
+		callbackURL = strings.TrimRight(callbackURL, "/") + "/" + cbToken
+	}
+
+	timestamp := DarajaTimestamp(c.now())
 	password := base64.StdEncoding.EncodeToString([]byte(in.Config.Shortcode + passkey + timestamp))
-	if in.Amount < 100 || in.Amount%100 != 0 {
-		return DarajaSTKPushResponse{}, validationFail("amount", "INVALID_PAYMENT_AMOUNT", "M-Pesa STK push amounts must be whole shillings >= 1.00 KES.")
-	}
 	darajaDigits := strings.TrimPrefix(in.PhoneNumber, "+")
 	wholeKES := int64(in.Amount / 100)
 
@@ -243,6 +310,9 @@ func (c *HTTPDarajaClient) InitiateSTKPush(ctx context.Context, in DarajaSTKPush
 }
 
 func (c *HTTPDarajaClient) QuerySTKStatus(ctx context.Context, in DarajaSTKQueryRequest) (DarajaSTKQueryResponse, error) {
+	if err := validateShortcodeType(in.Config.ShortcodeType); err != nil {
+		return DarajaSTKQueryResponse{}, err
+	}
 	token, err := c.FetchOAuthToken(ctx, in.Config)
 	if err != nil {
 		return DarajaSTKQueryResponse{}, err
@@ -251,7 +321,7 @@ func (c *HTTPDarajaClient) QuerySTKStatus(ctx context.Context, in DarajaSTKQuery
 	if err != nil {
 		return DarajaSTKQueryResponse{}, err
 	}
-	timestamp := c.now().Format("20060102150405")
+	timestamp := DarajaTimestamp(c.now())
 	password := base64.StdEncoding.EncodeToString([]byte(in.Config.Shortcode + passkey + timestamp))
 	payload := map[string]any{
 		"BusinessShortCode": in.Config.Shortcode,
@@ -289,7 +359,7 @@ func (c *HTTPDarajaClient) QuerySTKStatus(ctx context.Context, in DarajaSTKQuery
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return DarajaSTKQueryResponse{}, contracts.Fail(http.StatusBadGateway, "MPESA_QUERY_FAILED", "Invalid M-Pesa query response.")
 	}
-	code, err := parseFlexibleInt(raw.ResultCode)
+	code, err := ParseFlexibleInt(raw.ResultCode)
 	if err != nil {
 		return DarajaSTKQueryResponse{}, contracts.Fail(http.StatusBadGateway, "MPESA_QUERY_FAILED", "Invalid M-Pesa result code.")
 	}
@@ -302,13 +372,26 @@ func (c *HTTPDarajaClient) QuerySTKStatus(ctx context.Context, in DarajaSTKQuery
 	}, nil
 }
 
-func parseFlexibleInt(raw json.RawMessage) (int, error) {
-	s := strings.Trim(strings.TrimSpace(string(raw)), `"`)
-	if s == "" {
-		return 0, errors.New("empty result code")
+// ParseFlexibleInt strictly parses a JSON integer or quoted integer string
+// (e.g. 0 or "0") using strconv.Atoi, rejecting empty inputs, decimals,
+// trailing characters, malformed strings, and out-of-range values.
+func ParseFlexibleInt(raw json.RawMessage) (int, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return 0, errors.New("empty integer value")
 	}
-	var v int
-	if _, err := fmt.Sscanf(s, "%d", &v); err != nil {
+	if strings.HasPrefix(trimmed, `"`) {
+		var unquoted string
+		if err := json.Unmarshal([]byte(trimmed), &unquoted); err != nil {
+			return 0, errors.New("malformed quoted integer")
+		}
+		trimmed = strings.TrimSpace(unquoted)
+	}
+	if trimmed == "" {
+		return 0, errors.New("empty integer value")
+	}
+	v, err := strconv.Atoi(trimmed)
+	if err != nil {
 		return 0, err
 	}
 	return v, nil
@@ -320,6 +403,7 @@ type InitiateSTKPushInput struct {
 	PhoneNumber     string          `json:"phone_number"`
 	Source          string          `json:"source"`
 	ParentConfirmed *bool           `json:"parent_confirmed"`
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
 }
 
 type STKPushInitiated struct {
@@ -333,12 +417,15 @@ type STKPushInitiated struct {
 	MerchantRequestID string `json:"merchant_request_id"`
 	Status            string `json:"status"`
 	CustomerMessage   string `json:"customer_message"`
+	PollScheduled     bool   `json:"poll_scheduled"`
 }
 
-// InitiateSTKPush validates guardian authorization, any-positive-amount rule,
-// chat 24-hour phone-change freeze, and explicit parent confirmation (when from AI/internal),
-// persists the durable STK attempt, calls Daraja with AccountReference = admission_number,
-// and schedules a 45-second STK status poll task.
+// InitiateSTKPush validates fee-paying guardian authorization, whole-KES amount
+// rules, chat 24-hour phone-change freeze, mandatory explicit parent confirmation
+// for all chat-initiated payments, and optional scoped idempotency keys; persists
+// a durable STK attempt with a server-generated per-request callback token hash;
+// calls Daraja with AccountReference = admission_number; and schedules a 45-second
+// STK status poll task.
 func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in InitiateSTKPushInput, requireParentConfirmed bool) (STKPushInitiated, error) {
 	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return STKPushInitiated{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
@@ -355,12 +442,12 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 		}
 	}
 	if source != "web" && source != "chat" && source != "whatsapp" && source != "in_app" {
-		return STKPushInitiated{}, validationFail("source", "INVALID_PAYMENT_SOURCE", "source must be 'web' or 'chat'.")
+		return STKPushInitiated{}, validationFail("source", "INVALID_PAYMENT_SOURCE", "source must be 'web', 'chat', 'whatsapp', or 'in_app'.")
 	}
 	isChatSource := source == "chat" || source == "whatsapp" || source == "in_app" || requireParentConfirmed
-	if requireParentConfirmed || (in.ParentConfirmed != nil && isChatSource) {
+	if isChatSource {
 		if in.ParentConfirmed == nil || !*in.ParentConfirmed {
-			return STKPushInitiated{}, validationFail("parent_confirmed", "PARENT_CONFIRMATION_REQUIRED", "Explicit parental confirmation (parent_confirmed=true) is required before initiating an AI chat payment.")
+			return STKPushInitiated{}, validationFail("parent_confirmed", "PARENT_CONFIRMATION_REQUIRED", "Explicit parental confirmation (parent_confirmed=true) is required before initiating a chat payment.")
 		}
 	}
 	if len(in.Amount) == 0 {
@@ -370,6 +457,10 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 	if err := json.Unmarshal(in.Amount, &amount); err != nil || amount < 100 || amount%100 != 0 {
 		return STKPushInitiated{}, validationFail("amount", "INVALID_PAYMENT_AMOUNT", "M-Pesa STK push amounts must be whole shillings >= 1.00 KES.")
 	}
+	idempotencyKey := strings.TrimSpace(in.IdempotencyKey)
+	if len(idempotencyKey) > 128 {
+		return STKPushInitiated{}, validationFail("idempotency_key", "INVALID_IDEMPOTENCY_KEY", "Idempotency key must be at most 128 characters.")
+	}
 
 	if s == nil || s.DB == nil {
 		return STKPushInitiated{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
@@ -377,14 +468,26 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 	if err := s.requireAuditLogger(); err != nil {
 		return STKPushInitiated{}, err
 	}
+	if err := s.requireNotifier(); err != nil {
+		return STKPushInitiated{}, err
+	}
 	if s.Daraja == nil {
 		return STKPushInitiated{}, contracts.Fail(http.StatusServiceUnavailable, "MPESA_NOT_CONFIGURED", "M-Pesa provider is not configured.")
+	}
+	if s.PollQueue == nil {
+		return STKPushInitiated{}, contracts.Fail(http.StatusServiceUnavailable, "MPESA_POLL_QUEUE_NOT_CONFIGURED", "M-Pesa polling queue is not configured.")
+	}
+
+	callbackToken, callbackTokenHash, err := generateCallbackToken()
+	if err != nil {
+		return STKPushInitiated{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "Could not generate callback correlation token.")
 	}
 
 	var stkRequestID, admissionNumber, normalizedPhone string
 	var darajaCfg DarajaSchoolConfig
+	var idempotentReplay *STKPushInitiated
 
-	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+	err = s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			SELECT admission_number
 			FROM students
@@ -405,7 +508,7 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 		}
 
 		var registeredPhone string
-		if err := tx.QueryRow(ctx, `SELECT phone_number FROM users WHERE id = $1 AND is_active = TRUE`, p.UserID).Scan(&registeredPhone); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(phone_number, '') FROM users WHERE id = $1 AND is_active = TRUE`, p.UserID).Scan(&registeredPhone); err != nil {
 			return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Guardian account is not active.")
 		}
 
@@ -420,26 +523,27 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 
 			normRegistered, errReg := notifications.NormalizePhone(registeredPhone)
 			if errReg != nil {
-				return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Guardian does not have a valid registered phone number.")
+				return validationFail("phone_number", "INVALID_REGISTERED_PHONE", "Guardian does not have a valid registered phone number for chat-initiated payments.")
 			}
-			// Security Remediation 6.7: Chat-initiated payments must be sent to the guardian's registered phone
+			// Chat-initiated payments must strictly target the guardian's verified registered phone.
 			if phoneCandidate := strings.TrimSpace(in.PhoneNumber); phoneCandidate != "" {
 				normCandidate, errCandidate := notifications.NormalizePhone(phoneCandidate)
 				if errCandidate != nil || normCandidate != normRegistered {
 					return validationFail("phone_number", "CHAT_PHONE_OVERRIDE_FORBIDDEN", "Chat-initiated payments must be sent to the guardian's registered phone number.")
 				}
 			}
+			normalizedPhone = normRegistered
+		} else {
+			phoneCandidate := strings.TrimSpace(in.PhoneNumber)
+			if phoneCandidate == "" {
+				phoneCandidate = registeredPhone
+			}
+			norm, err := notifications.NormalizePhone(phoneCandidate)
+			if err != nil {
+				return validationFail("phone_number", "INVALID_PHONE_NUMBER", "A valid E.164 or Kenyan M-Pesa phone number is required.")
+			}
+			normalizedPhone = norm
 		}
-
-		phoneCandidate := strings.TrimSpace(in.PhoneNumber)
-		if phoneCandidate == "" {
-			phoneCandidate = registeredPhone
-		}
-		norm, err := notifications.NormalizePhone(phoneCandidate)
-		if err != nil {
-			return validationFail("phone_number", "INVALID_PHONE_NUMBER", "A valid E.164 or Kenyan M-Pesa phone number is required.")
-		}
-		normalizedPhone = norm
 
 		if err := tx.QueryRow(ctx, `
 			SELECT school_id, shortcode, environment, COALESCE(passkey_encrypted, '')
@@ -456,15 +560,81 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 		if err != nil {
 			return err
 		}
+
+		if idempotencyKey != "" {
+			reqHash := computeSTKRequestHash(p.SchoolID, p.UserID, in.StudentID, amount, normalizedPhone, source)
+			err = tx.QueryRow(ctx, `
+				INSERT INTO mpesa_stk_requests (
+					school_id, student_id, guardian_user_id, amount, phone_number, status,
+					idempotency_key, request_hash, callback_token_hash
+				)
+				VALUES ($1, $2, $3, $4, $5, 'initiating', $6, $7, $8)
+				ON CONFLICT (school_id, guardian_user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+				RETURNING id`,
+				p.SchoolID, in.StudentID, p.UserID, amtNum, normalizedPhone,
+				idempotencyKey, reqHash, callbackTokenHash,
+			).Scan(&stkRequestID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				var existingID, existingStudentID, existingPhone, existingStatus, existingHash string
+				var existingCheckout, existingMerchant *string
+				var existingAmount Money
+				var existingPollScheduled bool
+				lookupErr := tx.QueryRow(ctx, `
+					SELECT id, student_id, amount, phone_number, status,
+					       checkout_request_id, merchant_request_id,
+					       COALESCE(request_hash, ''), poll_scheduled
+					FROM mpesa_stk_requests
+					WHERE school_id = $1 AND guardian_user_id = $2 AND idempotency_key = $3`,
+					p.SchoolID, p.UserID, idempotencyKey,
+				).Scan(
+					&existingID, &existingStudentID, &existingAmount, &existingPhone, &existingStatus,
+					&existingCheckout, &existingMerchant, &existingHash, &existingPollScheduled,
+				)
+				if lookupErr != nil {
+					return lookupErr
+				}
+				if subtle.ConstantTimeCompare([]byte(existingHash), []byte(reqHash)) != 1 {
+					return contracts.Fail(http.StatusConflict, "IDEMPOTENCY_KEY_CONFLICT", "Idempotency key was already used with different payment parameters.")
+				}
+				if existingStatus == "initiating" {
+					return contracts.Fail(http.StatusConflict, "STK_REQUEST_IN_PROGRESS", "An STK push request with this idempotency key is already in progress.")
+				}
+				replay := STKPushInitiated{
+					STKRequestID:     existingID,
+					StudentID:        existingStudentID,
+					AdmissionNumber:  admissionNumber,
+					AccountReference: admissionNumber,
+					Amount:           existingAmount,
+					PhoneNumber:      existingPhone,
+					Status:           existingStatus,
+					PollScheduled:    existingPollScheduled,
+				}
+				if existingCheckout != nil {
+					replay.CheckoutRequestID = *existingCheckout
+				}
+				if existingMerchant != nil {
+					replay.MerchantRequestID = *existingMerchant
+				}
+				idempotentReplay = &replay
+				return nil
+			}
+			return err
+		}
+
 		return tx.QueryRow(ctx, `
-			INSERT INTO mpesa_stk_requests (school_id, student_id, guardian_user_id, amount, phone_number, status)
-			VALUES ($1, $2, $3, $4, $5, 'initiating')
+			INSERT INTO mpesa_stk_requests (
+				school_id, student_id, guardian_user_id, amount, phone_number, status, callback_token_hash
+			)
+			VALUES ($1, $2, $3, $4, $5, 'initiating', $6)
 			RETURNING id`,
-			p.SchoolID, in.StudentID, p.UserID, amtNum, normalizedPhone,
+			p.SchoolID, in.StudentID, p.UserID, amtNum, normalizedPhone, callbackTokenHash,
 		).Scan(&stkRequestID)
 	})
 	if err != nil {
 		return STKPushInitiated{}, err
+	}
+	if idempotentReplay != nil {
+		return *idempotentReplay, nil
 	}
 
 	darajaResp, darajaErr := s.Daraja.InitiateSTKPush(ctx, DarajaSTKPushRequest{
@@ -473,16 +643,31 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 		Amount:           amount,
 		AccountReference: admissionNumber,
 		Description:      "School Fee Payment " + admissionNumber,
+		CallbackToken:    callbackToken,
 	})
 	if darajaErr != nil {
 		_ = s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				UPDATE mpesa_stk_requests
 				SET status = 'failed', updated_at = NOW()
 				WHERE school_id = $1 AND id = $2 AND status = 'initiating'`,
 				p.SchoolID, stkRequestID,
-			)
-			return err
+			); err != nil {
+				return err
+			}
+			return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+				SchoolID:     p.SchoolID,
+				UserID:       p.UserID,
+				Action:       "billing.mpesa.stk_initiate_failed",
+				ResourceType: "mpesa_stk_request",
+				ResourceID:   stkRequestID,
+				Details: map[string]any{
+					"student_id":       in.StudentID,
+					"admission_number": admissionNumber,
+					"amount":           amount.String(),
+					"source":           source,
+				},
+			})
 		})
 		return STKPushInitiated{}, darajaErr
 	}
@@ -517,26 +702,43 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 		return STKPushInitiated{}, err
 	}
 
-	if s.PollQueue != nil {
-		if err := s.PollQueue.EnqueueSTKPoll(ctx, STKPollTask{
-			SchoolID:          p.SchoolID,
-			STKRequestID:      stkRequestID,
-			CheckoutRequestID: darajaResp.CheckoutRequestID,
-			EnqueuedAt:        s.now(),
-		}, 45*time.Second); err != nil {
-			_ = s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
-				return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
-					SchoolID:     p.SchoolID,
-					UserID:       p.UserID,
-					Action:       "billing.mpesa.stk_poll_enqueue_failed",
-					ResourceType: "mpesa_stk_request",
-					ResourceID:   stkRequestID,
-					Details: map[string]any{
-						"checkout_request_id": darajaResp.CheckoutRequestID,
-						"error":               err.Error(),
-					},
-				})
+	pollScheduled := false
+	if err := s.PollQueue.EnqueueSTKPoll(ctx, STKPollTask{
+		SchoolID:          p.SchoolID,
+		STKRequestID:      stkRequestID,
+		CheckoutRequestID: darajaResp.CheckoutRequestID,
+		EnqueuedAt:        s.now(),
+	}, 45*time.Second); err != nil {
+		// Daraja has already accepted the prompt; keep poll_scheduled=FALSE so the
+		// stranded-request recovery worker can safely re-enqueue, and record a
+		// mandatory audit event.
+		if auditErr := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+			return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+				SchoolID:     p.SchoolID,
+				UserID:       p.UserID,
+				Action:       "billing.mpesa.stk_poll_enqueue_failed",
+				ResourceType: "mpesa_stk_request",
+				ResourceID:   stkRequestID,
+				Details: map[string]any{
+					"checkout_request_id": darajaResp.CheckoutRequestID,
+					"error":               err.Error(),
+				},
 			})
+		}); auditErr != nil {
+			return STKPushInitiated{}, auditErr
+		}
+	} else {
+		pollScheduled = true
+		if markErr := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+			_, execErr := tx.Exec(ctx, `
+				UPDATE mpesa_stk_requests
+				SET poll_scheduled = TRUE, updated_at = NOW()
+				WHERE school_id = $1 AND id = $2`,
+				p.SchoolID, stkRequestID,
+			)
+			return execErr
+		}); markErr != nil {
+			log.Printf("billing: failed to mark poll_scheduled=true for stk_request_id=%s: %v", stkRequestID, markErr)
 		}
 	}
 
@@ -551,36 +753,119 @@ func (s *Service) InitiateSTKPush(ctx context.Context, p contracts.Principal, in
 		MerchantRequestID: darajaResp.MerchantRequestID,
 		Status:            "pending",
 		CustomerMessage:   darajaResp.CustomerMessage,
+		PollScheduled:     pollScheduled,
 	}, nil
 }
 
+// RetryUnscheduledSTKPolls recovers pending STK requests whose initial poll-queue
+// publication failed (poll_scheduled = FALSE), re-enqueuing them and marking
+// poll_scheduled = TRUE with an audit record.
+func (s *Service) RetryUnscheduledSTKPolls(ctx context.Context, schoolID string) (int, error) {
+	if !contracts.ValidID(schoolID) {
+		return 0, contracts.Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school_id is required.")
+	}
+	if s == nil || s.PollQueue == nil {
+		return 0, contracts.Fail(http.StatusServiceUnavailable, "MPESA_POLL_QUEUE_NOT_CONFIGURED", "M-Pesa polling queue is not configured.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return 0, err
+	}
+
+	type stranded struct {
+		id         string
+		checkoutID string
+	}
+	var pending []stranded
+	if err := s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, COALESCE(checkout_request_id, '')
+			FROM mpesa_stk_requests
+			WHERE school_id = $1
+			  AND status = 'pending'
+			  AND poll_scheduled = FALSE
+			  AND checkout_request_id IS NOT NULL
+			ORDER BY created_at ASC, id ASC
+			LIMIT 100`,
+			schoolID,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item stranded
+			if err := rows.Scan(&item.id, &item.checkoutID); err != nil {
+				return err
+			}
+			if item.checkoutID != "" {
+				pending = append(pending, item)
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		return 0, err
+	}
+
+	recovered := 0
+	for _, item := range pending {
+		if err := s.PollQueue.EnqueueSTKPoll(ctx, STKPollTask{
+			SchoolID:          schoolID,
+			STKRequestID:      item.id,
+			CheckoutRequestID: item.checkoutID,
+			EnqueuedAt:        s.now(),
+		}, 0); err != nil {
+			return recovered, err
+		}
+		if err := s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `
+				UPDATE mpesa_stk_requests
+				SET poll_scheduled = TRUE, updated_at = NOW()
+				WHERE school_id = $1 AND id = $2`,
+				schoolID, item.id,
+			); err != nil {
+				return err
+			}
+			return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+				SchoolID:     schoolID,
+				Action:       "billing.mpesa.stk_poll_recovered",
+				ResourceType: "mpesa_stk_request",
+				ResourceID:   item.id,
+				Details: map[string]any{
+					"checkout_request_id": item.checkoutID,
+				},
+			})
+		}); err != nil {
+			return recovered, err
+		}
+		recovered++
+	}
+	return recovered, nil
+}
+
+// isUserChatPaymentPaused checks users.chat_payment_paused_until and fails closed
+// if the schema column is missing or the freeze state cannot be read.
 func isUserChatPaymentPaused(ctx context.Context, tx pgx.Tx, userID string, now time.Time) (bool, error) {
-	var hasColumn bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM information_schema.columns
-			WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'chat_payment_paused_until'
-		)`).Scan(&hasColumn); err != nil {
-		return false, err
-	}
-	if !hasColumn {
-		return false, nil
-	}
-	var paused bool
+	var pausedUntil *time.Time
 	err := tx.QueryRow(ctx, `
-		SELECT COALESCE(chat_payment_paused_until > $2, false)
+		SELECT chat_payment_paused_until
 		FROM users
 		WHERE id = $1`,
-		userID, now,
-	).Scan(&paused)
+		userID,
+	).Scan(&pausedUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
+		return true, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Guardian account not found.")
+	}
+	if err != nil {
+		log.Printf("billing: failed to read users.chat_payment_paused_until (failing closed): %v", err)
+		return true, contracts.Fail(http.StatusServiceUnavailable, "CHAT_PAYMENT_FREEZE_UNAVAILABLE", "Unable to verify chat payment security freeze; chat payment initiation is temporarily unavailable.")
+	}
+	if pausedUntil == nil {
 		return false, nil
 	}
-	return paused, err
+	return pausedUntil.After(now), nil
 }
 
 type DarajaSTKCallbackEnvelope struct {
-	SchoolID          string `json:"school_id"`
 	BusinessShortCode string `json:"BusinessShortCode"`
 	Body              struct {
 		StkCallback struct {
@@ -599,13 +884,18 @@ type DarajaSTKCallbackEnvelope struct {
 }
 
 // ProcessSTKCallback processes a Daraja STK Push callback idempotently.
-// Repeated callbacks with the same CheckoutRequestID or MpesaReceiptNumber
-// never credit the student's ledger twice.
-func (s *Service) ProcessSTKCallback(ctx context.Context, schoolIDHint string, payload DarajaSTKCallbackEnvelope) error {
+// Tenant resolution comes strictly from trusted server-side state (either the
+// per-request callback token hash bound to mpesa_stk_requests or the globally
+// unique CheckoutRequestID in mpesa_stk_requests) — never from caller-supplied
+// school_id parameters or BusinessShortCode alone.
+func (s *Service) ProcessSTKCallback(ctx context.Context, callbackToken string, payload DarajaSTKCallbackEnvelope) error {
 	if s == nil {
 		return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 	}
 	if err := s.requireAuditLogger(); err != nil {
+		return err
+	}
+	if err := s.requireNotifier(); err != nil {
 		return err
 	}
 	cb := payload.Body.StkCallback
@@ -613,50 +903,135 @@ func (s *Service) ProcessSTKCallback(ctx context.Context, schoolIDHint string, p
 	if checkoutID == "" || cb.ResultCode == nil {
 		return contracts.Fail(http.StatusBadRequest, "INVALID_MPESA_CALLBACK", "CheckoutRequestID and ResultCode are required.")
 	}
-	shortcode := strings.TrimSpace(payload.BusinessShortCode)
-	schoolID, err := s.resolveWebhookSchoolID(ctx, shortcode, schoolIDHint, payload.SchoolID)
-	if err != nil {
-		return err
+
+	var schoolID string
+	var expectedTokenHash string
+	if trimmedToken := strings.TrimSpace(callbackToken); trimmedToken != "" {
+		if s.ResolveCallbackToken == nil {
+			return contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Invalid or missing M-Pesa callback credentials.")
+		}
+		expectedTokenHash = HashCallbackToken(trimmedToken)
+		resolvedSchool, expectedCheckout, err := s.ResolveCallbackToken(ctx, expectedTokenHash)
+		if err != nil || !contracts.ValidID(resolvedSchool) || strings.TrimSpace(expectedCheckout) != checkoutID {
+			return contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Callback token does not match the STK request.")
+		}
+		schoolID = resolvedSchool
+	} else {
+		if s.ResolveCheckoutRequest == nil {
+			return contracts.Fail(http.StatusInternalServerError, "CHECKOUT_RESOLVER_NOT_CONFIGURED", "STK checkout request resolver is not configured.")
+		}
+		resolvedSchool, err := s.ResolveCheckoutRequest(ctx, checkoutID)
+		if err != nil || !contracts.ValidID(resolvedSchool) {
+			return contracts.Fail(http.StatusNotFound, "STK_REQUEST_NOT_FOUND", "STK request not found.")
+		}
+		schoolID = resolvedSchool
 	}
 
 	var receiptNumber, phoneStr string
 	var callbackAmount Money
+	var hasAmount bool
+	var amountInvalid bool
 	if cb.CallbackMetadata != nil {
 		for _, item := range cb.CallbackMetadata.Item {
-			valStr := strings.Trim(strings.TrimSpace(string(item.Value)), `"`)
+			rawVal := strings.TrimSpace(string(item.Value))
+			valStr := rawVal
+			if strings.HasPrefix(rawVal, `"`) {
+				var unquoted string
+				if err := json.Unmarshal([]byte(rawVal), &unquoted); err == nil {
+					valStr = strings.TrimSpace(unquoted)
+				}
+			}
 			switch item.Name {
 			case "MpesaReceiptNumber":
 				receiptNumber = valStr
 			case "PhoneNumber":
 				phoneStr = valStr
 			case "Amount":
-				if parsed, err := ParseMoney(valStr); err == nil && parsed > 0 {
+				hasAmount = true
+				parsed, err := ParseMoney(valStr)
+				if err != nil || parsed <= 0 {
+					amountInvalid = true
+				} else {
 					callbackAmount = parsed
 				}
 			}
 		}
 	}
 
-	return s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
-		if shortcode != "" {
-			var configuredShortcode string
+	shortcode := strings.TrimSpace(payload.BusinessShortCode)
+	merchantID := strings.TrimSpace(cb.MerchantRequestID)
+
+	var rejectionReason string
+	err := s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+		var configuredShortcode string
+		if err := tx.QueryRow(ctx, `
+			SELECT shortcode FROM school_mpesa_configs WHERE school_id = $1`,
+			schoolID,
+		).Scan(&configuredShortcode); errors.Is(err, pgx.ErrNoRows) {
+			rejectionReason = "mpesa_not_configured"
+			return contracts.Fail(http.StatusBadRequest, "SHORTCODE_SCHOOL_MISMATCH", "M-Pesa shortcode is not configured for the resolved school.")
+		} else if err != nil {
+			return err
+		}
+		if shortcode != "" && !strings.EqualFold(strings.TrimSpace(configuredShortcode), shortcode) {
+			rejectionReason = "shortcode_mismatch"
+			return contracts.Fail(http.StatusBadRequest, "SHORTCODE_SCHOOL_MISMATCH", "BusinessShortCode does not match the school's configured M-Pesa shortcode.")
+		}
+
+		if expectedTokenHash != "" {
+			var storedHash string
 			if err := tx.QueryRow(ctx, `
-				SELECT shortcode FROM school_mpesa_configs WHERE school_id = $1`,
-				schoolID,
-			).Scan(&configuredShortcode); errors.Is(err, pgx.ErrNoRows) || !strings.EqualFold(strings.TrimSpace(configuredShortcode), shortcode) {
-				return contracts.Fail(http.StatusBadRequest, "SHORTCODE_SCHOOL_MISMATCH", "BusinessShortCode does not match the school's configured M-Pesa shortcode.")
+				SELECT COALESCE(callback_token_hash, '')
+				FROM mpesa_stk_requests
+				WHERE school_id = $1 AND checkout_request_id = $2`,
+				schoolID, checkoutID,
+			).Scan(&storedHash); errors.Is(err, pgx.ErrNoRows) || subtle.ConstantTimeCompare([]byte(storedHash), []byte(expectedTokenHash)) != 1 {
+				rejectionReason = "callback_token_mismatch"
+				return contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Callback token does not match the STK request.")
 			} else if err != nil {
 				return err
 			}
 		}
-		return s.settleSTKResultTx(ctx, tx, schoolID, checkoutID, *cb.ResultCode, receiptNumber, phoneStr, callbackAmount, true, payload)
+
+		if *cb.ResultCode == 0 {
+			if !hasAmount || amountInvalid || callbackAmount <= 0 {
+				rejectionReason = "invalid_or_missing_amount"
+				return contracts.Fail(http.StatusUnprocessableEntity, "MPESA_AMOUNT_MISMATCH", "Successful STK callback requires a valid positive Amount matching the initiated STK request.")
+			}
+		}
+
+		settleErr := s.settleSTKResultTx(ctx, tx, schoolID, checkoutID, merchantID, *cb.ResultCode, receiptNumber, phoneStr, callbackAmount, true, payload)
+		if settleErr != nil {
+			var apiErr *contracts.APIError
+			if errors.As(settleErr, &apiErr) {
+				rejectionReason = apiErr.Code
+			}
+		}
+		return settleErr
 	})
+
+	if err != nil && rejectionReason != "" {
+		_ = s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+			return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+				SchoolID:     schoolID,
+				Action:       "billing.mpesa.stk_callback_rejected",
+				ResourceType: "mpesa_stk_request",
+				ResourceID:   checkoutID,
+				Details: map[string]any{
+					"checkout_request_id": checkoutID,
+					"reason":              rejectionReason,
+					"result_code":         *cb.ResultCode,
+				},
+			})
+		})
+	}
+	return err
 }
 
 func (s *Service) settleSTKResultTx(
 	ctx context.Context,
 	tx pgx.Tx,
-	schoolID, checkoutID string,
+	schoolID, checkoutID, merchantID string,
 	resultCode int,
 	receiptNumber, phoneStr string,
 	callbackAmount Money,
@@ -664,14 +1039,15 @@ func (s *Service) settleSTKResultTx(
 	rawPayload any,
 ) error {
 	var stkID, studentID, guardianUserID, reqPhone, currentStatus string
+	var storedMerchant *string
 	var reqAmount Money
 	err := tx.QueryRow(ctx, `
-		SELECT id, student_id, guardian_user_id, amount, phone_number, status
+		SELECT id, student_id, guardian_user_id, amount, phone_number, status, merchant_request_id
 		FROM mpesa_stk_requests
 		WHERE school_id = $1 AND checkout_request_id = $2
 		FOR UPDATE`,
 		schoolID, checkoutID,
-	).Scan(&stkID, &studentID, &guardianUserID, &reqAmount, &reqPhone, &currentStatus)
+	).Scan(&stkID, &studentID, &guardianUserID, &reqAmount, &reqPhone, &currentStatus, &storedMerchant)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.Fail(http.StatusNotFound, "STK_REQUEST_NOT_FOUND", "STK request not found for this school.")
 	}
@@ -679,25 +1055,63 @@ func (s *Service) settleSTKResultTx(
 		return err
 	}
 
-	if currentStatus == "succeeded" || currentStatus == "failed" {
+	if storedMerchant != nil && strings.TrimSpace(*storedMerchant) != "" && merchantID != "" && strings.TrimSpace(*storedMerchant) != merchantID {
+		return contracts.Fail(http.StatusUnprocessableEntity, "MERCHANT_REQUEST_MISMATCH", "MerchantRequestID does not match the initiated STK request.")
+	}
+
+	// Preserve terminal succeeded state: duplicate success is an idempotent no-op,
+	// and a subsequent failed callback must never overwrite a settled payment.
+	if currentStatus == "succeeded" {
+		if resultCode != 0 {
+			return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+				SchoolID:     schoolID,
+				Action:       "billing.mpesa.stk_callback_ignored_after_success",
+				ResourceType: "mpesa_stk_request",
+				ResourceID:   stkID,
+				Details: map[string]any{
+					"checkout_request_id": checkoutID,
+					"result_code":         resultCode,
+				},
+			})
+		}
 		return nil
 	}
 
 	if resultCode != 0 {
-		_, err := tx.Exec(ctx, `
+		if currentStatus == "failed" || currentStatus == "timeout" {
+			return nil
+		}
+		newStatus := "failed"
+		if resultCode == 1037 {
+			newStatus = "timeout"
+		}
+		if _, err := tx.Exec(ctx, `
 			UPDATE mpesa_stk_requests
-			SET status = 'failed', result_code = $1, updated_at = NOW()
-			WHERE school_id = $2 AND id = $3`,
-			resultCode, schoolID, stkID,
-		)
-		return err
+			SET status = $1, result_code = $2, updated_at = NOW()
+			WHERE school_id = $3 AND id = $4`,
+			newStatus, resultCode, schoolID, stkID,
+		); err != nil {
+			return err
+		}
+		return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+			SchoolID:     schoolID,
+			Action:       "billing.mpesa.stk_" + newStatus,
+			ResourceType: "mpesa_stk_request",
+			ResourceID:   stkID,
+			Details: map[string]any{
+				"checkout_request_id": checkoutID,
+				"result_code":         resultCode,
+				"previous_status":     currentStatus,
+			},
+		})
 	}
 
+	// Provider-confirmed success (resultCode == 0) may settle initiating, pending,
+	// timeout, uncertain, or earlier failed attempts.
 	receipt := strings.TrimSpace(receiptNumber)
 	if receipt == "" {
 		return contracts.Fail(http.StatusUnprocessableEntity, "MISSING_MPESA_RECEIPT", "Successful STK callback requires an MpesaReceiptNumber.")
 	}
-	// Security Remediation 6.4: Validate that callback amount is present and matches initiated STK amount exactly.
 	if requireAmount && callbackAmount <= 0 {
 		return contracts.Fail(http.StatusUnprocessableEntity, "MPESA_AMOUNT_MISMATCH", "Successful STK callback requires a valid positive Amount matching the initiated STK request.")
 	}
@@ -722,8 +1136,9 @@ func (s *Service) settleSTKResultTx(
 	return s.creditMatchedStudentPaymentTx(ctx, tx, schoolID, studentID, receipt, "mpesa_stk", settledPhone, "", settledAmount, rawPayload)
 }
 
-// PollSTKRequest queries Daraja for a pending STK push request and updates its status
-// idempotently without ever fabricating a receipt or double-crediting.
+// PollSTKRequest queries Daraja for a pending/timeout/uncertain STK push request
+// and updates its status idempotently without ever fabricating a receipt,
+// double-crediting, or overwriting a confirmed successful settlement.
 func (s *Service) PollSTKRequest(ctx context.Context, schoolID, stkRequestID string) error {
 	if !contracts.ValidID(schoolID) || !contracts.ValidID(stkRequestID) {
 		return contracts.Fail(http.StatusBadRequest, "INVALID_STK_POLL", "Valid school_id and stk_request_id are required.")
@@ -732,6 +1147,9 @@ func (s *Service) PollSTKRequest(ctx context.Context, schoolID, stkRequestID str
 		return contracts.Fail(http.StatusServiceUnavailable, "MPESA_NOT_CONFIGURED", "M-Pesa polling dependencies are not configured.")
 	}
 	if err := s.requireAuditLogger(); err != nil {
+		return err
+	}
+	if err := s.requireNotifier(); err != nil {
 		return err
 	}
 
@@ -746,7 +1164,7 @@ func (s *Service) PollSTKRequest(ctx context.Context, schoolID, stkRequestID str
 		).Scan(&checkoutID, &status); err != nil {
 			return err
 		}
-		if status != "pending" || checkoutID == "" {
+		if (status != "pending" && status != "timeout" && status != "uncertain") || checkoutID == "" {
 			return nil
 		}
 		return tx.QueryRow(ctx, `
@@ -756,7 +1174,7 @@ func (s *Service) PollSTKRequest(ctx context.Context, schoolID, stkRequestID str
 			schoolID,
 		).Scan(&cfg.SchoolID, &cfg.Shortcode, &cfg.Environment, &cfg.Passkey)
 	})
-	if err != nil || status != "pending" || checkoutID == "" {
+	if err != nil || (status != "pending" && status != "timeout" && status != "uncertain") || checkoutID == "" {
 		return err
 	}
 
@@ -769,54 +1187,71 @@ func (s *Service) PollSTKRequest(ctx context.Context, schoolID, stkRequestID str
 	}
 
 	return s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+		var currentStatus string
+		if err := tx.QueryRow(ctx, `
+			SELECT status
+			FROM mpesa_stk_requests
+			WHERE school_id = $1 AND id = $2
+			FOR UPDATE`,
+			schoolID, stkRequestID,
+		).Scan(&currentStatus); err != nil {
+			return err
+		}
+		if currentStatus == "succeeded" {
+			return nil
+		}
+
 		if queryResp.ResultCode == 0 {
 			if strings.TrimSpace(queryResp.ReceiptNumber) == "" {
-				// Never fabricate a receipt if Daraja query does not include one; mark uncertain and await callback/C2B.
-				_, err := tx.Exec(ctx, `
+				// Never fabricate a receipt if Daraja query does not include one;
+				// mark uncertain and await callback or C2B reconciliation.
+				if _, err := tx.Exec(ctx, `
 					UPDATE mpesa_stk_requests
 					SET status = 'uncertain', result_code = 0, updated_at = NOW()
-					WHERE school_id = $1 AND id = $2 AND status = 'pending'`,
+					WHERE school_id = $1 AND id = $2 AND status <> 'succeeded'`,
 					schoolID, stkRequestID,
-				)
-				return err
+				); err != nil {
+					return err
+				}
+				return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+					SchoolID:     schoolID,
+					Action:       "billing.mpesa.stk_poll_uncertain",
+					ResourceType: "mpesa_stk_request",
+					ResourceID:   stkRequestID,
+					Details: map[string]any{
+						"checkout_request_id": checkoutID,
+						"result_code":         0,
+					},
+				})
 			}
-			return s.settleSTKResultTx(ctx, tx, schoolID, checkoutID, 0, queryResp.ReceiptNumber, "", 0, false, queryResp)
+			// Daraja STK Query responses do not carry an Amount field, so
+			// requireAmount is false here while exact requested amount is settled.
+			return s.settleSTKResultTx(ctx, tx, schoolID, checkoutID, queryResp.MerchantRequestID, 0, queryResp.ReceiptNumber, "", 0, false, queryResp)
 		}
 		newStatus := "failed"
 		if queryResp.ResultCode == 1037 {
 			newStatus = "timeout"
 		}
-		_, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE mpesa_stk_requests
 			SET status = $1, result_code = $2, updated_at = NOW()
-			WHERE school_id = $3 AND id = $4 AND status = 'pending'`,
+			WHERE school_id = $3 AND id = $4 AND status <> 'succeeded'`,
 			newStatus, queryResp.ResultCode, schoolID, stkRequestID,
-		)
-		return err
+		); err != nil {
+			return err
+		}
+		return s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+			SchoolID:     schoolID,
+			Action:       "billing.mpesa.stk_poll_" + newStatus,
+			ResourceType: "mpesa_stk_request",
+			ResourceID:   stkRequestID,
+			Details: map[string]any{
+				"checkout_request_id": checkoutID,
+				"result_code":         queryResp.ResultCode,
+				"previous_status":     currentStatus,
+			},
+		})
 	})
-}
-
-func (s *Service) resolveWebhookSchoolID(ctx context.Context, shortcode string, explicitCandidates ...string) (string, error) {
-	var resolvedFromShortcode string
-	if sc := strings.TrimSpace(shortcode); sc != "" && !contracts.ValidID(sc) && s != nil && s.ResolveShortcode != nil {
-		schoolID, err := s.ResolveShortcode(ctx, sc)
-		if err == nil && contracts.ValidID(schoolID) {
-			resolvedFromShortcode = schoolID
-		}
-	}
-	for _, c := range explicitCandidates {
-		trimmed := strings.TrimSpace(c)
-		if contracts.ValidID(trimmed) {
-			if resolvedFromShortcode != "" && trimmed != resolvedFromShortcode {
-				return "", contracts.Fail(http.StatusBadRequest, "SHORTCODE_SCHOOL_MISMATCH", "BusinessShortCode does not match the school_id parameter.")
-			}
-			return trimmed, nil
-		}
-	}
-	if resolvedFromShortcode != "" {
-		return resolvedFromShortcode, nil
-	}
-	return "", contracts.Fail(http.StatusBadRequest, "UNKNOWN_MPESA_SHORTCODE", "Could not resolve school for the M-Pesa shortcode.")
 }
 
 func (s *Service) creditMatchedStudentPaymentTx(
