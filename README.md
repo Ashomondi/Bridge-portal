@@ -2,6 +2,8 @@
 
 A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) portal for Kenyan secondary schools.
 
+**Start with `ikonex.md`.** It is the central project reference: scope, roles, feature behaviour, decisions, open questions, and status. The other documents in `Docs/` hold detail on architecture, API contracts, security, and the decision log.
+
 ---
 
 ## Architecture Overview
@@ -124,6 +126,19 @@ A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) po
 4. **Nurse Record Isolation**: Clinical notes remain restricted to the nurse role. Class teachers receive only a notification flag that a visit occurred.
 5. **Human Confirmation on Financial Actions**: System records and approves payments. Bursar payments follow a signatory workflow. AI can initiate STK push only after explicit parent confirmation.
 
+<<<<<<< HEAD
+6. **WhatsApp is minimal.** Each school has its own WhatsApp bot. It carries only minimal facts (fee balances, attendance status, payment prompts). Results and report content stay in the app. WhatsApp is a documented exception to the Kenya-hosting rule; see `SECURITY.md`.
+7. **Human approval before parents see results.** Marks are entered by subject teachers; the class teacher releases results only when every subject has marks for every student.
+
+---
+
+## Release status (2026-10-29)
+
+- **No code exists yet.** The repository holds documentation only. Directory entries above describe the *planned* layout, not what is built.
+- **Release 1** is a test of the idea, built and tested with synthetic data only, and includes WhatsApp. It passes when onboarding works, parents can log in, and badges work well. See `ikonex.md` section 3.
+- Modules for nurse, librarian, clubs, bursar, and leave arrive in Release 2. In Release 1 the Ikonex team loads each school's fee structure, and there is no bursar portal.
+- `backend/internal/` will also need a `whatsapp/` module (webhook, per-school bot routing, OTP chat sessions); it is not in the tree above yet.
+=======
 ## Backend build and tests
 
 Requires **Go 1.22.2+** (`backend/go.mod`) and **PostgreSQL 16**
@@ -197,3 +212,4 @@ auth middleware, permission enforcement, billing handlers and durable audit
 logging still require application integration. `AuditLogger` alone does not
 address AC-29. In-app chat is Release 1 scope; WhatsApp routing schema prepares
 for Release 3 delivery, as specified in the release ADR.
+>>>>>>> fef894bb73d2e07250091ef2c4bfc2e3802e68a1
