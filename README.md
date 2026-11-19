@@ -2,6 +2,8 @@
 
 A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) portal for Kenyan secondary schools.
 
+**Start with `ikonex.md`.** It is the central project reference: scope, roles, feature behaviour, decisions, open questions, and status. The other documents in `Docs/` hold detail on architecture, API contracts, security, and the decision log.
+
 ---
 
 ## Architecture Overview
