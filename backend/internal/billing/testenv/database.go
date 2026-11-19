@@ -72,6 +72,7 @@ func New(t *testing.T, applyOwned bool) *DB {
 	db.Apply(t, "000003_r1_academics.up.sql")
 	if applyOwned {
 		db.Apply(t, "000004_r1_billing_whatsapp_notifications.up.sql")
+		db.Apply(t, "000005_r1_mpesa_hardening.up.sql")
 	}
 	db.Grant(t)
 	return db

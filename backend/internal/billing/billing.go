@@ -31,14 +31,59 @@ type InAppNotifier = contracts.InAppNotifier
 // CreateNotification is the notification payload alias for InAppNotifier.
 type CreateNotification = contracts.InAppNotification
 
+// ShortcodeResolver maps a receiving M-Pesa Paybill/BusinessShortCode to a school_id
+// so incoming C2B webhooks can open a tenant-scoped transaction without bypassing
+// PostgreSQL RLS or trusting caller-supplied school identifiers.
+type ShortcodeResolver func(ctx context.Context, shortcode string) (string, error)
+
+// CheckoutRequestResolver maps a globally unique Daraja CheckoutRequestID to the
+// trusted school_id stored on mpesa_stk_requests.
+type CheckoutRequestResolver func(ctx context.Context, checkoutRequestID string) (string, error)
+
+// CallbackTokenResolver maps a SHA-256 hash of a server-generated per-request
+// STK callback token to its trusted (school_id, checkout_request_id) binding.
+type CallbackTokenResolver func(ctx context.Context, callbackTokenHash string) (schoolID string, checkoutRequestID string, err error)
+
 // Service handles fee structures, student ledgers, M-Pesa STK push payments, and reconciliation.
 type Service struct {
-	DB        contracts.TenantDB
-	Audit     contracts.AuditLogger
-	Notifier  InAppNotifier
-	Daraja    DarajaProvider
-	PollQueue STKPollQueue
-	Now       func() time.Time
+	DB                     contracts.TenantDB
+	SystemDB               func(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error
+	Audit                  contracts.AuditLogger
+	Notifier               InAppNotifier
+	Daraja                 DarajaProvider
+	PollQueue              STKPollQueue
+	ResolveShortcode       ShortcodeResolver
+	ResolveCheckoutRequest CheckoutRequestResolver
+	ResolveCallbackToken   CallbackTokenResolver
+	CallbackAuthToken      string
+	TrustedCallbackProxies []string
+	VerifyCallback         func(r *http.Request) bool
+	Now                    func() time.Time
+}
+
+func (s *Service) requireNotifier() error {
+	if s == nil || s.Notifier == nil {
+		return contracts.Fail(http.StatusInternalServerError, "NOTIFIER_REQUIRED", "A transactional in-app notifier is required for payment settlement.")
+	}
+	return nil
+}
+
+// withSystemTenantTx executes fn inside a tenant-scoped transaction for authenticated
+// machine-to-machine callbacks or background jobs that lack an end-user Principal.
+func (s *Service) withSystemTenantTx(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error {
+	if !contracts.ValidID(schoolID) {
+		return contracts.Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school_id is required.")
+	}
+	if s == nil {
+		return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if s.SystemDB != nil {
+		return s.SystemDB(ctx, schoolID, fn)
+	}
+	if txFn, ok := s.DB.(contracts.TenantTxFunc); ok && txFn != nil {
+		return txFn(ctx, schoolID, fn)
+	}
+	return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 }
 
 func (s *Service) now() time.Time {

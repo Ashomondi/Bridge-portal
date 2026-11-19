@@ -70,12 +70,12 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
 - Backend run (dev): `make backend-run` (entry point is still a placeholder)
 - Frontend run (dev): `make frontend-run`
 - Migrations: apply paired SQL files using a PostgreSQL migration runner in
-  exact sequence **`000001` → `000003` → `000004`**
+  exact sequence **`000001` → `000003` → `000004` → `000005`**
   (`000001_init_schema` → `000003_r1_academics` →
-  `000004_r1_billing_whatsapp_notifications`). **Migration `000002` is absent
-  from this branch.** `make migrate-up` in `Makefile` is advertised in help
-  output but not implemented. The test harness applies the SQL files directly;
-  see `README.md` for downgrade rules.
+  `000004_r1_billing_whatsapp_notifications` → `000005_r1_mpesa_hardening`).
+  **Migration `000002` is absent from this branch.** `make migrate-up` in
+  `Makefile` is advertised in help output but not implemented. The test harness
+  applies the SQL files directly; see `README.md` for downgrade rules.
 - AI service run (dev): `make ai-run`
 
 ## Non-negotiable rules
@@ -160,6 +160,19 @@ These override convenience or "helpfulness" in any single task. See
     `contracts.AuditLogger` (`PostgresAuditLogger`) and fails closed if nil.
     `Service.OnTermStartDateChanged` implements `academics.TermDateFeeSyncer`
     inside `academics`'s active SQL transaction via `academics.SQLTxFromContext`.
+  - **Safaricom Daraja (M-Pesa) Paybill integration:** Release 1 supports
+    Paybill (`CustomerPayBillOnline`) only; reject Till (`Buy Goods`). STK Push
+    enforces whole KES (`>= 1.00 KES`), `Africa/Nairobi` (EAT) timestamps,
+    scoped `Idempotency-Key` (`school_id, guardian_user_id, idempotency_key`),
+    mandatory `AuditLogger`/`InAppNotifier`/`STKPollQueue`, and per-request
+    hashed callback path tokens (`/api/v1/billing/mpesa/callback/{callback_token}`).
+    Static callback routes (`/api/v1/billing/mpesa/callback` and
+    `/api/v1/billing/mpesa/c2b-confirmation`) require `VerifyCallback` or a
+    trusted reverse proxy (`MPESA_TRUSTED_CALLBACK_PROXIES` +
+    `MPESA_CALLBACK_TOKEN`); never accept query-string tokens and always return
+    flat Daraja JSON (`{"ResultCode":0,"ResultDesc":"Accepted"}`), never the
+    standard API envelope. Unmatched payment manual matching requires
+    `billing.unmatched_payments.manage` (or `billing.fee_structures.manage`).
 
 ## Where to look before asking the user
 
