@@ -41,14 +41,14 @@ func uniqueIP() string {
 }
 
 func newTestService(db *database.DB) *Service {
-	return NewService(db.DB, NewTokenManager(strings.Repeat("s", 32), time.Hour), nil, nil, false)
+	return NewService(db.DB, NewTokenManager(strings.Repeat("s", 32), time.Hour), nil, nil, false, nil, []byte("test-otp-hmac-secret-32-bytes-long"))
 }
 
 func cleanupPhone(t *testing.T, db *database.DB, phone string) {
 	t.Helper()
 	t.Cleanup(func() {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM otp_requests WHERE phone_number = $1`, phone)
-		_, _ = db.ExecContext(context.Background(), `DELETE FROM sender_rate_blocks WHERE sender_identifier = $1`, phone)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM auth_rate_blocks WHERE sender_identifier = $1`, phone)
 	})
 }
 
@@ -56,7 +56,7 @@ func cleanupIP(t *testing.T, db *database.DB, ip string) {
 	t.Helper()
 	t.Cleanup(func() {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM otp_requests WHERE request_ip = $1`, ip)
-		_, _ = db.ExecContext(context.Background(), `DELETE FROM sender_rate_blocks WHERE sender_identifier = $1`, "ip:"+ip)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM auth_rate_blocks WHERE sender_identifier = $1`, "ip:"+ip)
 	})
 }
 
@@ -67,18 +67,18 @@ func TestIntegrationOTPAttemptLimit(t *testing.T) {
 
 	phone := uniquePhone()
 	cleanupPhone(t, db, phone)
+	service := newTestService(db)
 
 	var requestID string
 	err := db.QueryRowContext(ctx,
 		`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, expires_at)
 		 VALUES ($1, $1, $2, 'app_login', NOW() + INTERVAL '5 minutes')
 		 RETURNING id::text`,
-		phone, HashOTP("123456")).Scan(&requestID)
+		phone, service.hashOTP("123456")).Scan(&requestID)
 	if err != nil {
 		t.Fatalf("seed otp request: %v", err)
 	}
 
-	service := newTestService(db)
 	for attempt := 1; attempt <= maxOTPAttempts; attempt++ {
 		rec := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"phone_number":%q,"otp":"000000"}`, phone)
@@ -121,7 +121,7 @@ func TestIntegrationOTPRequestCooldownIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := service.reserveOTP(ctx, phone, ip, HashOTP("123456"))
+			_, err := service.reserveOTP(ctx, phone, ip, service.hashOTP("123456"))
 			results <- err
 		}()
 	}
@@ -155,18 +155,18 @@ func TestIntegrationOTPRequestBlocksAfterThreshold(t *testing.T) {
 	ip := uniqueIP()
 	cleanupPhone(t, db, phone)
 	cleanupIP(t, db, ip)
+	service := newTestService(db)
 
 	for i := 0; i < blockThreshold; i++ {
 		if _, err := db.ExecContext(ctx,
 			`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, request_ip, expires_at, created_at)
 			 VALUES ($1, $1, $2, 'app_login', $3, NOW() + INTERVAL '5 minutes', NOW() - INTERVAL '2 minutes')`,
-			phone, HashOTP("123456"), ip); err != nil {
+			phone, service.hashOTP("123456"), ip); err != nil {
 			t.Fatalf("seed otp request %d: %v", i, err)
 		}
 	}
 
-	service := newTestService(db)
-	_, err := service.reserveOTP(ctx, phone, ip, HashOTP("654321"))
+	_, err := service.reserveOTP(ctx, phone, ip, service.hashOTP("654321"))
 	var limit *rateLimitError
 	if !errors.As(err, &limit) || limit.Code != "SENDER_BLOCKED" {
 		t.Fatalf("reserveOTP error = %v, want SENDER_BLOCKED", err)
@@ -174,7 +174,7 @@ func TestIntegrationOTPRequestBlocksAfterThreshold(t *testing.T) {
 
 	var blocked bool
 	if err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM sender_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW())`,
+		`SELECT EXISTS (SELECT 1 FROM auth_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW())`,
 		phone).Scan(&blocked); err != nil {
 		t.Fatalf("read sender block: %v", err)
 	}
@@ -192,6 +192,7 @@ func TestIntegrationOTPRequestBlocksIPAfterThreshold(t *testing.T) {
 	targetPhone := uniquePhone()
 	cleanupIP(t, db, ip)
 	cleanupPhone(t, db, targetPhone)
+	service := newTestService(db)
 
 	// Five requests from five different phone numbers on the same IP.
 	for i := 0; i < blockThreshold; i++ {
@@ -199,13 +200,12 @@ func TestIntegrationOTPRequestBlocksIPAfterThreshold(t *testing.T) {
 		if _, err := db.ExecContext(ctx,
 			`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, request_ip, expires_at, created_at)
 			 VALUES ($1, $1, $2, 'app_login', $3, NOW() + INTERVAL '5 minutes', NOW() - INTERVAL '2 minutes')`,
-			rotatedPhone, HashOTP("123456"), ip); err != nil {
+			rotatedPhone, service.hashOTP("123456"), ip); err != nil {
 			t.Fatalf("seed otp request %d: %v", i, err)
 		}
 	}
 
-	service := newTestService(db)
-	_, err := service.reserveOTP(ctx, targetPhone, ip, HashOTP("654321"))
+	_, err := service.reserveOTP(ctx, targetPhone, ip, service.hashOTP("654321"))
 	var limit *rateLimitError
 	if !errors.As(err, &limit) || limit.Code != "IP_BLOCKED" {
 		t.Fatalf("reserveOTP error = %v, want IP_BLOCKED", err)
@@ -213,7 +213,7 @@ func TestIntegrationOTPRequestBlocksIPAfterThreshold(t *testing.T) {
 
 	var blocked bool
 	if err := db.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM sender_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW())`,
+		`SELECT EXISTS (SELECT 1 FROM auth_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW())`,
 		"ip:"+ip).Scan(&blocked); err != nil {
 		t.Fatalf("read IP block: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestIntegrationOTPRequestBlocksIPAfterThreshold(t *testing.T) {
 
 	otherIP := uniqueIP()
 	cleanupIP(t, db, otherIP)
-	if _, err := service.reserveOTP(ctx, targetPhone, otherIP, HashOTP("654321")); err != nil {
+	if _, err := service.reserveOTP(ctx, targetPhone, otherIP, service.hashOTP("654321")); err != nil {
 		t.Fatalf("different IP was blocked: %v", err)
 	}
 }

@@ -142,11 +142,13 @@ type Service struct {
 	sms               SMSDispatcher
 	audit             *database.AuditLogger
 	trustProxyHeaders bool
+	otpPepper         []byte
+	trustedProxies    []*net.IPNet
 }
 
 // NewService builds the auth service.
-func NewService(db *sql.DB, tokens *TokenManager, sms SMSDispatcher, audit *database.AuditLogger, trustProxyHeaders bool) *Service {
-	return &Service{db: db, tokens: tokens, sms: sms, audit: audit, trustProxyHeaders: trustProxyHeaders}
+func NewService(db *sql.DB, tokens *TokenManager, sms SMSDispatcher, audit *database.AuditLogger, trustProxyHeaders bool, trustedProxies []*net.IPNet, otpPepper []byte) *Service {
+	return &Service{db: db, tokens: tokens, sms: sms, audit: audit, trustProxyHeaders: trustProxyHeaders, otpPepper: otpPepper, trustedProxies: trustedProxies}
 }
 
 // rateLimitError describes a request that was refused by the OTP rate limiter.
@@ -197,7 +199,7 @@ func (s *Service) handleRequestOTP(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to generate an OTP.")
 		return
 	}
-	requestID, err := s.reserveOTP(ctx, phone, s.clientIP(r), HashOTP(otp))
+	requestID, err := s.reserveOTP(ctx, phone, s.clientIP(r), s.hashOTP(otp))
 	if err != nil {
 		var limit *rateLimitError
 		if errors.As(err, &limit) {
@@ -261,7 +263,7 @@ func (s *Service) handleVerifyOTP(w http.ResponseWriter, r *http.Request) {
 		middleware.RespondError(w, http.StatusUnauthorized, "INVALID_OTP", "The OTP is invalid or has expired.")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(HashOTP(otp))) != 1 {
+	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(s.hashOTP(otp))) != 1 {
 		attempts, err := s.recordFailedAttempt(ctx, requestID)
 		if err != nil {
 			middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to verify the OTP.")
@@ -339,10 +341,11 @@ func GenerateOTP() (string, error) {
 	return fmt.Sprintf("%0*d", otpCodeLength, value.Int64()), nil
 }
 
-// HashOTP returns the SHA-256 hex digest stored in otp_requests.
-func HashOTP(otp string) string {
-	sum := sha256.Sum256([]byte(otp))
-	return hex.EncodeToString(sum[:])
+// HashOTP returns the SHA-256 hex digest stored in otp_requests, keyed by OTP pepper.
+func (s *Service) hashOTP(otp string) string {
+	h := hmac.New(sha256.New, s.otpPepper)
+	h.Write([]byte(otp))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // reserveOTP checks the per-phone and per-IP rate limits and stores a new OTP
@@ -474,7 +477,7 @@ func (s *Service) recordFailedAttempt(ctx context.Context, requestID string) (in
 func activeBlock(ctx context.Context, q sqlQuerier, sender string) (time.Duration, bool, error) {
 	var blockedUntil time.Time
 	err := q.QueryRowContext(ctx,
-		`SELECT blocked_until FROM sender_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW()`,
+		`SELECT blocked_until FROM auth_rate_blocks WHERE sender_identifier = $1 AND blocked_until > NOW()`,
 		sender).Scan(&blockedUntil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
@@ -505,7 +508,7 @@ func recentRequestCountByIP(ctx context.Context, q sqlQuerier, requestIP string)
 
 func blockSender(ctx context.Context, q sqlQuerier, sender string) error {
 	_, err := q.ExecContext(ctx,
-		`INSERT INTO sender_rate_blocks (sender_identifier, blocked_until, reason)
+		`INSERT INTO auth_rate_blocks (sender_identifier, blocked_until, reason)
 		 VALUES ($1, NOW() + INTERVAL '24 hours', 'otp_request_threshold')
 		 ON CONFLICT (sender_identifier) DO UPDATE
 		   SET blocked_until = EXCLUDED.blocked_until,
@@ -618,19 +621,38 @@ func (s *Service) badgesForMembership(ctx context.Context, schoolID, membershipI
 }
 
 func (s *Service) clientIP(r *http.Request) string {
-	if s.trustProxyHeaders {
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			first, _, _ := strings.Cut(forwarded, ",")
-			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
-				return ip.String()
-			}
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = r.RemoteAddr
+	}
+	if !s.trustProxyHeaders || len(s.trustedProxies) == 0 || !s.isTrustedProxy(remoteHost) {
+		return remoteHost
+	}
+	// X-Forwarded-For is only trusted when the direct peer is a configured
+	// trusted proxy; the leftmost hop is then the client. Malformed values
+	// fall back to the peer address.
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		first, _, _ := strings.Cut(forwarded, ",")
+		if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
+			return ip.String()
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+	return remoteHost
+}
+
+// isTrustedProxy reports whether the direct TCP peer is a configured trusted
+// proxy, so X-Forwarded-For can only be honoured from a known hop.
+func (s *Service) isTrustedProxy(peer string) bool {
+	ip := net.ParseIP(peer)
+	if ip == nil {
+		return false
 	}
-	return r.RemoteAddr
+	for _, cidr := range s.trustedProxies {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 var _ middleware.TokenVerifier = (*TokenManager)(nil)

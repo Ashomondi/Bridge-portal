@@ -26,6 +26,8 @@ well and stress free. See `ikonex.md` section 3.
 - [M] Notifications: in-app [M] (Release 1 event notifications are in-app
   only); SMS [M] for OTP and security messages in Release 1, SMS alerts in
   Release 2; WhatsApp [M] for the parent assistant, moved to Release 1 (+)
+  (SMS transport accepts only `app_login`, `phone_change`,
+  `phone_change_notice`, plus reserved `whatsapp_session` key for Release 3)
 - [M] Audit trail of sensitive actions (+)
 - [S] English (R1) and Swahili (R2) (+)
 - [S] Excel import for students, staff, and fee data (+) — not used for the
@@ -90,9 +92,9 @@ well and stress free. See `ikonex.md` section 3.
   waits for bursar acceptance, a pledge that picks a predefined scheme is
   accepted automatically.
 - [S] Sports and activities in the graph (scoring method still to be decided)
-- [S] Absence and sickbay SMS alerts (R2; in Release 1 absences appear as
-  in-app notifications; sickbay alerts state only that a visit happened,
-  never clinical detail) (+)
+- [S] Absence and sickbay SMS alerts — **Release 2** (Release 1 absence
+  notifications are in-app only per `C58`; nurse/sickbay module is Release 2,
+  and sickbay alerts state only that a visit happened, never clinical detail) (+)
 - [C] Notification preferences and weekly digest (+)
 - [C] Visiting day and parent-teacher meeting booking (+)
 - [C] Digital permission slips, and exeat requests for boarders (+)
@@ -161,8 +163,23 @@ well and stress free. See `ikonex.md` section 3.
   applied by the team with a note and a parent notification, and direct
   Paybill payments with a valid admission number are matched automatically;
   unmatched payments are resolved by the team
-- [M] Fee structure per school and grade, reviewed yearly
-- [M] Per-student fee ledger with arrears carried forward
+- [M] Fee structure per school and grade, reviewed yearly: in Release 1, fee
+  structure loading (`POST /api/v1/billing/fee-structures`) and active-term
+  charge triggering (`POST /api/v1/billing/fee-structures/charge-current`)
+  require the `billing.fee_structures.manage` badge permission (held by
+  authorized bursar or school-assigned platform/admin staff); Release 1 supports
+  only `boarding_status = 'all'` (O13)
+- [M] Per-student fee ledger with arrears carried forward: read-only bursar
+  visibility (`GET /api/v1/students/{id}/fee-balance` and
+  `GET /api/v1/students/{id}/ledger`) requires `billing.ledgers.view` (least
+  privilege; separate from structure loading and payment mutation). Per-term
+  balances are preserved, unallocated payments allocate oldest-due-first (or to
+  an explicitly targeted term), and overpayments carry forward via paired
+  cross-term credit transfers
+- [M] Guardian financial visibility (resolved): only guardians linked in
+  `student_guardians` with `is_fee_payer = TRUE` (the designated fee payer(s))
+  can view student fee balances/ledgers and receive fee-change notifications;
+  guardians with `is_fee_payer = FALSE` receive `403 FORBIDDEN`
 - [AI] M-Pesa reconciliation: proposes the likely student for payments with
   wrong/missing admission numbers; bursar confirms with one click
 - [M] Payments to suppliers/bills with signatory approval workflow
@@ -193,6 +210,7 @@ details still to be defined
 
 ## Release phases
 
+<<<<<<< HEAD
 1. **Release 1 (a test with synthetic data; passes when onboarding works,
    parents can log in, and badges work well):** foundation, setup wizard,
    onboarding (staff and parent QR, in-person verification), dean's timetable,
@@ -202,6 +220,9 @@ details still to be defined
    charging and STK push with team-loaded fee structures, **WhatsApp and
    in-app parent assistant** (read-only) and chat-initiated payment, AI report
    comment drafting. English only; in-app event notifications only.
+   (Release 1 SMS transport permits only four transactional purposes:
+   `app_login`, `phone_change`, `phone_change_notice`, plus reserved
+   `whatsapp_session` key for Release 3.)
 2. **Release 2:** nurse, librarian, leave management, blogs and clubs,
    syllabus coverage (including AI mapping), biometric attendance, duty
    badge, bursar role with payables and signatories, AI M-Pesa reconciliation,
@@ -212,6 +233,40 @@ details still to be defined
 3. **Release 3:** store, caterer, exeat and permission slips, dashboards,
    USSD.
 
+## Notification channel scope (C58 reconciliation)
+
+**C58 (Release 1 event-notification rule):** All Release 1 event notifications
+(attendance absence, results release, results re-release, timetable updates,
+calendar updates, and fee-change notices) are delivered **in-app only**
+(`in_app_notifications`).
+
+1. **Permitted Release 1 SMS purposes:** The Release 1 SMS transport
+   (`internal/notifications`) permits only four transactional purposes:
+   - `app_login` — phone-number login OTP
+   - `whatsapp_session` — Release 3 WhatsApp session OTP purpose key (reserved in
+     the transport enum; WhatsApp delivery itself is excluded from Release 1)
+   - `phone_change` — guardian 2FA OTP sent to the new phone number
+   - `phone_change_notice` — security alert sent to the old phone number on
+     registered-number change
+2. **Prohibited event-related SMS in Release 1:** Event notifications —
+   specifically `absence`, `sickbay`, results release/amendment, timetable,
+   calendar, and fee/payment reminders — are prohibited and rejected by the
+   Release 1 SMS transport (`ErrInvalidSMS`).
+3. **Absence and sickbay notification status:**
+   - **Absence notifications:** In Release 1, daily roll-call absences notify
+     guardians **in-app only** (`academics.attendance`). Absence **SMS** alerts
+     (`[S]`) are deferred to **Release 2**.
+   - **Sickbay notifications:** The **Nurse** module is **Release 2**; when
+     implemented, class-teacher notifications are in-app flags without clinical
+     detail (`[M]`), and parent sickbay SMS alerts (`[S]`) are **Release 2**
+     (subject to Release 2 consent and SMS-cost policy decisions).
+4. **Why WhatsApp provider integration is excluded from Release 1:** Per the
+   Release phases above and the WhatsApp Release Scope ADR in `DECISIONS.md`,
+   WhatsApp Business Cloud API webhook routing, bot credentials, and outbound
+   delivery belong to **Release 3** (alongside USSD and ODPC cross-border
+   review under `SECURITY.md`). Release 1 uses in-app chat while keeping
+   `school_whatsapp_bots` and `chat_sessions` schema-compatible for Release 3.
+
 ## Open decisions
 
 - Hosting location: Kenya only vs regional Africa, and where the AI model
@@ -219,6 +274,7 @@ details still to be defined
 - Who pays for WhatsApp and SMS messages
 - Sports/activities scoring: patron-entered scores vs. participation records
   only
+<<<<<<< HEAD
 - Fee structure variants (boarder/day, optional items)
 - What happens to a leftover credit when a student leaves
 - How a shared parent QR links each parent to the right child
@@ -230,3 +286,9 @@ details still to be defined
 Settled since the last version: guardian fee visibility (all linked guardians
 see fees, may be revisited); legacy 8-4-4 support (out of scope). Both are
 recorded in `DECISIONS.md`.
+=======
+- Legacy 8-4-4 (Form 3/4) support: in or out of scope
+- Store/caterer module: not yet designed
+- Boarding-variant fee structures (`O13` — `boarder` / `day` classification and
+  mid-term dormitory changes): deferred past Release 1 (`all` only in R1)
+>>>>>>> origin/dev

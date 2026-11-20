@@ -1,4 +1,4 @@
-# Ikonex Academy
+# Bridge Portal
 
 A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) portal for Kenyan secondary schools.
 
@@ -66,7 +66,8 @@ A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) po
 │   │   ├── nurse/            # Nurse consultations (clinical privacy protected)
 │   │   └── onboarding/       # Staff invites via QR, student admission
 │   ├── Dockerfile
-│   └── go.mod
+│   ├── go.mod
+│   └── go.sum
 ├── ai_service/               # Python / FastAPI AI service (zero direct DB access)
 │   ├── app/
 │   │   ├── api/              # AI feature routes
@@ -104,7 +105,11 @@ A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) po
 │   └── tailwind.config.ts
 ├── migrations/               # PostgreSQL migrations with Row-Level Security (RLS)
 │   ├── 000001_init_schema.up.sql
-│   └── 000001_init_schema.down.sql
+│   ├── 000001_init_schema.down.sql
+│   ├── 000003_r1_academics.up.sql
+│   ├── 000003_r1_academics.down.sql
+│   ├── 000004_r1_billing_whatsapp_notifications.up.sql
+│   └── 000004_r1_billing_whatsapp_notifications.down.sql
 ├── docker-compose.yml        # Multi-service local development orchestration
 ├── Makefile                  # Developer workflow commands
 ├── .env.example              # Master configuration template
@@ -126,9 +131,77 @@ A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) po
 
 ---
 
-## Release status (2026-10-29)
+## Backend build and tests
 
-- **No code exists yet.** The repository holds documentation only. Directory entries above describe the *planned* layout, not what is built.
-- **Release 1** is a test of the idea, built and tested with synthetic data only, and includes WhatsApp. It passes when onboarding works, parents can log in, and badges work well. See `ikonex.md` section 3.
-- Modules for nurse, librarian, clubs, bursar, and leave arrive in Release 2. In Release 1 the Ikonex team loads each school's fee structure, and there is no bursar portal.
-- `backend/internal/` will also need a `whatsapp/` module (webhook, per-school bot routing, OTP chat sessions); it is not in the tree above yet.
+Requires **Go 1.22.2+** (`backend/go.mod`) and **PostgreSQL 16**
+(`postgres:16-alpine` in `docker-compose.yml` and `.github/workflows/backend.yml`).
+
+### Unit tests (no database required)
+
+```sh
+cd backend
+go mod download
+go mod verify
+go build ./...
+go vet ./...
+go test -count=1 -v ./internal/internalapi/contracts
+```
+
+### PostgreSQL 16 integration tests & complete validation suite
+
+Start an isolated PostgreSQL 16 container, configure `DEV05_TEST_DATABASE_URL`,
+and run the full backend validation suite (`CI=true` prevents DB tests from
+silently skipping):
+
+```sh
+docker compose up -d --wait postgres
+export DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'
+cd backend
+go mod verify
+go build ./...
+go vet ./...
+CI=true go test -count=1 -v ./...
+```
+
+Adjust the URL to your local PostgreSQL 16 credentials/port. Use a dedicated
+development/test server, never a shared or production database: the test harness
+needs superuser capabilities to create and drop disposable `dev05_*` databases
+and roles. Fixtures use synthetic data, apply migrations in order `000001` →
+`000003` → `000004`, and delete their databases/roles at cleanup. Tenant
+isolation tests run under a separate non-superuser, non-`BYPASSRLS` role so
+PostgreSQL RLS checks are meaningful.
+
+Without `DEV05_TEST_DATABASE_URL`, database tests explicitly skip locally; that
+is not full migration verification. When `CI` is nonempty, a missing URL fails
+the run. `.github/workflows/backend.yml` supplies PostgreSQL 16 and
+`DEV05_TEST_DATABASE_URL` and runs `go mod verify`, `go build ./...`, and
+`go test -count=1 -v ./...`. Regression tests cover legacy overpayment backfill
+(including mixed balances), boarding-variant rollback across all variant
+combinations, unique per-school STK `transaction_ref`, required
+`access_token_hash` and expiry on `VERIFIED` chat sessions, principal-bound
+tenant isolation, and schema up/down/up restoration.
+
+## Migration and implementation status
+
+Apply migrations in exact numeric sequence: **`000001` → `000002` → `000003` → `000004`**
+(`000001_init_schema` → `000002_r1_core_onboarding` →
+`000003_r1_academics` → `000004_r1_billing_whatsapp_notifications`).
+Migration `000004` adds **12 tables**; their
+responsibilities, constraints, and state machines are documented in
+[ARCHITECTURE.md](Docs/ARCHITECTURE.md). Use a PostgreSQL migration runner; the
+Makefile's advertised `migrate-up` target does not yet implement one.
+
+Before downgrading `000004`, export its new tables and boarding variant
+templates. The old schema supports only one structure per
+school/year/grade/term: rollback keeps `all`, otherwise `day`, otherwise
+`boarder`, with its original total/items, and deletes the alternatives.
+Available credit returns to a signed balance
+(`current_balance - credit_balance`). Reapplying the migration cannot recover
+deleted variant definitions. See [the ADRs](Docs/DECISIONS.md).
+
+The consumer contracts define identity/tenant boundaries and response helpers;
+auth middleware, permission enforcement, billing handlers and durable audit
+logging still require application integration. `AuditLogger` alone does not
+address AC-29. In-app chat is Release 1 scope; WhatsApp routing schema prepares
+for Release 3 delivery, as specified in the release ADR.
+>>>>>>> origin/dev

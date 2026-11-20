@@ -59,6 +59,12 @@ internal API, with the same permission checks applied.
   A `memberships` table links a user to a school under a role. This is what
   lets a parent with children at two schools, or a teacher who works at two
   schools, log in once.
+- **Bind before querying:** `RequireIdentity` receives a verified active
+  membership from trusted middleware. `TenantTxFunc.WithTenantTx` accepts that
+  `Principal` and derives the school from `Principal.SchoolID`; it does not
+  accept a second, request-selected school. The pool adapter must set the
+  tenant locally within the transaction and use a non-superuser, non-BYPASSRLS
+  application role. Parent/permission checks remain mandatory within a school.
 
 ## Roles vs. badges
 
@@ -73,7 +79,7 @@ internal API, with the same permission checks applied.
 - **Never hardcode "class teacher" as a column or role.** It's a badge scoped
   to a class, so there is one source of truth for who can see what.
 
-## Core entities (see `portal_core_schema.sql` for the full draft)
+## Core entities (see `migrations/` for the executable schema)
 
 - `schools`, `users`, `memberships`
 - `permissions`, `badges`, `badge_permissions`, `membership_badges`
@@ -87,6 +93,200 @@ internal API, with the same permission checks applied.
 Performance history (the parent-facing graph from the day a child joined) is
 built from one `enrolments` row per student per academic year — there is no
 separate "history" table to keep in sync.
+
+## Release 1 billing and chat foundation (migration 000004)
+
+Migration 000004 adds **12 tables**, all with `school_id` tenant ownership plus
+enabled and forced tenant RLS (`school_id = current_school_id()`). It also adds
+composite `(school_id, id)` unique keys on `academic_years`, `terms`, `students`,
+and `payments` (plus `(school_id, academic_year_id, id)` on `terms`), adds
+`boarding_status` variants (`all`, `boarder`, `day`) to `fee_structures`, and
+adds `credit_balance`, `credit_applied`, `credit_transferred`, and `due_date`
+to `fee_ledgers`. Schema availability does not mean the related handlers,
+workers, permission checks or audit sinks are implemented.
+
+1. **`school_mpesa_configs`**
+   - **Purpose:** Stores per-school Safaricom Daraja Paybill/Till shortcode, environment (`sandbox` / `production`), encrypted passkey, and test-payment verification state.
+   - **Ownership & tenant relationship:** Owned by `schools` (`school_id` is both `PRIMARY KEY` and `FOREIGN KEY REFERENCES schools(id) ON DELETE CASCADE`); isolated via forced RLS.
+   - **Important constraints:** `shortcode` is `UNIQUE NOT NULL`; `environment IN ('sandbox', 'production')` (default `'sandbox'`); `test_payment_verified BOOLEAN NOT NULL DEFAULT FALSE`.
+   - **Relationships:** 1:1 with `schools`.
+   - **Domain workflow role:** Supplies tenant payment shortcode/credentials for STK push initiation and Daraja callback resolution.
+
+2. **`fee_periods`**
+   - **Purpose:** Defines named billing periods and due dates per school, academic year, and optional term.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `btrim(period_type) <> ''` (default `'term'`), `btrim(name) <> ''`, `CHECK (period_type <> 'term' OR term_id IS NOT NULL)`, `UNIQUE (school_id, id)`, `UNIQUE (school_id, academic_year_id, term_id)`.
+   - **Relationships:** Composite tenant FKs `(school_id, academic_year_id) -> academic_years(school_id, id)` and `(school_id, academic_year_id, term_id) -> terms(school_id, academic_year_id, id)`. Referenced by `fee_charges` and `fee_change_notes`.
+   - **Domain workflow role:** Anchors billing due dates and groups student assessments (`fee_charges`) and revision notes (`fee_change_notes`).
+
+3. **`fee_charges`**
+   - **Purpose:** Records the assessed fee amount and chosen `fee_structure_id` for a student within a `fee_period`.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `amount >= 0`, `UNIQUE (school_id, student_id, fee_period_id)`.
+   - **Relationships:** Composite tenant FKs to `students(school_id, id)`, `fee_periods(school_id, id)`, and `fee_structures(school_id, id)`. Indexed on `(school_id, fee_period_id)` and `(school_id, fee_structure_id)`.
+   - **Domain workflow role:** Authoritative assessment record driving term charges posted to `ledger_entries` and projected onto `fee_ledgers`.
+
+4. **`fee_change_notes`**
+   - **Purpose:** Records authorized fee amount deltas or due-date revisions, reason text, actor, and affected student count.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `change_type IN ('amount', 'due_date')`, `btrim(note) <> ''`, `affected_students_count >= 0`, `UNIQUE (school_id, id)`.
+   - **Relationships:** `created_by REFERENCES users(id)`; composite tenant FKs `(school_id, term_id) -> terms(school_id, id)` and `(school_id, fee_period_id) -> fee_periods(school_id, id)`. Parent of `fee_change_note_students`.
+   - **Domain workflow role:** Captures why and by whom fee charges or due dates changed after initial assessment.
+
+5. **`fee_change_note_students`**
+   - **Purpose:** Preserves the exact subset of students affected by each `fee_change_notes` entry.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `PRIMARY KEY (school_id, note_id, student_id)`.
+   - **Relationships:** Composite tenant FKs `(school_id, note_id) -> fee_change_notes(school_id, id) ON DELETE CASCADE` and `(school_id, student_id) -> students(school_id, id)`. Indexed on `(school_id, student_id)`.
+   - **Domain workflow role:** Prevents losing student-level scope when a fee change note only applies to specific students in a period.
+
+6. **`ledger_entries`**
+   - **Purpose:** Append-style idempotent posting log for post-migration ledger operations (`charge`, `payment`, `credit_applied`, `adjustment`).
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `entry_type IN ('charge', 'payment', 'credit_applied', 'adjustment')`, `UNIQUE (school_id, student_id, term_id, entry_type, reference)`.
+   - **Relationships:** Composite tenant FKs `(school_id, student_id) -> students(school_id, id)` and `(school_id, term_id) -> terms(school_id, id)`. Indexed on `(school_id, student_id, created_at, id)`.
+   - **Domain workflow role:** Makes billing postings idempotent via `(school_id, student_id, term_id, entry_type, reference)` alongside materialized `fee_ledgers` updates.
+
+7. **`unmatched_payments`**
+   - **Purpose:** Queue of settled payments whose student could not be automatically matched, together with human resolution tracking.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `amount > 0`, `status IN ('unmatched', 'resolved')`, `UNIQUE (school_id, payment_id)`, `UNIQUE (school_id, transaction_ref)`, and a `CHECK` enforcing that `unmatched` rows have NULL `resolved_at`, `resolved_student_id`, and `resolved_by` while `resolved` rows require all three non-NULL. Partial queue index on `(school_id, created_at, id) WHERE status = 'unmatched'`.
+   - **Relationships:** Composite tenant FKs `(school_id, payment_id) -> payments(school_id, id) ON DELETE CASCADE` and `(school_id, resolved_student_id) -> students(school_id, id)`; `resolved_by REFERENCES users(id)`.
+   - **Domain workflow role:** Feeds AI reconciliation suggestions and requires bursar confirmation before ledger posting.
+
+8. **`mpesa_stk_requests`**
+   - **Purpose:** Tracks durable M-Pesa STK Push payment attempts and settlement/timeout/uncertain states separately from settled `payments`.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `amount > 0`, `checkout_request_id VARCHAR(100) UNIQUE`, `UNIQUE (school_id, transaction_ref)` (per-school unique receipt reference when non-null while allowing multiple `NULL` attempts), `status IN ('initiating', 'pending', 'succeeded', 'failed', 'timeout', 'uncertain')`.
+   - **Relationships:** Composite tenant FK `(school_id, student_id) -> students(school_id, id)`; `guardian_user_id REFERENCES users(id)`. Indexed on `(school_id, status, created_at)`.
+   - **Domain workflow role:** Supports idempotent STK initiation, callback/polling reconciliation, and duplicate receipt prevention per school.
+
+9. **`school_whatsapp_bots`**
+   - **Purpose:** Stores school-to-WhatsApp Business Cloud API phone number mappings (`phone_number_id`, `display_phone_number`) for future Release 3 activation.
+   - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+   - **Important constraints:** `phone_number_id VARCHAR(100) UNIQUE NOT NULL`, `display_phone_number VARCHAR(30) UNIQUE NOT NULL`, `is_active BOOLEAN NOT NULL DEFAULT TRUE`.
+   - **Relationships:** References `schools(id)`. Indexed on `(school_id)`.
+   - **Domain workflow role:** Reserved schema for Release 3 WhatsApp bot routing; unused in Release 1 (`is_active` default is not a Release 1 activation flag).
+
+10. **`chat_sessions`**
+    - **Purpose:** Tracks parent chat verification state, OTP challenge state/attempts, delegated access-token hashes, expiry, and lookup/payment counters.
+    - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+    - **Important constraints:** `channel IN ('whatsapp', 'in_app')`, `state IN ('AWAITING_ADMISSION_NUMBER', 'AWAITING_GUARDIAN_SELECTION', 'AWAITING_OTP', 'VERIFIED')`, `otp_attempts >= 0`, `lookup_count >= 0`, `payment_init_count >= 0`, `UNIQUE (school_id, id)`, partial unique index `chat_sessions_sender_idx ON (school_id, sender_wa_number) WHERE channel = 'whatsapp'`, and `CHECK (state <> 'VERIFIED' OR (guardian_user_id IS NOT NULL AND access_token_hash IS NOT NULL AND btrim(access_token_hash) <> '' AND verified_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at > verified_at))`.
+    - **Relationships:** Composite tenant FK `(school_id, student_id) -> students(school_id, id)`; `guardian_user_id REFERENCES users(id)`. Referenced by `ai_action_logs(school_id, session_id)`.
+    - **Domain workflow role:** Enforces step-up verification before delegated parent assistant queries or STK payment initiation.
+
+11. **`in_app_notifications`**
+    - **Purpose:** Stores per-recipient in-app inbox notifications and read status/timestamps.
+    - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+    - **Important constraints:** `btrim(category) <> ''`, `btrim(title) <> ''`, `btrim(body) <> ''`, `jsonb_typeof(metadata) = 'object'`, `CHECK (is_read = (read_at IS NOT NULL))`.
+    - **Relationships:** `recipient_user_id REFERENCES users(id) ON DELETE CASCADE`. Indexed on `(school_id, recipient_user_id, created_at DESC, id)`.
+    - **Domain workflow role:** Release 1 in-app notification inbox delivery and read-state tracking.
+
+12. **`ai_action_logs`**
+    - **Purpose:** Records redacted AI assistant feature invocations, intent, endpoint templates read, and action outcomes.
+    - **Ownership & tenant relationship:** Tenant-scoped via `school_id REFERENCES schools(id) ON DELETE CASCADE`; isolated via forced RLS.
+    - **Important constraints:** `channel IN ('whatsapp', 'in_app')`, `jsonb_typeof(endpoints_read) = 'array'`, `jsonb_typeof(metadata) = 'object'`.
+    - **Relationships:** `user_id REFERENCES users(id)`; composite tenant FK `(school_id, session_id) -> chat_sessions(school_id, id)` (non-cascading). Indexed on `(school_id, session_id, created_at)`.
+    - **Domain workflow role:** Provides redacted operational AI action logging (`SECURITY.md`), separate from `audit_log` / `AuditLogger` financial audit requirements.
+
+### Fee ledgers: sources and balance transitions
+
+`fee_structures` and their items are pricing templates. `fee_charges` records
+the amount assessed to a student; subsequent changes need a `fee_change_notes`
+record and exact membership in `fee_change_note_students`. `payments` is the
+settled receipt source. An STK attempt is never itself a receipt.
+
+`ledger_entries` is the posting history for new billing operations;
+`fee_ledgers` is the materialized per-student/year/term balance used for reads.
+The existing ledger is the opening source for legacy history: migration 000004
+does not synthesize entries for old transactions. Rebuilding balances must
+start from a captured legacy opening snapshot plus subsequent postings, not
+from the new entries alone. Use the unique entry reference to make retries
+idempotent; write source records, postings, balance updates and audit events in
+one tenant transaction while locking the affected ledger rows.
+
+`current_balance` is outstanding debt and `credit_balance` is available prepaid
+credit, both nonnegative. Charging consumes available credit first, then raises
+debt; payment reduces debt first, then adds excess to available credit.
+`credit_applied` accumulates credit consumed in that ledger and
+`credit_transferred` accumulates credit moved out to another ledger. A transfer
+locks both ledgers and decreases source credit/increases destination credit
+atomically; it creates no new payment. Charge/adjustment postings use signed
+debt deltas, payment and credit-applied postings record positive applied amounts;
+transfer adjustments must have paired references and descriptions.
+
+There is no persisted ledger status enum. Derived states are owing
+(`current_balance > 0`), settled (both balances zero), and in-credit
+(`credit_balance > 0`); service operations should net debt against credit before
+commit. The database enforces nonnegativity, not the accounting workflow.
+Up migration converts negative legacy debt to credit. Down migration restores
+`current_balance - credit_balance` and removes the added credit counters.
+
+### STK requests
+
+`mpesa_stk_requests` is authoritative for attempt state:
+`initiating` → `pending` when Daraja accepts; `initiating` → `failed` for an
+explicit rejection, or `uncertain` if acceptance cannot be determined.
+`pending` → `succeeded` / `failed` on an authenticated provider result, or
+`timeout` after the polling deadline. `uncertain` / `timeout` may resolve to
+`pending`, `succeeded` or `failed` after provider reconciliation. A timeout is
+not proof that no money moved. `succeeded` and provider-confirmed `failed` are
+terminal; duplicate callbacks are no-ops. Contradictory evidence requires
+operator reconciliation, never blind replay.
+
+Only verified settlement creates a `payments` receipt and applies the ledger
+posting in the same idempotent transaction. Checkout identifiers are globally
+unique (`checkout_request_id UNIQUE`), and M-Pesa receipt references are unique
+per school (`UNIQUE (school_id, transaction_ref)` on `mpesa_stk_requests` while
+allowing multiple `NULL` attempts prior to settlement); retries create a new
+attempt only after checking the earlier one. The schema checks state names and
+identifier uniqueness; transition and callback authentication rules must be
+implemented in the billing service.
+
+### Unmatched payments
+
+`payments` owns receipt amount, reference, provider and settlement time.
+`unmatched_payments` stores a queue snapshot plus resolution state; it is not a
+second receipt and must never independently credit a ledger. State is
+`unmatched` → `resolved` only when a permitted bursar confirms the student.
+An AI suggestion leaves the queue unmatched (`payments.matched_status` may be
+`ai_suggested`). Resolution sets student, actor and timestamp, updates the
+payment to `matched`, and posts exactly once in the same locked transaction.
+`resolved` is terminal; corrections require an audited compensating operation.
+The database checks resolution fields but does not implement this workflow.
+
+### Chat sessions
+
+`chat_sessions` owns verification state, not the sender's claimed identity:
+`AWAITING_ADMISSION_NUMBER` → `AWAITING_GUARDIAN_SELECTION` when multiple
+guardians require selection, or directly to `AWAITING_OTP` for a single
+eligible guardian. Selection → `AWAITING_OTP`; a valid OTP → `VERIFIED`.
+Admission lookup alone never grants access. OTP failure increments attempts;
+expiry or attempt exhaustion clears the challenge and restarts verification.
+
+`VERIFIED` requires a guardian (`guardian_user_id`), non-null/non-blank
+`access_token_hash`, verification timestamp (`verified_at`), and a non-null
+expiry (`expires_at`) strictly after verification (`expires_at > verified_at`).
+At request time, also require `expires_at > now()` and a current guardian
+relationship. Expiry/revocation clears OTP/token hashes and returns to the
+admission state (`AWAITING_ADMISSION_NUMBER`, where `access_token_hash` may be
+NULL); expiry is enforced even before cleanup runs. No `EXPIRED` enum exists.
+`sender_wa_number` is routing data, never proof of guardianship. The constraint
+verifies field shape, not OTP possession or current authorization. Release 1
+uses in-app chat; WhatsApp routing tables prepare for Release 3 (see the ADR in
+`DECISIONS.md`).
+
+### Downgrade rule
+
+Before downgrading 000004, export its new tables and boarding variant
+definitions. The old uniqueness key cannot represent alternatives: for each
+school/year/grade/term retain `all`, otherwise `day`, otherwise `boarder`, with
+the retained row's ID, total and items. Other variants and their items are
+deleted; alternative fees are never summed. The fallback favors day pricing
+over boarding pricing to avoid adding boarding charges to the generic template.
+This is a lossy compatibility downgrade, not a historical restore. Reapplying
+000004 marks the retained template as `all`; restore exports to recover other
+variants. Rollback tests cover these choices and credit round trips.
 
 ## Curriculum model
 
@@ -149,3 +349,184 @@ re-litigate them here. Open questions that affect this document:
 - Payment execution: the system records approved payments; whether it will
   ever initiate transfers itself (beyond the parent-initiated M-Pesa STK push)
   is undecided.
+
+## Notifications engine (`backend/internal/notifications`)
+
+The notifications package provides the Release 1 synchronous transactional SMS
+transport and transaction-bound in-app notifications service. Application-level
+wiring (`cmd/server/main.go`, `internal/config`, `internal/jobs`,
+`cmd/worker/main.go`, auth/onboarding callers) remains pending.
+
+### SMS transport versus SMS queue
+
+- **Synchronous SMS transport (implemented):** `notifications.SMSDispatcher`
+  (`DispatchSMS(context.Context, SMSMessage) error`) validates phone numbers
+  and allowed purposes, then dispatches synchronously via either
+  `NewSandboxSMSDispatcher` (local redacted logging for username `sandbox`) or
+  the Africa's Talking HTTP adapter (`NewSMSDispatcher`).
+- **Redis/Asynq SMS queue (pending future integration):** Asynchronous job
+  scheduling, Redis persistence, backoff retries, and dead-letter handling
+  belong to `internal/jobs` and `cmd/worker` (currently placeholders). No
+  durable queue exists yet in this codebase.
+- **Retry & error classification boundary:** The transport surfaces structured
+  `*SMSDeliveryError{Code, Retryable}` values (e.g., HTTP `408`/`429`/`5xx`,
+  transport timeouts, and provider `500`–`502` recipient codes marked
+  `Retryable: true`; redirects, `4xx` rejections, recipient mismatch, and
+  malformed/oversized responses marked `Retryable: false`) so the future Asynq
+  worker can decide whether to retry without inspecting raw provider bodies.
+  Ambiguous network failures after a request is sent cannot guarantee
+  exactly-once SMS delivery.
+
+### Transactional-only SMS purposes (Release 1)
+
+Release 1 SMS transport is restricted to four explicit `SMSPurpose` values
+(`C58`):
+
+- `app_login` — app login OTP
+- `whatsapp_session` — Release 3 WhatsApp session OTP purpose key (reserved in
+  the transport enum; WhatsApp integration itself is deferred to Release 3)
+- `phone_change` — guardian 2FA phone-change OTP to the new number
+- `phone_change_notice` — security alert to the old number on phone change
+
+Event-based messages (`absence`, `sickbay`, results, timetable, calendar, fee
+alerts) are explicitly rejected by `SMSMessage` validation (`ErrInvalidSMS`).
+Release 1 event notifications use `in_app_notifications` instead.
+
+### Africa's Talking provider boundary
+
+- **HTTP client & timeouts:** `NewSMSDispatcher` copies any caller-supplied
+  `*http.Client` (never mutating a shared client) and enforces a default
+  15-second timeout when `Timeout <= 0`.
+- **Redirect protection:** Installs `CheckRedirect` returning
+  `http.ErrUseLastResponse` so HTTP redirects are rejected (`Retryable: false`)
+  and `apiKey` headers / form bodies are never forwarded to redirect targets.
+- **Credential & error redaction:** `SMSConfig` carries `Username`, `APIKey`,
+  and optional `SenderID` (`AFRICASTALKING_*` env vars; config wiring is still
+  pending). Returned errors (`ErrInvalidPhone`, `ErrInvalidSMS`,
+  `*SMSDeliveryError`) never include the phone number, message body, OTP,
+  `APIKey`, or raw provider response body. Response reads are capped at 64 KiB
+  and verify single-recipient normalized phone matching.
+
+### In-app notifications
+
+- **Ownership & tenant isolation:** Every row in `in_app_notifications` belongs
+  to `(school_id, recipient_user_id)` with PostgreSQL `ENABLE` and `FORCE ROW
+  LEVEL SECURITY` (`school_id = current_school_id()`). `List` and `MarkRead`
+  derive `school_id` exclusively from `contracts.Principal` via
+  `contracts.TenantDB.WithTenantTx` and filter by `recipient_user_id =
+  Principal.UserID`.
+- **Transaction-bound creation (`contracts.InAppNotifier`):** Business services
+  begin their tenant-scoped transaction, perform domain writes, and call
+  `CreateInAppNotification(ctx, tx, notification)` using `contracts.SQLTx`
+  (`contracts.PgxTx` for `pgx.Tx`, `contracts.StdSQLTx` for `*sql.Tx`) inside
+  that same transaction. `notifications.Service` verifies an active
+  `memberships` + `users` row for `(school_id, recipient_user_id)` and inserts
+  the notification without starting its own transaction or sending SMS. Any
+  failure propagates to the caller so the entire business transaction rolls back
+  atomically.
+- **Read receipt semantics & pagination:** `MarkRead` sets `is_read = true` and
+  `read_at = coalesce(read_at, now())` so repeat marks preserve the first read
+  timestamp; cross-user or cross-school IDs return `404 NOTIFICATION_NOT_FOUND`.
+  `List` uses `contracts.Pagination` (default `page=1`, `per_page=25`, max
+  `per_page=100`) ordered by `created_at DESC, id`.
+- **Consumer integration status:** `internal/academics` adopts
+  `contracts.InAppNotifier` directly and executes all in-app notifications
+  (attendance absence, results release, results re-release, timetable update,
+  calendar event update) inside `Store.WithTx` with error propagation.
+  `internal/billing`, `internal/auth`, `internal/onboarding`, `internal/jobs`,
+  and `cmd/server` route mounting remain pending wiring.
+
+## Release 1 billing core (`backend/internal/billing`)
+
+The billing package implements exact integer money arithmetic, fee structure
+validation and loading, idempotent term charging, per-term student ledgers,
+credit carry-forward, payment allocation, and atomic academic term-date sync.
+HTTP routes are defined in `billing.RegisterRoutes`, while `cmd/server` and
+scheduled `internal/jobs` triggers remain pending application composition.
+
+### Money representation (`billing.Money`)
+
+- All monetary quantities use `billing.Money` (`int64` KES minor units / cents)
+  bounded strictly to `[-999999999999, +999999999999]`, matching PostgreSQL
+  `NUMERIC(12,2)`. Floating-point arithmetic is prohibited.
+- `ParseMoney` and `UnmarshalJSON` accept integer or decimal strings/numbers
+  with at most 2 fractional digits and reject commas, whitespace, scientific
+  notation, `NaN`, `Infinity`, and precision beyond 2 decimal places.
+- `NumericValue` / `ScanNumeric` convert directly to/from `pgtype.Numeric` via
+  exact `math/big` scaling without floating-point intermediaries.
+
+### Fee structures, Release 1 variants, and term charging
+
+- **Release 1 variant policy (`all` only):** Although `000004` adds
+  `boarding_status IN ('all', 'boarder', 'day')` for future flexibility,
+  Release 1 rejects `'boarder'` and `'day'` with `422 UNSUPPORTED_BOARDING_VARIANT`
+  and charges exclusively `'all'` structures so charge selection never depends on
+  load order or unapproved boarder-reclassification rules.
+- **Validation & replay:** `LoadFeeStructureTx` validates school-scoped
+  `academic_years`, `terms` (matching year), and `grade_levels`, normalizes and
+  sorts items deterministically, upserts the generic term `fee_periods` row, and
+  returns `409 FEE_STRUCTURE_CONFLICT` if a differing structure already exists.
+  Whether newly inserted or identically replayed, if `academic_years.is_current`
+  or `terms.is_current` is true, it triggers idempotent `ChargeGradeForTerm`.
+- **Preloaded structures trigger:** `ChargeCurrentTermStructures`
+  (`POST /api/v1/billing/fee-structures/charge-current`) and
+  `ChargeCurrentTermStructuresTx` idempotently charge all `'all'` structures in
+  a school whose academic year or term has become `is_current = true`.
+- **Term-date synchronization (`academics.TermDateFeeSyncer`):**
+  `billing.Service.OnTermStartDateChanged` implements `academics.TermDateFeeSyncer`
+  and executes inside `academics.PutCalendar`'s active SQL transaction (via
+  `academics.SQLTxFromContext`), updating `fee_periods.due_date`, `fee_charges.due_date`,
+  and `fee_ledgers.due_date`, inserting `fee_change_notes` (`change_type = 'due_date'`)
+  plus `fee_change_note_students`, notifying active `is_fee_payer = TRUE` guardians
+  via `contracts.InAppNotifier`, and writing an `audit_log` entry atomically.
+
+### `fee_charges`, `ledger_entries`, and `fee_ledgers`
+
+- **`fee_charges`** is the authoritative student-term charge assessment record
+  enforced by `UNIQUE (school_id, student_id, fee_period_id)`.
+- **`ledger_entries`** is an immutable, append-only **single-sided financial
+  transaction ledger** (`charge`, `payment`, `credit_applied`, `adjustment`)
+  keyed idempotently by `UNIQUE (school_id, student_id, term_id, entry_type, reference)`.
+  It is not double-entry accounting (no chart of accounts or debit/credit legs).
+- **`fee_ledgers`** stores **materialized per-(school, student, year, term)
+  balances**. Prior terms' `current_balance` and `credit_balance` are preserved
+  (never zeroed into a later term). Student-wide aggregates in `GetStudentFeeBalance`
+  are summed across the student's per-term rows alongside the `Terms` breakdown.
+
+### Payment allocation and credit carry-forward
+
+- **Idempotency:** Payment posting locks the student and all `fee_ledgers` rows
+  (`FOR UPDATE`) and checks whether `(school_id, student_id, 'payment', reference)`
+  already exists in `ledger_entries` before allocating, ensuring replays never
+  re-apply amounts to newly charged terms.
+- **Explicit vs automatic allocation:**
+  - `RecordStudentPaymentForTermTx` allocates to the specified `targetTermID`
+    first; any excess over that term's `current_balance` settles other owing
+    terms oldest-due-first via paired transfers, leaving any remaining surplus
+    as `credit_balance` on `targetTermID`.
+  - `RecordStudentPaymentTx` / `RecordStudentPaymentWithActorTx` allocate
+    unallocated payments deterministically **oldest-due-first**
+    (`COALESCE(fl.due_date, t.start_date) ASC, ay.year ASC, t.term_number ASC, fl.id ASC`),
+    recording any overpayment surplus as `credit_balance` on the active/current term.
+- **Credit carry-forward:** When a new charge is applied on term `T`, same-term
+  `credit_balance` is consumed first, followed by deterministic transfers from
+  prior-term ledgers with `credit_balance > 0`: each transfer decrements source
+  `credit_balance`, increments source `credit_transferred`, records an
+  `adjustment` entry (`XFER:<chargeID>:<srcTermID>`) on the source term,
+  increments destination `credit_applied`, and records a `credit_applied` entry
+  (`CRD:<chargeID>:<srcTermID>`) on the destination term.
+
+### Authorization and mandatory audit
+
+- **Staff/bursar permissions:** Evaluated in PostgreSQL via active `memberships`,
+  active `users`, and active unexpired school-wide badges (`membership_badges` ->
+  `badges` -> `badge_permissions` -> `permissions`):
+  - `billing.fee_structures.manage` for `LoadFeeStructure` and `ChargeCurrentTermStructures`
+  - `billing.ledgers.view` for read-only staff/bursar balance and ledger reads
+    (least privilege: does not grant fee structure management or payment mutation).
+- **Guardian visibility:** `GetStudentFeeBalance` and `GetStudentLedger` allow
+  guardians only when `student_guardians.is_fee_payer = TRUE` (with active
+  membership/user in the same school). Cross-school IDs return `404 STUDENT_NOT_FOUND`.
+- **Mandatory audit:** Financial mutations require a non-nil `AuditLogger`
+  (`PostgresAuditLogger` writes `audit_log` inside the active transaction) and
+  fail closed with `500 AUDIT_LOGGER_REQUIRED` if missing.

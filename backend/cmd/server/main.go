@@ -45,7 +45,12 @@ func run(logger *log.Logger) error {
 	allowDevelopmentSMS := cfg.Environment == "development" || cfg.Environment == "test"
 	smsDispatcher := devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}
 
-	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit, cfg.TrustProxyHeaders)
+trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return fmt.Errorf("main: trusted proxy CIDRs: %w", err)
+	}
+
+	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit, cfg.TrustProxyHeaders, trustedProxies, []byte(cfg.OTPHMACSecret))
 	consentService := consent.NewService(db.DB, audit)
 	onboardingService := onboarding.NewService(db.DB, audit, smsDispatcher, nil, cfg.RetentionDays)
 	authMiddleware := middleware.NewAuthMiddleware(db.DB, tokens)
@@ -117,4 +122,18 @@ func maskPhone(phone string) string {
 		return "***"
 	}
 	return phone[:4] + strings.Repeat("*", len(phone)-7) + phone[len(phone)-3:]
+}
+
+// parseCIDRs parses a comma-separated CIDR list into IPNet slices, skipping
+// empty entries so a trailing comma does not produce a parse error.
+func parseCIDRs(raw []string) ([]*net.IPNet, error) {
+	ips := make([]*net.IPNet, 0, len(raw))
+	for _, entry := range raw {
+		_, cidr, err := net.ParseCIDR(strings.TrimSpace(entry))
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", entry, err)
+		}
+		ips = append(ips, cidr)
+	}
+	return ips, nil
 }

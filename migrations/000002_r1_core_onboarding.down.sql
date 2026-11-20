@@ -15,7 +15,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS chat_payment_paused_until;
 DROP TABLE IF EXISTS verification_records CASCADE;
 DROP TABLE IF EXISTS registration_submissions CASCADE;
 DROP TABLE IF EXISTS parent_qr_codes CASCADE;
-DROP TABLE IF EXISTS sender_rate_blocks CASCADE;
+DROP TABLE IF EXISTS auth_rate_blocks CASCADE;
 DROP TABLE IF EXISTS otp_requests CASCADE;
 DROP TABLE IF EXISTS school_profile CASCADE;
 

@@ -65,7 +65,7 @@ CREATE INDEX idx_otp_requests_ip_created
 -- A sender (phone or WhatsApp number) exceeding the request threshold is
 -- blocked for 24 hours. Shared by app login and chat OTP flows.
 -- ------------------------------------------------------------------------------
-CREATE TABLE sender_rate_blocks (
+CREATE TABLE auth_rate_blocks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     sender_identifier VARCHAR(50) UNIQUE NOT NULL,
     blocked_until TIMESTAMPTZ NOT NULL,
