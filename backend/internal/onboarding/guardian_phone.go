@@ -89,7 +89,7 @@ func (s *Service) handlePhoneChangeRequestOTP(w http.ResponseWriter, r *http.Req
 		`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, expires_at)
 		 VALUES ($1, $1, $2, $3, NOW() + INTERVAL '5 minutes')
 		 RETURNING id::text`,
-		req.NewPhoneNumber, auth.HashOTP(otp), phoneChangePurpose).Scan(&requestID); err != nil {
+		req.NewPhoneNumber, s.auth.HashOTP(otp), phoneChangePurpose).Scan(&requestID); err != nil {
 		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to store the OTP.")
 		return
 	}
@@ -138,7 +138,7 @@ func (s *Service) handlePhoneChangeConfirm(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return errOTPInvalid
 		}
-		if subtle.ConstantTimeCompare([]byte(storedHash), []byte(auth.HashOTP(req.OTP))) != 1 {
+		if subtle.ConstantTimeCompare([]byte(storedHash), []byte(s.auth.HashOTP(req.OTP))) != 1 {
 			return errOTPInvalid
 		}
 		result, err := tx.ExecContext(ctx,

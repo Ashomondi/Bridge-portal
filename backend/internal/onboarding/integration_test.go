@@ -31,7 +31,7 @@ func TestProvisionSchoolAndCompleteWizard(t *testing.T) {
 	}
 	defer db.Close()
 
-	service := NewService(db.DB, database.NewAuditLogger(db.DB), nil, nil, 7)
+	service := NewService(db.DB, database.NewAuditLogger(db.DB), nil, nil, 7, nil)
 	suffix := time.Now().UnixNano()
 
 	createBody := validCreateSchoolRequest()

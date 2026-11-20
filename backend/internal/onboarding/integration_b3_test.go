@@ -32,7 +32,7 @@ func TestParentRegistrationVerification(t *testing.T) {
 	}
 	defer db.Close()
 
-	service := NewService(db.DB, database.NewAuditLogger(db.DB), nil, nil, 7)
+	service := NewService(db.DB, database.NewAuditLogger(db.DB), nil, nil, 7, nil)
 	schoolID, principalID, membershipID, classID := provisionSchoolForB3(t, db, service)
 
 	suffix := time.Now().UnixNano()
@@ -158,7 +158,7 @@ func TestParentRegistrationVerification(t *testing.T) {
 	}
 	activeGrants := countRows(t, db, schoolID,
 		`SELECT COUNT(*) FROM membership_badges mb JOIN badges b ON b.id = mb.badge_id
-		  WHERE b.school_id = $1 AND b.slug = 'delegated_verifier' AND mb.scope_id = $2
+		  WHERE b.slug = 'delegated_verifier' AND mb.scope_id = $1
 		    AND (mb.valid_until IS NULL OR mb.valid_until > NOW())`,
 		qrResponse.Data.QRID)
 	if activeGrants != 0 {

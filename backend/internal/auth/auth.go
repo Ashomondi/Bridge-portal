@@ -341,12 +341,18 @@ func GenerateOTP() (string, error) {
 	return fmt.Sprintf("%0*d", otpCodeLength, value.Int64()), nil
 }
 
-// HashOTP returns the SHA-256 hex digest stored in otp_requests, keyed by OTP pepper.
+// hashOTP returns the HMAC-SHA256 hex digest of otp, keyed by the service
+// pepper. The exported HashOTP exists for callers outside auth (e.g.
+// internal/onboarding) that need the same digest used in otp_requests.
 func (s *Service) hashOTP(otp string) string {
 	h := hmac.New(sha256.New, s.otpPepper)
 	h.Write([]byte(otp))
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// HashOTP returns the HMAC-SHA256 hex digest of otp, keyed by the service
+// pepper. Callers outside auth use this instead of hitting the DB directly.
+func (s *Service) HashOTP(otp string) string { return s.hashOTP(otp) }
 
 // reserveOTP checks the per-phone and per-IP rate limits and stores a new OTP
 // in one transaction. Advisory locks serialise concurrent requests so two

@@ -52,7 +52,7 @@ trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
 
 	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit, cfg.TrustProxyHeaders, trustedProxies, []byte(cfg.OTPHMACSecret))
 	consentService := consent.NewService(db.DB, audit)
-	onboardingService := onboarding.NewService(db.DB, audit, smsDispatcher, nil, cfg.RetentionDays)
+	onboardingService := onboarding.NewService(db.DB, audit, smsDispatcher, nil, cfg.RetentionDays, authService)
 	authMiddleware := middleware.NewAuthMiddleware(db.DB, tokens)
 
 	mux := http.NewServeMux()

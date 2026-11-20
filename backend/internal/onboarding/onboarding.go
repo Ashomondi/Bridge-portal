@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 
+	"github.com/Ashomondi/ikonex-academy/backend/internal/auth"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/database"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/middleware"
 )
@@ -31,14 +32,15 @@ type Service struct {
 	sms           SMSDispatcher
 	charges       StudentChargeHook
 	retentionDays int
+	auth          *auth.Service
 }
 
 // NewService builds the onboarding service.
-func NewService(db *sql.DB, audit *database.AuditLogger, sms SMSDispatcher, charges StudentChargeHook, retentionDays int) *Service {
+func NewService(db *sql.DB, audit *database.AuditLogger, sms SMSDispatcher, charges StudentChargeHook, retentionDays int, auth *auth.Service) *Service {
 	if retentionDays <= 0 {
 		retentionDays = defaultRetentionDays
 	}
-	return &Service{db: db, audit: audit, sms: sms, charges: charges, retentionDays: retentionDays}
+	return &Service{db: db, audit: audit, sms: sms, charges: charges, retentionDays: retentionDays, auth: auth}
 }
 
 // RegisterRoutes mounts the onboarding endpoints. requireInternal guards the

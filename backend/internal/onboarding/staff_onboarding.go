@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -24,6 +25,29 @@ var (
 
 	qrTokenPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.[A-Za-z0-9_-]+$`)
 )
+
+// validStaffRole reports whether the role is one of the allowed staff roles.
+// This guards against arbitrary strings (and values longer than the schema's
+// VARCHAR(50)) being persisted in staff_invites.
+func validStaffRole(role string) bool {
+	switch role {
+	case "principal", "deputy", "dean_of_studies", "teacher", "bursar", "nurse", "librarian":
+		return true
+	default:
+		return false
+	}
+}
+
+// peerHost returns the remote IP without the port, so it can be safely stored
+// in audit_log.ip_address (VARCHAR(50)). IPv6 addresses with a port would
+// otherwise exceed the column width and roll the transaction back.
+func peerHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
 
 // StaffInvite is a resolved staff QR invite.
 type StaffInvite struct {
@@ -62,8 +86,8 @@ func (s *Service) handleCreateStaffInvite(w http.ResponseWriter, r *http.Request
 		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_PHONE_NUMBER", "phone_number must be a Kenyan number in +2547XXXXXXXX form.")
 		return
 	}
-	if req.Role == "" || req.Role == "parent" {
-		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_ROLE", "role must be a staff role (not parent).")
+	if !validStaffRole(req.Role) {
+		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_ROLE", "role must be one of principal, deputy, dean_of_studies, teacher, bursar, nurse or librarian.")
 		return
 	}
 
@@ -97,7 +121,7 @@ func (s *Service) handleCreateStaffInvite(w http.ResponseWriter, r *http.Request
 				Action:       "staff.invite.created",
 				ResourceType: "staff_invite",
 				ResourceID:   inviteID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"phone_number": req.PhoneNumber, "role": req.Role},
 			})
@@ -128,6 +152,10 @@ func (s *Service) handleRevokeStaffInvite(w http.ResponseWriter, r *http.Request
 		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_REQUEST", "A staff invite id is required.")
 		return
 	}
+	if !uuidPattern.MatchString(inviteID) {
+		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_REQUEST", "staff invite id must be a UUID.")
+		return
+	}
 
 	ctx := r.Context()
 	var revokedID string
@@ -148,7 +176,7 @@ func (s *Service) handleRevokeStaffInvite(w http.ResponseWriter, r *http.Request
 				Action:       "staff.invite.revoked",
 				ResourceType: "staff_invite",
 				ResourceID:   revokedID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 			})
 		}

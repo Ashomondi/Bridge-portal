@@ -19,6 +19,7 @@ import (
 const dateLayout = "2006-01-02"
 
 var errSchoolProfileMissing = errors.New("onboarding: school profile is not provisioned")
+var errPrincipalSuspended = errors.New("onboarding: principal phone belongs to a suspended account")
 
 type validationError struct{ msg string }
 
@@ -108,14 +109,30 @@ func (s *Service) handleCreateSchool(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
+		// The principal must not overwrite an existing user's profile or
+		// reactivate a suspended account. A phone that is already in use
+		// keeps its existing identity; a suspended account is rejected so
+		// school provisioning cannot resurrect it.
+		var existingID string
+		var existingActive bool
 		if err := tx.QueryRowContext(ctx,
-			`INSERT INTO users (phone_number, full_name, is_active)
-			 VALUES ($1, $2, TRUE)
-			 ON CONFLICT (phone_number) DO UPDATE
-			   SET full_name = EXCLUDED.full_name, is_active = TRUE, updated_at = NOW()
-			 RETURNING id::text`,
-			req.PrincipalPhone, req.PrincipalName).Scan(&principalUserID); err != nil {
+			`SELECT id::text, is_active FROM users WHERE phone_number = $1`,
+			req.PrincipalPhone).Scan(&existingID, &existingActive); err != nil && err != sql.ErrNoRows {
 			return err
+		}
+		if existingID != "" {
+			if !existingActive {
+				return errPrincipalSuspended
+			}
+			principalUserID = existingID
+		} else {
+			if err := tx.QueryRowContext(ctx,
+				`INSERT INTO users (phone_number, full_name, is_active)
+				 VALUES ($1, $2, TRUE)
+				 RETURNING id::text`,
+				req.PrincipalPhone, req.PrincipalName).Scan(&principalUserID); err != nil {
+				return err
+			}
 		}
 
 		if _, err := tx.ExecContext(ctx,
@@ -149,6 +166,10 @@ func (s *Service) handleCreateSchool(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errPrincipalSuspended) {
+			middleware.RespondError(w, http.StatusConflict, "PRINCIPAL_ACCOUNT_SUSPENDED", "The principal phone number belongs to a suspended account.")
+			return
+		}
 		if isUniqueViolation(err) {
 			middleware.RespondError(w, http.StatusConflict, "SCHOOL_EXISTS", "A school with this code already exists.")
 			return
@@ -372,6 +393,15 @@ func (s *Service) handleSetupWizard(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for _, dormitory := range parsed.dormitories {
+			var existingID string
+			if err := tx.QueryRowContext(ctx,
+				`SELECT id::text FROM dormitories WHERE school_id = $1 AND LOWER(name) = LOWER($2)`,
+				identity.SchoolID, dormitory.Name).Scan(&existingID); err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if existingID != "" {
+				continue
+			}
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO dormitories (school_id, name, gender, capacity)
 				 VALUES ($1, $2, $3, $4)`,
@@ -391,7 +421,7 @@ func (s *Service) handleSetupWizard(w http.ResponseWriter, r *http.Request) {
 				Action:       "school.setup_wizard.completed",
 				ResourceType: "school",
 				ResourceID:   identity.SchoolID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"academic_year": parsed.academicYear},
 			})
@@ -445,6 +475,15 @@ func validateSetupWizard(req setupWizardRequest) (parsedSetup, error) {
 		terms = append(terms, parsedTerm{number: term.TermNumber, start: start, end: end})
 	}
 
+	// Terms must not overlap chronologically: term 1 ends before term 2 starts,
+	// and term 2 ends before term 3 starts.
+	if terms[0].end.After(terms[1].start) {
+		return parsedSetup{}, validationErrorf("term 1 end_date must be before term 2 start_date")
+	}
+	if terms[1].end.After(terms[2].start) {
+		return parsedSetup{}, validationErrorf("term 2 end_date must be before term 3 start_date")
+	}
+
 	if len(req.GradeLevels) == 0 {
 		return parsedSetup{}, validationErrorf("at least one grade level is required")
 	}
@@ -460,7 +499,8 @@ func validateSetupWizard(req setupWizardRequest) (parsedSetup, error) {
 	}
 
 	for _, class := range req.Classes {
-		if strings.TrimSpace(class.StreamName) == "" {
+		class.StreamName = strings.TrimSpace(class.StreamName)
+		if class.StreamName == "" {
 			return parsedSetup{}, validationErrorf("every class needs a stream_name")
 		}
 		if !gradeSet[class.GradeLevel] {
@@ -469,7 +509,8 @@ func validateSetupWizard(req setupWizardRequest) (parsedSetup, error) {
 	}
 
 	for _, dormitory := range req.Dormitories {
-		if strings.TrimSpace(dormitory.Name) == "" {
+		dormitory.Name = strings.TrimSpace(dormitory.Name)
+		if dormitory.Name == "" {
 			return parsedSetup{}, validationErrorf("every dormitory needs a name")
 		}
 		if dormitory.Gender != "male" && dormitory.Gender != "female" {
