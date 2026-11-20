@@ -2,7 +2,7 @@ module github.com/Ashomondi/ikonex-academy/backend
 
 go 1.22.2
 
-require github.com/jackc/pgx/v5 v5.7.2
+require github.com/jackc/pgx/v5 v5.7.4
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

@@ -67,8 +67,11 @@ This is the section most specific to this project's AI features — see also
 4. **It never originates a fact.** Fee balances, attendance, and results come
    from the database; the model's job is language (phrasing, translation,
    mapping natural language to CBC strands), never invention.
-5. **Every AI-initiated action is logged**: what was asked, what data was
-   read, what action (if any) was taken, and by which AI feature.
+5. **Every AI-initiated action must be logged**: structured intent, endpoint
+   names read, action/outcome, actor, school and feature. Do not log raw prompts,
+   replies, access tokens or returned student records. `ai_action_logs` is a
+   schema foundation and `AuditLogger` is an interface; durable logging is not
+   wired by these contracts and AC-29 remains pending.
 6. **A human approves anything sent to a parent or written to a permanent
    record** — report comments, blog posts, plain-language explanations — the
    AI drafts, a teacher/patron/bursar confirms.
@@ -96,6 +99,54 @@ This is the section most specific to this project's AI features — see also
   a server abroad, both count as a "transfer" under the ODPC's 2026 guidance
   — not only a literal file copy.
 
+## SMS and in-app notification security
+
+- **Phone number normalization & masking:** `notifications.NormalizePhone`
+  normalizes Kenyan local (`07...`, `01...`, `254...`) and international E.164
+  numbers and rejects malformed, newline-containing, or out-of-range inputs
+  with `ErrInvalidPhone` (never echoing the raw input). Sandbox logging masks
+  recipient numbers to the trailing 3 digits (`***678`) and never logs the full
+  number.
+- **OTP & message-body redaction:** `SMSDispatcher` never logs message bodies,
+  OTP codes, or full recipient numbers (only redacted recipient suffix, purpose,
+  and rune length in sandbox mode). Callers must not place OTPs, credentials,
+  or clinical details in `in_app_notifications` titles, bodies, or `metadata`.
+- **Africa's Talking credential & error sanitization:** `APIKey` is transmitted
+  only in the `apiKey` request header to `https://api.africastalking.com/version1/messaging`
+  and never logged or surfaced in errors. Provider responses are capped at 64 KiB,
+  parsed into a minimal status struct, verified for single-recipient phone
+  match (`RECIPIENT_MISMATCH` otherwise), and mapped to safe
+  `*SMSDeliveryError{Code, Retryable}` codes without raw provider text.
+- **HTTP redirect protection, timeouts & retries:** `NewSMSDispatcher` copies
+  the caller's `*http.Client`, enforces a default 15-second timeout when
+  `Timeout <= 0`, and sets `CheckRedirect` to `http.ErrUseLastResponse` so
+  redirects are never followed and `apiKey`/body cannot leak to a redirect
+  target. Retries are not performed inside the transport; `*SMSDeliveryError.Retryable`
+  signals safe retry eligibility (`408`, `429`, `5xx`, transport errors, provider
+  `500`–`502`) to the future Asynq worker.
+
+### Africa's Talking data boundary
+
+- **What is transmitted & why:** Only the normalized recipient phone number
+  (`to`), transactional SMS text (`message`), platform `username`, and optional
+  `from` sender ID are sent over HTTPS `POST` to Africa's Talking strictly for
+  the four permitted transactional purposes (`app_login`, `whatsapp_session`,
+  `phone_change`, `phone_change_notice`). No student records, admission numbers,
+  academic marks, health/nurse details, or fee balances are transmitted by the
+  Release 1 SMS transport.
+- **Recipient & data-location considerations:** Africa's Talking Limited
+  processes the outbound SMS payload and passes carrier routing metadata to
+  downstream mobile network operators (MNOs). Before processing real Kenyan
+  user data in production, legal/compliance must confirm Africa's Talking's
+  applicable data-processing agreement, infrastructure/sub-processor locations,
+  and whether any cross-border transfer safeguards under Sections 48–50 of the
+  Data Protection Act apply — no data-residency guarantee is assumed by code.
+- **Control boundary after transmission:** Once Africa's Talking accepts a
+  message (`statusCode` `100`/`101`/`102`), the application cannot recall,
+  delete, or control retention of the SMS text or recipient number inside the
+  provider or telecom carriers, and ambiguous network timeouts cannot prove
+  whether the SMS was sent. Keep transactional SMS content minimal and short-lived.
+
 ## Retention
 
 Policy is per record type. Periods are to be set with a Kenyan data
@@ -112,6 +163,40 @@ protection lawyer; the rules below are the starting point.
 | Financial ledger | Kept as the law requires | Proposed; period open |
 
 What happens to a leftover ledger credit when a student leaves is undecided.
+
+Under Kenya's Data Protection Act, 2019, personal data must not be kept longer
+than necessary for its lawful purpose. **Formal retention schedules have not yet
+been established** for this platform: every post-session, post-reconciliation,
+raw-payload, AI-log, backup, and canonical financial retention period below is a
+**policy decision requiring legal and school-controller confirmation** before
+production launch, not an existing approved rule. These rules also specify
+requirements for future handlers and cleanup workers; expiry, redaction, and
+audit-logging workers are **not yet implemented** in the current codebase.
+
+| Data category | Stored & why | Who can access | Retention status (confirmation required) | Redaction / deletion & protection rules |
+|---|---|---|---|---|
+| **Chat phone numbers** (`chat_sessions.sender_wa_number`) | Stored in PostgreSQL (`chat_sessions`, RLS-isolated) solely to route inbound/outbound Release 3 WhatsApp chat turns to the active session. Not used in Release 1 in-app chat and never proof of guardian identity. | Restricted to backend messaging/verification code for that `school_id`; masked to final 4 digits if ever surfaced in staff UI; excluded from URLs, app logs, analytics, and AI prompts. | **Policy decision required:** confirm maximum inactive/post-expiry retention for routing phone numbers and expired `chat_sessions` rows (proposed engineering target: clear `sender_wa_number` on expiry/revocation and purge expired rows on a short schedule once detached from retained logs). | Clear `sender_wa_number` upon session revocation/expiry; normalize for routing only; protect at rest under forced tenant RLS (`school_id`) and encrypted storage. |
+| **OTP hashes & challenge fields** (`chat_sessions.otp_hash`, `otp_expires_at`, `otp_attempts`) | **Plaintext OTPs are never stored or logged.** Only a server-keyed cryptographic hash and expiry/attempt counters are stored transiently in `chat_sessions` to enforce step-up guardian verification and rate/attempt limits. | Backend authentication/verification service only (`school_id` RLS-isolated). Never exposed to frontend clients, staff UI, logs, or the AI service. | **Policy decision required:** confirm exact OTP validity window, max failed attempts, and dead-challenge purge window (proposed engineering target: short-lived validity and immediate clearing on verify/replace/exhaustion, plus periodic purge of expired challenges). | Clear `otp_hash` immediately on successful verification, replacement, exhaustion, or expiry. Use a keyed hash with a server-held secret (never plain unsalted hashes for short numeric OTPs). |
+| **Delegated access-token hashes & verification timestamps** (`chat_sessions.access_token_hash`, `verified_at`, `expires_at`) | **Plaintext delegated tokens are never stored or logged.** Only the cryptographic hash (`access_token_hash`, required non-null/non-blank in `VERIFIED` state by migration `000004`) and `verified_at`/`expires_at` are stored so Go can resolve `X-Delegated-Session` and enforce expiry. | Backend auth/delegation validation middleware only (`school_id` RLS-isolated). Never returned to clients after issuance or exposed to AI prompts or logs. | **Policy decision required:** confirm maximum delegated session TTL and post-expiry cleanup window (proposed engineering target: short-lived TTL with prompt cleanup after revocation/expiry). Cleanup delay must **never** extend access: handlers must enforce `expires_at > now()` on every request. | Generate cryptographically random opaque tokens; store only hashes; redact `Authorization` and `X-Delegated-Session` headers, cookies, and token fields at proxy and application layers. Transitioning out of `VERIFIED` or revoking clears `access_token_hash`, `verified_at`, and `expires_at`. |
+| **M-Pesa payer information** (`mpesa_stk_requests.phone_number`, `payments.payer_phone`, `payments.payer_name`, `unmatched_payments.payer_phone`, `payer_name`, `raw_account_ref`) | Stored in PostgreSQL (RLS-isolated per `school_id`) to initiate STK pushes, display payment confirmation, and allow bursar/AI-assisted matching of unmatched receipts. | Tenant-scoped authorized bursar/admin staff and the paying guardian (for their own STK attempt); never exposed to teachers or unrelated parents. AI reconciliation receives only minimal, scoped facts—never raw phone dumps in prompts. | **Policy decision required:** confirm how long payer phone/name/raw account references may be retained after terminal STK outcome or payment reconciliation, and review cadence for `uncertain`/`unmatched` items. | Mask phone numbers in staff displays and notifications; exclude from telemetry, error payloads, and LLM prompts; redact/anonymize payer contact fields once the controller-confirmed post-settlement/reconciliation window closes (unless covered by a documented legal hold). |
+| **Payment-related personal information & raw payloads** (`payments.raw_payload`, `payments`, `fee_ledgers`, `ledger_entries`, `fee_charges`, `fee_change_notes`) | Canonical billing records (`payments`, `fee_ledgers`, `ledger_entries`, `fee_charges`, `fee_change_notes`) are stored for school accounting and auditability. `payments.raw_payload` stores raw provider callback JSON if ingested. | Tenant- and permission-scoped access only (bursar/admin roles, and guardians scoped to their own children via `student_guardians`). | **Policy decision required:** confirm statutory/financial retention period for canonical accounting records and retention limit for `payments.raw_payload` under Kenyan tax/education/accounting law and school controller policy. | **Never** store or log M-Pesa PINs, API secrets, or authorization headers in `raw_payload` or logs; allowlist callback fields before storage; avoid copying financial/payer details into chat logs; protect via forced RLS and encrypted database backups. |
+| **AI action logs** (`ai_action_logs`) | Stored in PostgreSQL (RLS-isolated per `school_id`) to record structured `feature`, `intent`, `endpoints_read` (JSON array), `action_taken`, and redacted `metadata` for accountability under the AI data boundary. | Tenant-scoped authorized administrators/auditors only; `ai_action_logs` is separate from `AuditLogger` / financial `audit_log` (AC-29 remains pending). | **Policy decision required:** confirm retention period for operational AI action logs and backup retention/deletion propagation rules (other categories like results, attendance, and consent records also require controller-approved schedules). | Allowlist `endpoints_read` (route templates without query strings/IDs) and `metadata` keys; **never** store raw prompts, message transcripts, response bodies, phone numbers, names, payer details, secrets, or token hashes. `ai_action_logs.session_id` is a non-cascading FK to `chat_sessions(school_id, id)`—cleanup must set `session_id = NULL` in the same tenant transaction before deleting expired `chat_sessions`. |
+| **Transactional SMS payloads & provider responses** (in-memory transport; future `internal/jobs` queue payloads & logs) | Normalized recipient phone numbers, transactional message bodies (including OTPs), and provider responses are handled transiently by `SMSDispatcher`. No SMS body or provider-response persistence table exists in Release 1. | Restricted to backend SMS transport/worker execution; never exposed to frontend clients, staff UI, or AI service. | **Policy decision required:** confirm whether future worker job/dead-letter retention is strictly bounded (proposed target: never persist plaintext OTPs in queue dead-letter logs; purge delivery attempt metadata on a short operational window) and confirm provider-side retention terms with Africa's Talking. | **Never** log SMS message bodies, OTP values, `APIKey`, raw provider responses, or unmasked phone numbers; mask recipients to trailing digits (`***678`) in sandbox logs; store only safe error codes in delivery diagnostics. |
+| **In-app notifications & read timestamps** (`in_app_notifications`, `read_at`) | Stored in PostgreSQL (RLS-isolated per `school_id`) for `recipient_user_id` (`category`, `title`, `body`, `metadata`, `is_read`, `read_at`, `created_at`) to deliver Release 1 event notices and track read receipts. | Authenticated recipient (`recipient_user_id = Principal.UserID`) in the active school (`school_id = Principal.SchoolID`) only; enforced by service queries and PostgreSQL forced RLS. | **Policy decision required:** confirm how long read and unread in-app notifications (and `read_at` timestamps) are retained after term close or membership/student exit; no automated purge worker is implemented yet. | Avoid storing secrets, OTPs, clinical details, or unnecessary personal data in `body`/`metadata`; preserve first `read_at` (`coalesce(read_at, now())`) for audit consistency until purged under the approved retention schedule. |
+
+Operational cleanup requirements (pending worker implementation):
+
+- Execute all retention purges and redactions per `school_id` inside tenant-scoped
+  transactions (`SET LOCAL app.school_id`), honoring forced RLS.
+- Purge or redact personal copies across queue payloads, dead-letter jobs,
+  exports, and notification metadata alongside primary table rows.
+- Any legal hold suspending deletion must be documented with scope, owner,
+  reason, and review/expiry date; never suspend deletion indefinitely without
+  review.
+- Tests and examples must use synthetic identities and payer data only.
+- Audit deletion counts and policy outcomes without recording the deleted
+  personal data. Review new metadata keys and provider fields against the
+  redaction rules above before storage.
 
 ## Breach response
 
@@ -169,3 +254,35 @@ WhatsApp; the chat sends a link to the app instead.
 - Pending registrations are not active records and grant no access until a
   staff verifier confirms them in person. Verification can be delegated only
   to staff, only while the QR is active (12 hours).
+
+## Billing access control and financial auditability
+
+- **Authorization & least privilege:** Billing endpoints never rely on
+  hardcoded platform role strings. Every staff operation checks an active,
+  non-parent `memberships` row, active `users.is_active`, and an active,
+  unexpired school-wide badge permission (`billing.fee_structures.manage` for
+  `LoadFeeStructure` and `ChargeCurrentTermStructures`; `billing.ledgers.view`
+  for read-only `GetStudentFeeBalance` and `GetStudentLedger`).
+- **Guardian & fee-payer boundary:** Guardian access to student fee balances,
+  ledgers, and fee-due-date change notifications requires an active
+  `student_guardians` relationship in the same school with `is_fee_payer = TRUE`.
+  Non-fee-paying guardians (`is_fee_payer = FALSE`), unlinked guardians, and
+  unrelated users receive `403 FORBIDDEN`.
+- **Tenant isolation:** All billing HTTP and service entry points derive
+  `school_id` exclusively from the authenticated `contracts.Principal` via
+  `contracts.TenantDB.WithTenantTx`, backed by PostgreSQL `FORCE ROW LEVEL SECURITY`.
+  Requests targeting a student in another school return `404 STUDENT_NOT_FOUND`
+  without disclosing existence.
+- **Mandatory transactional audit:** All billing mutations (`LoadFeeStructure`,
+  `ChargeCurrentTermStructures`, `ChargeGradeForTerm`, `ChargeStudent`,
+  `ChargeAdmittedStudent`, `RecordStudentPayment*`, `OnTermStartDateChanged*`)
+  require a non-nil `AuditLogger` (`PostgresAuditLogger` writes to `audit_log`
+  within the caller's transaction) and fail closed (`500 AUDIT_LOGGER_REQUIRED`)
+  if omitted. Audit failures roll back the financial mutation atomically.
+- **Redaction & immutability:** Audit `details` record actor user ID, school ID,
+  action, resource IDs, references, and minor-unit amounts — never phone numbers,
+  PINs, or raw provider payloads. `fee_charges`, `ledger_entries`, and
+  `fee_change_notes` are append-only; corrections are represented via new
+  compensating entries/notes rather than mutating historical records. Financial
+  retention schedules remain subject to the controller-confirmed policy in the
+  Retention table above.
