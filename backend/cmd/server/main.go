@@ -18,6 +18,7 @@ import (
 	"github.com/Ashomondi/ikonex-academy/backend/internal/consent"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/database"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/middleware"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/onboarding"
 )
 
 func main() {
@@ -42,14 +43,16 @@ func run(logger *log.Logger) error {
 	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.Expiry)
 	audit := database.NewAuditLogger(db.DB)
 	allowDevelopmentSMS := cfg.Environment == "development" || cfg.Environment == "test"
+	smsDispatcher := devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}
 
-	trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
+trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
 	if err != nil {
 		return fmt.Errorf("main: trusted proxy CIDRs: %w", err)
 	}
 
-	authService := auth.NewService(db.DB, tokens, devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}, audit, cfg.TrustProxyHeaders, trustedProxies, []byte(cfg.OTPHMACSecret))
+	authService := auth.NewService(db.DB, tokens, smsDispatcher, audit, cfg.TrustProxyHeaders, trustedProxies, []byte(cfg.OTPHMACSecret))
 	consentService := consent.NewService(db.DB, audit)
+	onboardingService := onboarding.NewService(db.DB, audit, smsDispatcher, nil, cfg.RetentionDays, authService)
 	authMiddleware := middleware.NewAuthMiddleware(db.DB, tokens)
 
 	mux := http.NewServeMux()
@@ -61,6 +64,8 @@ func run(logger *log.Logger) error {
 		return authMiddleware.RequireAuth(handler)
 	}
 	consentService.RegisterRoutes(mux, consentWrap)
+
+	onboardingService.RegisterRoutes(mux, authMiddleware, middleware.RequireInternalService(cfg.InternalServiceToken))
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Host, cfg.Server.Port),
