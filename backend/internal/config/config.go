@@ -29,9 +29,11 @@ type Config struct {
 	Server            ServerConfig
 	CORS              CORSConfig
 	TrustProxyHeaders bool
+	TrustedProxyCIDRs []string
 
 	InternalServiceToken string
 	RetentionDays        int
+	OTPHMACSecret        string
 }
 
 // CORSConfig describes which browser origins may call the API.
@@ -110,6 +112,20 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: ENVIRONMENT must be one of development, test, staging or production")
 	}
 
+	sslMode := env("DB_SSLMODE", "")
+	if sslMode == "" {
+		if environment == "production" {
+			sslMode = "require"
+		} else {
+			sslMode = "disable"
+		}
+	}
+
+	trustProxyHeaders, err := envBool("TRUST_PROXY_HEADERS")
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Environment: environment,
 		LogLevel:    env("LOG_LEVEL", "debug"),
@@ -119,7 +135,7 @@ func Load() (*Config, error) {
 			User:         env("DB_USER", ""),
 			Password:     env("DB_PASSWORD", ""),
 			Name:         env("DB_NAME", ""),
-			SSLMode:      env("DB_SSLMODE", "disable"),
+			SSLMode:      sslMode,
 			MaxOpenConns: maxOpen,
 			MaxIdleConns: maxIdle,
 		},
@@ -139,9 +155,11 @@ func Load() (*Config, error) {
 		CORS: CORSConfig{
 			AllowedOrigins: envList("CORS_ALLOWED_ORIGINS", []string{"http://localhost:3000"}),
 		},
-		TrustProxyHeaders:    envBool("TRUST_PROXY_HEADERS", false),
+		TrustProxyHeaders:    trustProxyHeaders,
+		TrustedProxyCIDRs:    envList("TRUSTED_PROXY_CIDRS", nil),
 		InternalServiceToken: env("INTERNAL_SERVICE_TOKEN", ""),
 		RetentionDays:        retentionDays,
+		OTPHMACSecret:        env("OTP_HMAC_SECRET", ""),
 	}
 
 	if cfg.DB.Name == "" {
@@ -155,6 +173,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.JWT.Expiry <= 0 {
 		return nil, fmt.Errorf("config: JWT_EXPIRY_HOURS must be positive")
+	}
+	if strings.TrimSpace(cfg.OTPHMACSecret) == "" {
+		return nil, fmt.Errorf("config: OTP_HMAC_SECRET is required")
+	}
+	if len(strings.TrimSpace(cfg.OTPHMACSecret)) < 32 {
+		return nil, fmt.Errorf("config: OTP_HMAC_SECRET must be at least 32 characters")
+	}
+	if cfg.TrustProxyHeaders && len(cfg.TrustedProxyCIDRs) == 0 {
+		return nil, fmt.Errorf("config: TRUSTED_PROXY_CIDRS is required when TRUST_PROXY_HEADERS is enabled")
 	}
 	return cfg, nil
 }
@@ -196,14 +223,14 @@ func envList(key string, fallback []string) []string {
 	return values
 }
 
-func envBool(key string, fallback bool) bool {
+func envBool(key string) (bool, error) {
 	raw, ok := os.LookupEnv(key)
 	if !ok || raw == "" {
-		return fallback
+		return false, nil
 	}
 	value, err := strconv.ParseBool(raw)
 	if err != nil {
-		return fallback
+		return false, fmt.Errorf("config: %s must be a boolean: %w", key, err)
 	}
-	return value
+	return value, nil
 }

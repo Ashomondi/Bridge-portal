@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,17 +47,24 @@ func TestGenerateOTPFormat(t *testing.T) {
 }
 
 func TestHashOTPStableAndSized(t *testing.T) {
-	first := HashOTP("123456")
-	second := HashOTP("123456")
+	svc := testOTPService()
+	first := svc.hashOTP("123456")
+	second := svc.hashOTP("123456")
 	if first != second {
-		t.Fatalf("HashOTP is not deterministic")
+		t.Fatalf("hashOTP is not deterministic")
 	}
 	if len(first) != 64 {
-		t.Fatalf("len(HashOTP) = %d, want 64", len(first))
+		t.Fatalf("len(hashOTP) = %d, want 64", len(first))
 	}
-	if HashOTP("654321") == first {
+	if svc.hashOTP("654321") == first {
 		t.Fatalf("different OTPs must not share a hash")
 	}
+}
+
+// testOTPService builds a pepper-only Service for hashing helpers in tests.
+func testOTPService() *Service {
+	_, cidr, _ := net.ParseCIDR("192.0.2.0/24")
+	return &Service{otpPepper: []byte("test-otp-hmac-secret-32-bytes-long"), trustedProxies: []*net.IPNet{cidr}}
 }
 
 func TestTokenRoundTrip(t *testing.T) {
@@ -126,7 +134,8 @@ func TestClientIPOnlyTrustsForwardedHeaderWhenConfigured(t *testing.T) {
 		t.Fatalf("clientIP without proxy trust = %q, want 192.0.2.10", got)
 	}
 
-	trusted := &Service{trustProxyHeaders: true}
+	trusted := testOTPService()
+	trusted.trustProxyHeaders = true
 	if got := trusted.clientIP(req); got != "203.0.113.5" {
 		t.Fatalf("clientIP with proxy trust = %q, want 203.0.113.5", got)
 	}

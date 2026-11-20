@@ -10,6 +10,7 @@ func setValidEnvironment(t *testing.T) {
 	t.Setenv("ENVIRONMENT", "development")
 	t.Setenv("DB_NAME", "ikonex_academy")
 	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	t.Setenv("OTP_HMAC_SECRET", strings.Repeat("s", 32))
 }
 
 func TestLoadRequiresEnvironment(t *testing.T) {
@@ -43,6 +44,7 @@ func TestLoadDefaultsAndLists(t *testing.T) {
 	setValidEnvironment(t)
 	t.Setenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000, https://app.ikonex.test")
 	t.Setenv("TRUST_PROXY_HEADERS", "true")
+	t.Setenv("TRUSTED_PROXY_CIDRS", "192.0.2.0/24")
 
 	cfg, err := Load()
 	if err != nil {
