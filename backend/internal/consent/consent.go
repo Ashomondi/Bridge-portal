@@ -76,6 +76,10 @@ func (s *Service) handleUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	if s.audit == nil {
+		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to record consent.")
+		return
+	}
 	err := database.WithTenantTx(ctx, s.db, identity.SchoolID, func(tx *sql.Tx) error {
 		var isGuardian bool
 		if err := tx.QueryRowContext(ctx,
@@ -88,7 +92,7 @@ func (s *Service) handleUpsert(w http.ResponseWriter, r *http.Request) {
 		if !isGuardian {
 			return errNotGuardian
 		}
-		_, err := tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO consents (school_id, student_id, guardian_user_id, purpose, granted, timestamp, revoked_at)
 			 VALUES ($1, $2, $3, $4, $5, NOW(), CASE WHEN $5 THEN NULL ELSE NOW() END)
 			 ON CONFLICT (school_id, student_id, guardian_user_id, purpose)
@@ -96,8 +100,21 @@ func (s *Service) handleUpsert(w http.ResponseWriter, r *http.Request) {
 			     granted = EXCLUDED.granted,
 			     timestamp = NOW(),
 			     revoked_at = CASE WHEN EXCLUDED.granted THEN NULL ELSE NOW() END`,
-			identity.SchoolID, body.StudentID, identity.UserID, body.Purpose, body.Granted)
-		return err
+			identity.SchoolID, body.StudentID, identity.UserID, body.Purpose, body.Granted); err != nil {
+			return err
+		}
+		// Write the audit event in the same transaction so a consent change can
+		// never commit without its audit trail.
+		return s.audit.Log(ctx, tx, database.AuditEvent{
+			SchoolID:     identity.SchoolID,
+			UserID:       identity.UserID,
+			Action:       "consent.update",
+			ResourceType: "student",
+			ResourceID:   body.StudentID,
+			IPAddress:    middleware.ClientIP(r),
+			UserAgent:    r.UserAgent(),
+			Details:      map[string]any{"purpose": body.Purpose, "granted": body.Granted},
+		})
 	})
 	switch {
 	case errors.Is(err, errNotGuardian):
@@ -106,19 +123,6 @@ func (s *Service) handleUpsert(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to record consent.")
 		return
-	}
-
-	if s.audit != nil {
-		_ = s.audit.Log(ctx, nil, database.AuditEvent{
-			SchoolID:     identity.SchoolID,
-			UserID:       identity.UserID,
-			Action:       "consent.update",
-			ResourceType: "student",
-			ResourceID:   body.StudentID,
-			IPAddress:    r.RemoteAddr,
-			UserAgent:    r.UserAgent(),
-			Details:      map[string]any{"purpose": body.Purpose, "granted": body.Granted},
-		})
 	}
 
 	middleware.RespondJSON(w, http.StatusOK, map[string]any{

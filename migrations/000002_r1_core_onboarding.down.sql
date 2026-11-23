@@ -10,7 +10,8 @@ ALTER TABLE consents ADD CONSTRAINT consents_purpose_check
     CHECK (purpose IN ('biometric_attendance', 'photo', 'sms'));
 
 ALTER TABLE users DROP COLUMN IF EXISTS phone_changed_at;
-ALTER TABLE users DROP COLUMN IF EXISTS chat_payment_paused_until;
+-- chat_payment_paused_until is also managed by 000004 (billing/WhatsApp), so
+-- its rollback is left to that migration rather than dropping a shared column.
 
 DROP TABLE IF EXISTS verification_records CASCADE;
 DROP TABLE IF EXISTS registration_submissions CASCADE;

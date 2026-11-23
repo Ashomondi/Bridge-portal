@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -108,8 +109,17 @@ func (d devSMSDispatcher) SendTransactionalSMS(_ context.Context, toPhoneNumber,
 	if !d.enabled {
 		return errors.New("sms: no dispatcher configured")
 	}
-	d.logger.Printf("sms to=%s body=%q", maskPhone(toPhoneNumber), message)
+	d.logger.Printf("sms to=%s body=%q", maskPhone(toPhoneNumber), redactOTP(message))
 	return nil
+}
+
+// otpDigits matches the six-digit login code embedded in an OTP SMS.
+var otpDigits = regexp.MustCompile(`\b[0-9]{6}\b`)
+
+// redactOTP keeps development logs useful without writing a live login code to
+// the console.
+func redactOTP(message string) string {
+	return otpDigits.ReplaceAllString(message, "******")
 }
 
 func maskPhone(phone string) string {

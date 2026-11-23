@@ -194,8 +194,9 @@ func TestIntegrationOTPRequestBlocksIPAfterThreshold(t *testing.T) {
 	cleanupPhone(t, db, targetPhone)
 	service := newTestService(db)
 
-	// Five requests from five different phone numbers on the same IP.
-	for i := 0; i < blockThreshold; i++ {
+	// Enough requests from different phone numbers on the same shared IP to
+	// reach the higher IP threshold.
+	for i := 0; i < ipBlockThreshold; i++ {
 		rotatedPhone := fmt.Sprintf("+2547%08d", 10000000+i)
 		if _, err := db.ExecContext(ctx,
 			`INSERT INTO otp_requests (phone_number, sender_identifier, otp_hash, purpose, request_ip, expires_at, created_at)

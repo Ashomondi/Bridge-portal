@@ -33,6 +33,13 @@ const (
 	otpCodeLength     = 6
 	otpSMSMessage     = "Your Ikonex Academy login code is %s. It expires in 5 minutes."
 	otpRequestPurpose = "app_login"
+
+	// A shared IP (school NAT, mobile carrier) serves many legitimate users, so
+	// it needs a much higher threshold and a short block instead of the
+	// per-phone 24-hour lockout. One noisy client must not lock out a school.
+	ipBlockWindow    = 30 * time.Minute
+	ipBlockThreshold = 50
+	ipBlockDuration  = 15 * time.Minute
 )
 
 var (
@@ -210,9 +217,23 @@ func (s *Service) handleRequestOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sms.SendTransactionalSMS(ctx, phone, fmt.Sprintf(otpSMSMessage, otp)); err != nil {
+	// Only dispatch SMS to active accounts. The response is identical for known
+	// and unknown numbers so this cannot be used for account enumeration, and
+	// unknown numbers never incur SMS cost.
+	_, accountErr := s.userByPhone(ctx, phone)
+	switch {
+	case accountErr == nil:
+		if err := s.sms.SendTransactionalSMS(ctx, phone, fmt.Sprintf(otpSMSMessage, otp)); err != nil {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM otp_requests WHERE id = $1`, requestID)
+			middleware.RespondError(w, http.StatusBadGateway, "SMS_DELIVERY_FAILED", "Unable to send the OTP SMS.")
+			return
+		}
+	case errors.Is(accountErr, sql.ErrNoRows):
+		// No active account: keep the reservation so the rate limit still
+		// applies, but send nothing.
+	default:
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM otp_requests WHERE id = $1`, requestID)
-		middleware.RespondError(w, http.StatusBadGateway, "SMS_DELIVERY_FAILED", "Unable to send the OTP SMS.")
+		middleware.RespondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to process the OTP request.")
 		return
 	}
 
@@ -392,28 +413,28 @@ func (s *Service) reserveOTP(ctx context.Context, phone, requestIP, otpHash stri
 		}
 	}
 
-	recentPhone, err := recentRequestCount(ctx, tx, phone)
+	recentPhone, err := recentRequestCount(ctx, tx, phone, blockWindow)
 	if err != nil {
 		return "", err
 	}
 	recentIP := 0
 	if requestIP != "" {
-		recentIP, err = recentRequestCountByIP(ctx, tx, requestIP)
+		recentIP, err = recentRequestCountByIP(ctx, tx, requestIP, ipBlockWindow)
 		if err != nil {
 			return "", err
 		}
 	}
 
 	phoneBlocked := recentPhone >= blockThreshold
-	ipBlocked := ipBlockKey != "" && recentIP >= blockThreshold
+	ipBlocked := ipBlockKey != "" && recentIP >= ipBlockThreshold
 	if phoneBlocked || ipBlocked {
 		if phoneBlocked {
-			if err := blockSender(ctx, tx, phone); err != nil {
+			if err := blockSender(ctx, tx, phone, blockDuration, "otp_request_threshold"); err != nil {
 				return "", err
 			}
 		}
 		if ipBlocked {
-			if err := blockSender(ctx, tx, ipBlockKey); err != nil {
+			if err := blockSender(ctx, tx, ipBlockKey, ipBlockDuration, "otp_ip_threshold"); err != nil {
 				return "", err
 			}
 		}
@@ -430,7 +451,7 @@ func (s *Service) reserveOTP(ctx context.Context, phone, requestIP, otpHash stri
 		return "", &rateLimitError{
 			Code:    "IP_BLOCKED",
 			Message: "Too many requests from this network. Try again later.",
-			Details: map[string]any{"retry_after_seconds": int(blockDuration.Seconds())},
+			Details: map[string]any{"retry_after_seconds": int(ipBlockDuration.Seconds())},
 		}
 	}
 
@@ -488,33 +509,35 @@ func activeBlock(ctx context.Context, q sqlQuerier, sender string) (time.Duratio
 	return time.Until(blockedUntil), true, nil
 }
 
-func recentRequestCount(ctx context.Context, q sqlQuerier, sender string) (int, error) {
+func recentRequestCount(ctx context.Context, q sqlQuerier, sender string, window time.Duration) (int, error) {
 	var count int
 	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM otp_requests
-		  WHERE sender_identifier = $1 AND purpose = $2 AND created_at >= NOW() - INTERVAL '30 minutes'`,
-		sender, otpRequestPurpose).Scan(&count)
+		  WHERE sender_identifier = $1 AND purpose = $2
+		    AND created_at >= NOW() - make_interval(secs => $3)`,
+		sender, otpRequestPurpose, window.Seconds()).Scan(&count)
 	return count, err
 }
 
-func recentRequestCountByIP(ctx context.Context, q sqlQuerier, requestIP string) (int, error) {
+func recentRequestCountByIP(ctx context.Context, q sqlQuerier, requestIP string, window time.Duration) (int, error) {
 	var count int
 	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM otp_requests
-		  WHERE request_ip = $1 AND purpose = $2 AND created_at >= NOW() - INTERVAL '30 minutes'`,
-		requestIP, otpRequestPurpose).Scan(&count)
+		  WHERE request_ip = $1 AND purpose = $2
+		    AND created_at >= NOW() - make_interval(secs => $3)`,
+		requestIP, otpRequestPurpose, window.Seconds()).Scan(&count)
 	return count, err
 }
 
-func blockSender(ctx context.Context, q sqlQuerier, sender string) error {
+func blockSender(ctx context.Context, q sqlQuerier, sender string, duration time.Duration, reason string) error {
 	_, err := q.ExecContext(ctx,
 		`INSERT INTO auth_rate_blocks (sender_identifier, blocked_until, reason)
-		 VALUES ($1, NOW() + INTERVAL '24 hours', 'otp_request_threshold')
+		 VALUES ($1, NOW() + make_interval(secs => $2), $3)
 		 ON CONFLICT (sender_identifier) DO UPDATE
 		   SET blocked_until = EXCLUDED.blocked_until,
 		       reason = EXCLUDED.reason,
 		       created_at = NOW()`,
-		sender)
+		sender, duration.Seconds(), reason)
 	return err
 }
 
@@ -621,10 +644,7 @@ func (s *Service) badgesForMembership(ctx context.Context, schoolID, membershipI
 }
 
 func (s *Service) clientIP(r *http.Request) string {
-	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		remoteHost = r.RemoteAddr
-	}
+	remoteHost := middleware.ClientIP(r)
 	if !s.trustProxyHeaders || len(s.trustedProxies) == 0 || !s.isTrustedProxy(remoteHost) {
 		return remoteHost
 	}

@@ -164,7 +164,7 @@ All seven documents were reviewed in full. Nothing else was available. (C1)
 4. An OTP is sent by SMS **only** to the chosen registered number; the sender types it into the chat. (C12, C13)
 5. A verified session lasts **6 hours**, then the parent must verify again. (C13)
 
-**Limits.** One OTP request per minute. After **more than five requests in thirty minutes**, the **requesting WhatsApp number** is blocked for 24 hours; the guardian's account is not blocked. (C18, C19, C20) A3 (awaiting validation): the one-per-minute limit also applies per admission number regardless of sender. How the same limits apply to **app login** is **Open (O20)**.
+**Limits.** One OTP request per minute. After **more than five requests in thirty minutes**, the **requesting WhatsApp number** is blocked for 24 hours; the guardian's account is not blocked. (C18, C19, C20) A3 (awaiting validation): the one-per-minute limit also applies per admission number regardless of sender. App login applies the same per-phone limits plus a separate per-IP limit (50 requests in thirty minutes, 15-minute block) so a shared school network is not locked out for a day (O20).
 
 ### 6.5 Academics
 
