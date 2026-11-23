@@ -15,7 +15,6 @@ import {
   Shield,
   Settings as SettingsIcon,
 } from 'lucide-react';
-import { apiFetch } from '@/lib/api';
 import { roleRoute } from '@/lib/auth';
 
 interface SchoolRole {
@@ -93,37 +92,24 @@ export default function SelectRolePage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    const loadRoles = async () => {
+    const loadRoles = () => {
       try {
         const stored = sessionStorage.getItem('auth_memberships');
-        if (stored) {
-          const memberships = JSON.parse(stored) as MembershipPayload[];
-          if (Array.isArray(memberships)) {
-            setRoles(memberships.map(normalizeRole));
-            setLoading(false);
-            return;
-          }
+        if (!stored) {
+          router.replace('/login');
+          return;
         }
-
-        const token = sessionStorage.getItem('auth_token') ?? localStorage.getItem('auth_token');
-        const payload = await apiFetch<{ data?: { memberships?: MembershipPayload[] }; memberships?: MembershipPayload[] }>(
-          '/api/v1/auth/memberships',
-          token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
-        );
-
-        const memberships = payload?.data?.memberships ?? payload?.memberships ?? [];
-        const normalized = Array.isArray(memberships) ? memberships.map(normalizeRole) : [];
-        setRoles(normalized);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Unable to load your school memberships.';
-        setError(message);
+        const memberships = JSON.parse(stored) as MembershipPayload[];
+        setRoles(Array.isArray(memberships) ? memberships.map(normalizeRole) : []);
+      } catch {
+        setError('Unable to read your school memberships. Please sign in again.');
       } finally {
         setLoading(false);
       }
     };
 
     loadRoles();
-  }, []);
+  }, [router]);
 
   const handleSelectRole = (roleItem: SchoolRole) => {
     if (roleItem.type === 'pending' || !roleItem.route) return;
@@ -280,7 +266,7 @@ export default function SelectRolePage() {
         </div>
       </div>
 
-      <div className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
+      <nav aria-label="Primary" className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
         <button
           type="button"
           onClick={() => { setActiveNav('home'); router.push('/'); }}
@@ -314,7 +300,7 @@ export default function SelectRolePage() {
           <Shield className="w-5 h-5" />
           <span>Security</span>
         </button>
-      </div>
+      </nav>
     </div>
   );
 }

@@ -23,10 +23,11 @@ well and stress free. See `ikonex.md` section 3.
 - [M] Roles plus a badge system (badges are permissions, can be tied to a
   class, club, or time period)
 - [M] Login by phone number with SMS OTP (+)
-- [M] Notifications: in-app for Release 1 events (`C58`), transactional SMS for
-  authentication/account security (`app_login`, `phone_change`,
-  `phone_change_notice`, plus reserved `whatsapp_session` key for Release 3),
-  and WhatsApp [C] deferred to Release 3
+- [M] Notifications: in-app [M] (Release 1 event notifications are in-app
+  only); SMS [M] for OTP and security messages in Release 1, SMS alerts in
+  Release 2; WhatsApp [M] for the parent assistant, moved to Release 1 (+)
+  (SMS transport accepts only `app_login`, `phone_change`,
+  `phone_change_notice`, plus reserved `whatsapp_session` key for Release 3)
 - [M] Audit trail of sensitive actions (+)
 - [S] English (R1) and Swahili (R2) (+)
 - [S] Excel import for students, staff, and fee data (+) — not used for the
@@ -156,7 +157,12 @@ well and stress free. See `ikonex.md` section 3.
   inappropriate content before the patron publishes
 - [S] Other clubs get their own patron posting
 
-**Bursar & Billing (Release 1 reconciled scope — C46–C49)**
+**Bursar** (Release 2; there is no bursar role in Release 1)
+- Release 1: fee structures are loaded by the Ikonex team, charges are
+  applied automatically once at the start of the year, mid-year changes are
+  applied by the team with a note and a parent notification, and direct
+  Paybill payments with a valid admission number are matched automatically;
+  unmatched payments are resolved by the team
 - [M] Fee structure per school and grade, reviewed yearly: in Release 1, fee
   structure loading (`POST /api/v1/billing/fee-structures`) and active-term
   charge triggering (`POST /api/v1/billing/fee-structures/charge-current`)
@@ -204,17 +210,25 @@ details still to be defined
 
 ## Release phases
 
-1. **Release 1:** foundation, onboarding, parent portal core (fees, results,
-   attendance, events), teacher timetable and class performance, bursar/team-loaded
-   fee ledger with STK push, in-app event notifications (`C58`), transactional
-   SMS (`app_login`, `phone_change`, `phone_change_notice`; `whatsapp_session`
-   purpose key reserved), parent AI assistant (in-app read-only) and
-   chat-initiated payment.
-2. **Release 2:** nurse (including in-app class-teacher flag and `[S]` sickbay
-   SMS alert), librarian, leave management, blogs and clubs, syllabus coverage
-   (including AI mapping), biometric attendance, duty badge, bursar payables and
-   signatories, AI M-Pesa reconciliation, AI default reminders, absence SMS
-   alerts (`[S]`), Swahili, consent collection with real parents.
+1. **Release 1 (a test with synthetic data; passes when onboarding works,
+   parents can log in, and badges work well):** foundation, setup wizard,
+   onboarding (staff and parent QR, in-person verification), dean's timetable,
+   calendar and teacher assignment, daily attendance, marks entry and results
+   release/reopen, performance graph, parent portal core (fees, results,
+   attendance, events) with placeholders for clubs, books, and blogs, fee
+   charging and STK push with team-loaded fee structures, **WhatsApp and
+   in-app parent assistant** (read-only) and chat-initiated payment, AI report
+   comment drafting. English only; in-app event notifications only.
+   (Release 1 SMS transport permits only four transactional purposes:
+   `app_login`, `phone_change`, `phone_change_notice`, plus reserved
+   `whatsapp_session` key for Release 3.)
+2. **Release 2:** nurse, librarian, leave management, blogs and clubs,
+   syllabus coverage (including AI mapping), biometric attendance, duty
+   badge, bursar role with payables and signatories, AI M-Pesa reconciliation,
+   AI default reminders and payment plans, parent-facing plain-language
+   explanations, SMS alerts, Swahili, consent collection with real parents.
+   The first release with real data must clear the launch gates in
+   `SECURITY.md`.
 3. **Release 3:** store, caterer, exeat and permission slips, dashboards,
    USSD.
 
@@ -259,7 +273,9 @@ calendar updates, and fee-change notices) are delivered **in-app only**
 - Who pays for WhatsApp and SMS messages
 - Sports/activities scoring: patron-entered scores vs. participation records
   only
-- Fee structure variants (boarder/day, optional items)
+- Fee structure variants (boarder/day, optional items); boarding-variant
+  structures (`O13` — `boarder` / `day` classification and mid-term dormitory
+  changes) are deferred past Release 1 (`all` only in R1)
 - What happens to a leftover credit when a student leaves
 - How a shared parent QR links each parent to the right child
 - Whether the principal/deputy can override the dean on assignments,
@@ -268,9 +284,6 @@ calendar updates, and fee-change notices) are delivered **in-app only**
 - Store/caterer module: not yet designed
 
 Settled since the last version: guardian fee visibility (all linked guardians
-see fees, may be revisited); legacy 8-4-4 support (out of scope). Both are
-recorded in `DECISIONS.md`.
-- Legacy 8-4-4 (Form 3/4) support: in or out of scope
-- Store/caterer module: not yet designed
-- Boarding-variant fee structures (`O13` — `boarder` / `day` classification and
-  mid-term dormitory changes): deferred past Release 1 (`all` only in R1)
+see fees, may be revisited); legacy 8-4-4 support (out of scope); boarding
+variant fee tiers (deferred in Release 1). These are recorded in
+`DECISIONS.md`.

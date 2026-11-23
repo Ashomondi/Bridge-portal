@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { 
   ShieldCheck, 
   Bell, 
@@ -46,25 +47,29 @@ export default function SystemHealthPage() {
             </div>
 
             <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
-              <a href="#public" className="hover:text-slate-900 transition">Public Suite</a>
-              <a href="#cbc" className="hover:text-slate-900 transition">CBC Strands</a>
-              <a href="#resources" className="hover:text-slate-900 transition">Resources</a>
+              <Link href="/" className="hover:text-slate-900 transition">Home</Link>
+              <Link href="/notifications" className="hover:text-slate-900 transition">Notifications</Link>
               <span className="px-3 py-1.5 bg-[#e0f2f1] text-[#008272] rounded-full font-semibold">System Health</span>
             </nav>
           </div>
 
           <div className="flex items-center gap-4">
-            <button type="button" aria-label="Notifications" className="p-2.5 text-slate-600 hover:bg-slate-100 rounded-full transition relative">
+            <button
+              type="button"
+              aria-label="Notifications"
+              onClick={() => router.push('/notifications')}
+              className="p-2.5 text-slate-600 hover:bg-slate-100 rounded-full transition relative"
+            >
               <Bell className="w-5 h-5 text-slate-700" />
               <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-rose-500"></span>
             </button>
             <div className="flex items-center gap-2.5 bg-slate-100 pl-3 pr-4 py-1.5 rounded-full border border-slate-200">
               <div className="w-7 h-7 rounded-full bg-[#008272] text-white flex items-center justify-center text-xs font-bold">
-                GM
+                QA
               </div>
               <div className="text-left leading-tight">
-                <p className="text-xs font-bold text-slate-900">Grace Mwangi</p>
-                <p className="text-[10px] text-slate-500">CBC Lead Admin</p>
+                <p className="text-xs font-bold text-slate-900">QA Inspector</p>
+                <p className="text-[10px] text-slate-500">Development only</p>
               </div>
             </div>
           </div>

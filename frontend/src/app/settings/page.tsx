@@ -1,24 +1,67 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
   ShieldCheck, 
   Bell, 
   Lock, 
   Smartphone, 
   ArrowRight, 
-  RefreshCw, 
   LogOut, 
   Globe
 } from 'lucide-react';
 import { clearStoredAuth, normalizeKenyanPhone } from '@/lib/auth';
+
+type SessionUser = { full_name?: string; phone_number?: string };
+type SessionMembership = { school_name?: string; schoolName?: string; role?: string };
+
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 6) return phone;
+  return `+${digits.slice(0, 3)} ${digits.slice(3, 4)}•• ••• ${digits.slice(-3)}`;
+}
+
+function roleLabel(role?: string): string {
+  if (!role) return 'Member';
+  return role
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 export default function AccountSettingsPage() {
   const router = useRouter();
   const [newPhone, setNewPhone] = useState('');
   const [isChangingPhone, setIsChangingPhone] = useState(false);
   const [phoneMessage, setPhoneMessage] = useState('');
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [membership, setMembership] = useState<SessionMembership | null>(null);
+
+  useEffect(() => {
+    try {
+      const storedUser = sessionStorage.getItem('auth_user');
+      if (storedUser) setUser(JSON.parse(storedUser) as SessionUser);
+    } catch {
+      setUser(null);
+    }
+    try {
+      const storedMembership = sessionStorage.getItem('auth_membership');
+      if (storedMembership) setMembership(JSON.parse(storedMembership) as SessionMembership);
+    } catch {
+      setMembership(null);
+    }
+  }, []);
+
+  const displayName = user?.full_name?.trim() || 'Signed-in user';
+  const initials = displayName
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('') || 'IA';
+  const schoolName = membership?.school_name ?? membership?.schoolName ?? 'Your school';
+  const displayRole = roleLabel(membership?.role);
+  const displayPhone = user?.phone_number ? maskPhone(user.phone_number) : 'Not available';
 
   const handleSendNewCode = (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,23 +97,28 @@ export default function AccountSettingsPage() {
             {/* Desktop Navigation Links */}
             <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
               <span className="px-3 py-1.5 bg-[#e0f2f1] text-[#008272] rounded-full font-semibold">Public Suite</span>
-              <a href="#cbc" className="hover:text-slate-900 transition">CBC Strands</a>
-              <a href="#resources" className="hover:text-slate-900 transition">Resources</a>
+              <Link href="/" className="hover:text-slate-900 transition">Home</Link>
+              <Link href="/notifications" className="hover:text-slate-900 transition">Notifications</Link>
             </nav>
           </div>
 
           <div className="flex items-center gap-4">
-            <button type="button" aria-label="Notifications" className="p-2.5 text-slate-600 hover:bg-slate-100 rounded-full transition relative">
+            <button
+              type="button"
+              aria-label="Notifications"
+              onClick={() => router.push('/notifications')}
+              className="p-2.5 text-slate-600 hover:bg-slate-100 rounded-full transition relative"
+            >
               <Bell className="w-5 h-5 text-slate-700" />
               <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-rose-500"></span>
             </button>
             <div className="flex items-center gap-2.5 bg-slate-100 pl-3 pr-4 py-1.5 rounded-full border border-slate-200">
               <div className="w-7 h-7 rounded-full bg-[#008272] text-white flex items-center justify-center text-xs font-bold">
-                GM
+                {initials}
               </div>
               <div className="text-left leading-tight">
-                <p className="text-xs font-bold text-slate-900">Grace Mwangi</p>
-                <p className="text-[10px] text-slate-500">CBC Lead Admin</p>
+                <p className="text-xs font-bold text-slate-900">{displayName}</p>
+                <p className="text-[10px] text-slate-500">{displayRole}</p>
               </div>
             </div>
           </div>
@@ -92,16 +140,16 @@ export default function AccountSettingsPage() {
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-center gap-4">
               <div className="w-14 h-14 rounded-2xl bg-[#008272] text-white font-bold text-xl flex items-center justify-center shadow-md shadow-[#008272]/20">
-                GM
+                {initials}
               </div>
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-xl font-bold text-slate-900">Grace Mwangi</h2>
+                  <h2 className="text-xl font-bold text-slate-900">{displayName}</h2>
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">
-                    Parent
+                    {displayRole}
                   </span>
                 </div>
-                <p className="text-xs text-slate-500 font-medium">Lakeview Secondary</p>
+                <p className="text-xs text-slate-500 font-medium">{schoolName}</p>
               </div>
             </div>
             <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold rounded-full self-start md:self-auto">
@@ -111,7 +159,7 @@ export default function AccountSettingsPage() {
           </div>
 
           <div className="bg-[#f8faf9] border border-slate-200/80 rounded-xl p-3.5 text-xs text-slate-600 leading-relaxed">
-            Official details are managed directly by Lakeview Secondary administration. To update legal guardianship or institutional identity records, visit the administration office.
+            Official details are managed directly by {schoolName} administration. To update legal guardianship or institutional identity records, visit the administration office.
           </div>
         </div>
 
@@ -127,14 +175,12 @@ export default function AccountSettingsPage() {
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="text-xl font-mono font-bold text-slate-900 tracking-wide">
-                +254 7•• ••• 678
-              </div>
-              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium rounded-lg">
-                <RefreshCw className="w-3 h-3 text-amber-600" /> Changed today • payments paused until 10:15 am
+                {displayPhone}
               </div>
             </div>
 
             <button 
+              type="button"
               onClick={() => setIsChangingPhone(!isChangingPhone)}
               className="px-4 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 font-semibold rounded-xl text-xs transition flex items-center gap-1.5 self-start md:self-auto"
             >
@@ -151,13 +197,8 @@ export default function AccountSettingsPage() {
             <div className="bg-[#f4f8f7] border border-slate-200 rounded-2xl p-5 space-y-4 mt-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-[#008272] uppercase tracking-wider flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-[#008272]"></span> STEP 1 OF 3 • CHANGE YOUR NUMBER
+                  <span className="w-2 h-2 rounded-full bg-[#008272]"></span> CHANGE YOUR NUMBER
                 </span>
-                <div className="flex gap-1">
-                  <span className="w-2 h-2 rounded-full bg-[#008272]"></span>
-                  <span className="w-2 h-2 rounded-full bg-slate-300"></span>
-                  <span className="w-2 h-2 rounded-full bg-slate-300"></span>
-                </div>
               </div>
 
               <p className="text-xs text-slate-600">
@@ -216,10 +257,11 @@ export default function AccountSettingsPage() {
               🔄 Switch role or school
             </div>
             <p className="text-xs text-slate-500">
-              Currently active as Grace Mwangi at Lakeview.
+              Currently active as {displayName} at {schoolName}.
             </p>
           </div>
           <button 
+            type="button"
             onClick={() => router.push('/select-role')}
             className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition shadow-sm"
           >
@@ -274,7 +316,7 @@ export default function AccountSettingsPage() {
             <LogOut className="w-4 h-4" /> Sign out
           </button>
           <p className="text-[11px] font-mono text-slate-400">
-            Session ID: IKX-49201–KE · Lakeview
+            Signed in on this device
           </p>
         </div>
 

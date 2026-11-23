@@ -1365,5 +1365,4 @@ type DarajaProvider interface{}
 
 type STKPollQueue interface{}
 
-func registerFeeChangeRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {}
-func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity)     {}
+func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {}

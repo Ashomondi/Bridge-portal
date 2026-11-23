@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { 
   Bell, 
@@ -10,102 +10,123 @@ import {
   CreditCard, 
   UserX, 
   Calendar, 
-  Eye, 
   LayoutGrid, 
   Users, 
   Settings as SettingsIcon 
 } from 'lucide-react';
 
+type NotificationSection = 'Today' | 'Earlier this week' | 'Earlier';
+
 interface NotificationItem {
   id: string;
   title: string;
   subtitle: string;
-  timestamp: string;
+  createdAt: string;
   unread: boolean;
-  section: 'Today' | 'Earlier this week' | 'Earlier';
   type: 'results' | 'correction' | 'fee' | 'attendance' | 'exam' | 'term';
   note?: {
     author: string;
     text: string;
-    actionLabel?: string;
   };
 }
+
+const hoursAgo = (hours: number) =>
+  new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+const nairobiDateKey = (value: string) =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(value));
+
+const nairobiTimestamp = (value: string) =>
+  new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(new Date(value));
+
+function sectionFor(createdAt: string, todayKey: string): NotificationSection {
+  if (nairobiDateKey(createdAt) === todayKey) return 'Today';
+  const ageDays = (Date.now() - new Date(createdAt).getTime()) / 86_400_000;
+  return ageDays < 7 ? 'Earlier this week' : 'Earlier';
+}
+
+// Sample fixtures for the demo portal; replaced by the notifications API when wired.
+const SAMPLE_NOTIFICATIONS: NotificationItem[] = [
+  {
+    id: '1',
+    title: 'Term 1 results are ready',
+    subtitle: 'Amani Wekesa • Grade 8 East',
+    createdAt: hoursAgo(2),
+    unread: true,
+    type: 'results',
+  },
+  {
+    id: '2',
+    title: 'A result was corrected',
+    subtitle: 'Integrated Science • Amani Wekesa',
+    createdAt: hoursAgo(26),
+    unread: true,
+    type: 'correction',
+    note: {
+      author: "Teacher's note",
+      text: 'Practical assessment score recalculated by Ms. Wanjiru',
+    },
+  },
+  {
+    id: '3',
+    title: 'Your Term 2 fee change',
+    subtitle: 'Transport charge removed after a route change.',
+    createdAt: hoursAgo(40),
+    unread: true,
+    type: 'fee',
+    note: {
+      author: 'Note from the school',
+      text: 'Transport charge removed after a route change.',
+    },
+  },
+  {
+    id: '4',
+    title: 'Amani was marked absent',
+    subtitle: 'Morning register • Form 2 class teacher',
+    createdAt: hoursAgo(120),
+    unread: false,
+    type: 'attendance',
+  },
+  {
+    id: '5',
+    title: 'Term 2 exams begin soon',
+    subtitle: 'Updated by the dean',
+    createdAt: hoursAgo(144),
+    unread: false,
+    type: 'exam',
+  },
+  {
+    id: '6',
+    title: 'Term 2 start date moved',
+    subtitle: 'Fee due dates moved with it.',
+    createdAt: hoursAgo(240),
+    unread: false,
+    type: 'term',
+    note: {
+      author: 'Note from the dean',
+      text: 'School opening delayed by a week.',
+    },
+  },
+];
 
 export default function NotificationsPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<'all' | 'unread'>('all');
   const [activeNav, setActiveNav] = useState('alerts');
-
-  // Sample data mimicking your notifications mockup
-  const [notifications, setNotifications] = useState<NotificationItem[]>([
-    {
-      id: '1',
-      title: 'Term 1 results are ready',
-      subtitle: 'Amani Wekesa • Grade 8 East',
-      timestamp: 'Today, 8:10 am',
-      unread: true,
-      section: 'Today',
-      type: 'results',
-    },
-    {
-      id: '2',
-      title: 'A result was corrected',
-      subtitle: 'Integrated Science • Amani Wekesa',
-      timestamp: 'Yesterday, 4:30 pm',
-      unread: true,
-      section: 'Today',
-      type: 'correction',
-      note: {
-        author: "Teacher's note",
-        text: 'Practical assessment score recalculated by Ms. Wanjiru',
-        actionLabel: "Read the teacher's note",
-      },
-    },
-    {
-      id: '3',
-      title: 'Your Term 2 fee change',
-      subtitle: 'Transport charge removed after a route change.',
-      timestamp: 'Tuesday, 11:02 am',
-      unread: true,
-      section: 'Today',
-      type: 'fee',
-      note: {
-        author: 'Note from the school',
-        text: 'Transport charge removed after a route change.',
-      },
-    },
-    {
-      id: '4',
-      title: 'Amani was marked absent',
-      subtitle: 'Morning register • Form 2 class teacher',
-      timestamp: 'Wed 29 Oct, 9:05 am',
-      unread: false,
-      section: 'Earlier this week',
-      type: 'attendance',
-    },
-    {
-      id: '5',
-      title: 'Term 2 exams begin soon',
-      subtitle: 'Updated by the dean',
-      timestamp: 'Mon 27 Oct, 2:15 pm',
-      unread: false,
-      section: 'Earlier this week',
-      type: 'exam',
-    },
-    {
-      id: '6',
-      title: 'Term 2 start date moved',
-      subtitle: 'Fee due dates moved with it.',
-      timestamp: 'Fri 24 Oct, 10:00 am',
-      unread: false,
-      section: 'Earlier',
-      type: 'term',
-      note: {
-        author: 'Note from the dean',
-        text: 'School opening delayed by a week.',
-      },
-    },
-  ]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>(SAMPLE_NOTIFICATIONS);
 
   const unreadCount = notifications.filter((n) => n.unread).length;
 
@@ -113,9 +134,25 @@ export default function NotificationsPage() {
     setNotifications(notifications.map((n) => ({ ...n, unread: false })));
   };
 
-  const filteredNotifications = activeTab === 'unread' 
-    ? notifications.filter((n) => n.unread) 
-    : notifications;
+  const groupedNotifications = useMemo(() => {
+    const todayKey = nairobiDateKey(new Date().toISOString());
+    const filtered = activeTab === 'unread'
+      ? notifications.filter((n) => n.unread)
+      : notifications;
+    const entries = [...filtered].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+
+    const groups: { title: NotificationSection; items: NotificationItem[] }[] = [
+      { title: 'Today', items: [] },
+      { title: 'Earlier this week', items: [] },
+      { title: 'Earlier', items: [] },
+    ];
+    for (const item of entries) {
+      groups.find((group) => group.title === sectionFor(item.createdAt, todayKey))?.items.push(item);
+    }
+    return groups.filter((group) => group.items.length > 0);
+  }, [activeTab, notifications]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#e0f2f1] via-[#f4f8f7] to-white flex flex-col items-center justify-between p-4 text-slate-800">
@@ -197,108 +234,55 @@ export default function NotificationsPage() {
 
         {/* Notifications List Content Grouped by Sections */}
         <div className="space-y-4">
-          
-          {/* Today Section */}
-          <div className="space-y-2.5">
-            <p className="text-[10px] font-bold tracking-wider text-slate-400 uppercase px-1">Today</p>
-            
-            {filteredNotifications.filter(n => n.section === 'Today').map((item) => (
-              <div key={item.id} className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-sm space-y-2.5 relative">
-                <div className="flex items-start gap-3">
-                  {/* Unread dot */}
-                  {item.unread && (
-                    <span className="w-2 h-2 rounded-full bg-purple-600 shrink-0 mt-2"></span>
-                  )}
-                  
-                  {/* Icon Box */}
-                  <div className={`p-2.5 rounded-xl shrink-0 ${
-                    item.type === 'results' ? 'bg-purple-100 text-purple-700' :
-                    item.type === 'correction' ? 'bg-purple-100 text-purple-700' : 'bg-purple-50 text-purple-600'
-                  }`}>
-                    {item.type === 'results' && <BarChart2 className="w-4 h-4" />}
-                    {item.type === 'correction' && <FileEdit className="w-4 h-4" />}
-                    {item.type === 'fee' && <CreditCard className="w-4 h-4" />}
-                  </div>
+          {groupedNotifications.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-600">
+              {activeTab === 'unread' ? 'You have no unread notifications.' : 'No notifications yet.'}
+            </div>
+          ) : (
+            groupedNotifications.map((group) => (
+              <div key={group.title} className="space-y-2.5">
+                <p className="text-[10px] font-bold tracking-wider text-slate-400 uppercase px-1">{group.title}</p>
 
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-1">
-                      <h2 className="font-bold text-slate-900 text-sm truncate">{item.title}</h2>
-                      <span className="text-[10px] text-slate-400 shrink-0">{item.timestamp}</span>
+                {group.items.map((item) => (
+                  <div key={item.id} className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-sm space-y-2.5 relative">
+                    <div className="flex items-start gap-3">
+                      {item.unread && (
+                        <span className="w-2 h-2 rounded-full bg-purple-600 shrink-0 mt-2" aria-label="Unread" />
+                      )}
+
+                      <div className="p-2.5 rounded-xl shrink-0 bg-purple-50 text-purple-600">
+                        {item.type === 'results' && <BarChart2 className="w-4 h-4" />}
+                        {item.type === 'correction' && <FileEdit className="w-4 h-4" />}
+                        {item.type === 'fee' && <CreditCard className="w-4 h-4" />}
+                        {item.type === 'attendance' && <UserX className="w-4 h-4 text-slate-500" />}
+                        {(item.type === 'exam' || item.type === 'term') && <Calendar className="w-4 h-4 text-slate-500" />}
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <h2 className="font-bold text-slate-900 text-sm break-words">{item.title}</h2>
+                          <span className="text-[10px] text-slate-400 shrink-0">{nairobiTimestamp(item.createdAt)}</span>
+                        </div>
+                        <p className="text-xs text-slate-500 break-words">{item.subtitle}</p>
+                      </div>
                     </div>
-                    <p className="text-xs text-slate-500 truncate">{item.subtitle}</p>
-                  </div>
-                </div>
 
-                {/* Optional nested note card */}
-                {item.note && (
-                  <div className="bg-[#f5f3f9] border border-[#e8e2f3] rounded-xl p-3 space-y-2 text-xs text-slate-700 ml-4">
-                    <p><span className="font-semibold text-slate-900">{item.note.author}:</span> {item.note.text}</p>
-                    {item.note.actionLabel && (
-                      <button className="inline-flex items-center gap-1.5 text-xs font-semibold text-purple-700 hover:underline pt-1">
-                        <Eye className="w-3.5 h-3.5" /> {item.note.actionLabel}
-                      </button>
+                    {item.note && (
+                      <div className="bg-[#f5f3f9] border border-[#e8e2f3] rounded-xl p-3 text-xs text-slate-700 ml-4">
+                        <p><span className="font-semibold text-slate-900">{item.note.author}:</span> {item.note.text}</p>
+                      </div>
                     )}
                   </div>
-                )}
+                ))}
               </div>
-            ))}
-          </div>
-
-          {/* Earlier This Week Section */}
-          <div className="space-y-2.5 pt-2">
-            <p className="text-[10px] font-bold tracking-wider text-slate-400 uppercase px-1">Earlier This Week</p>
-            
-            {filteredNotifications.filter(n => n.section === 'Earlier this week').map((item) => (
-              <div key={item.id} className="bg-white/80 border border-slate-200/80 rounded-2xl p-3.5 shadow-sm flex items-start gap-3">
-                <div className="p-2.5 rounded-xl shrink-0 bg-slate-100 text-slate-600 mt-0.5">
-                  {item.type === 'attendance' && <UserX className="w-4 h-4 text-slate-500" />}
-                  {item.type === 'exam' && <Calendar className="w-4 h-4 text-slate-500" />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-1">
-                    <h2 className="font-semibold text-slate-800 text-sm truncate">{item.title}</h2>
-                    <span className="text-[10px] text-slate-400 shrink-0">{item.timestamp}</span>
-                  </div>
-                  <p className="text-xs text-slate-500 truncate">{item.subtitle}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Earlier Section */}
-          <div className="space-y-2.5 pt-2">
-            <p className="text-[10px] font-bold tracking-wider text-slate-400 uppercase px-1">Earlier</p>
-            
-            {filteredNotifications.filter(n => n.section === 'Earlier').map((item) => (
-              <div key={item.id} className="bg-white/80 border border-slate-200/80 rounded-2xl p-3.5 shadow-sm space-y-2.5">
-                <div className="flex items-start gap-3">
-                  <div className="p-2.5 rounded-xl shrink-0 bg-slate-100 text-slate-600 mt-0.5">
-                    <Calendar className="w-4 h-4 text-slate-500" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-1">
-                      <h2 className="font-semibold text-slate-800 text-sm truncate">{item.title}</h2>
-                      <span className="text-[10px] text-slate-400 shrink-0">{item.timestamp}</span>
-                    </div>
-                    <p className="text-xs text-slate-500 truncate">{item.subtitle}</p>
-                  </div>
-                </div>
-
-                {item.note && (
-                  <div className="bg-[#eaf4f2] border border-[#d0e8e4] rounded-xl p-3 text-xs text-slate-700 ml-4">
-                    <p><span className="font-semibold text-slate-900">{item.note.author}:</span> {item.note.text}</p>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-
+            ))
+          )}
         </div>
 
       </div>
 
       {/* Bottom Floating Navigation Bar */}
-      <div className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
+      <nav aria-label="Primary" className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
         <button 
           type="button"
           onClick={() => { setActiveNav('home'); router.push('/'); }} 
@@ -318,7 +302,7 @@ export default function NotificationsPage() {
         <button 
           type="button"
           onClick={() => setActiveNav('alerts')} 
-          aria-current="page"
+          aria-current={activeNav === 'alerts' ? 'page' : undefined}
           className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'alerts' ? 'text-[#008272] font-semibold' : 'hover:text-slate-800'}`}
         >
           <Bell className="w-5 h-5" />
@@ -332,7 +316,7 @@ export default function NotificationsPage() {
           <SettingsIcon className="w-5 h-5" />
           <span>Settings</span>
         </button>
-      </div>
+      </nav>
 
     </div>
   );
