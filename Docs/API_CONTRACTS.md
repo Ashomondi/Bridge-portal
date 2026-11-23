@@ -237,9 +237,41 @@ fixed two-decimal KES strings (e.g. `"10000.00"`).
   - **Success (`200`):** Returns the `StudentFeeBalance` fields plus `entries: [{id, term_id, entry_type, amount, reference, description, created_at}]`
     ordered deterministically by `created_at ASC, id ASC` (`entry_type` in `charge | payment | credit_applied | adjustment`).
   - **Note on pagination:** Currently returns the student's full entry list without query pagination parameters.
-- `POST /payments/stk-push` *(planned/unimplemented on this branch)* — AI service calls this after confirming child + amount with the parent; never initiates without that confirmation step
-- `GET /payments/unmatched` *(planned/unimplemented on this branch)* — feeds the AI reconciliation feature
-- `POST /payments/{id}/match` *(planned/unimplemented on this branch)* — bursar confirms an AI-suggested match
+- `POST /api/v1/payments/stk-push`
+  - **Auth & tenant scope:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`). Student lookup and M-Pesa config resolution are strictly scoped to `Principal.SchoolID` (`404 STUDENT_NOT_FOUND` across schools).
+  - **Guardian eligibility:** Requires an active `student_guardians` link with `is_fee_payer = TRUE`, active `memberships.status = 'active'`, and `users.is_active = TRUE` (`403 FORBIDDEN` otherwise).
+  - **Request schema:** `{"student_id":"<uuid>","amount":"<whole KES string/number >= 1.00>","phone_number":"<optional E.164/KE phone>","source":"web|chat|whatsapp|in_app","parent_confirmed":true|false,"idempotency_key":"<optional <=128 chars>"}` (also accepts `Idempotency-Key` HTTP header).
+  - **Amount precision:** Release 1 STK Push accepts **whole KES shillings >= 1.00 KES** only (`amount >= 100 && amount % 100 == 0` in minor units); fractional KES, zero, or negative values return `422 INVALID_PAYMENT_AMOUNT`. Overpayments above the student's current balance are permitted and carried forward as `credit_balance`.
+  - **Chat-initiated payment controls (`source` in `chat | whatsapp | in_app`):**
+    - Mandatory explicit `"parent_confirmed": true`; omitted or `false` returns `422 PARENT_CONFIRMATION_REQUIRED`.
+    - Enforces the 24-hour phone-change freeze (`users.chat_payment_paused_until > NOW()` → `403 CHAT_PAYMENT_PAUSED_PHONE_CHANGE`). Fails closed (`503 CHAT_PAYMENT_FREEZE_UNAVAILABLE`) if the freeze state cannot be read.
+    - Requires a valid registered phone number (`422 INVALID_REGISTERED_PHONE`) and rejects any destination phone override (`422 CHAT_PHONE_OVERRIDE_FORBIDDEN`).
+  - **Idempotency:** Scoped to `(school_id, guardian_user_id, idempotency_key)`. Identical retries return the existing STK attempt without re-invoking Daraja; reusing a key with different student, amount, phone, or source returns `409 IDEMPOTENCY_KEY_CONFLICT`; concurrent in-flight attempts return `409 STK_REQUEST_IN_PROGRESS`.
+  - **Mandatory dependencies:** Requires non-nil `AuditLogger`, `InAppNotifier`, `DarajaProvider`, and `STKPollQueue` (fails closed if unconfigured). Sets `AccountReference = student.admission_number` and enqueues a 45-second status poll (`poll_scheduled` reflects queue status; queue failures are durably audited and recoverable via `RetryUnscheduledSTKPolls`).
+  - **Success (`202`):** `{"status":"success","data":{stk_request_id, student_id, admission_number, account_reference, amount, phone_number, checkout_request_id, merchant_request_id, status, customer_message, poll_scheduled}}`.
+- `POST /api/v1/billing/mpesa/callback` and `POST /api/v1/billing/mpesa/callback/{callback_token}` *(Safaricom Daraja STK Webhook — flat Daraja JSON, NOT the standard app envelope)*
+  - **Authentication (fail-closed):**
+    - Per-request path route (`/{callback_token}`): Safaricom invokes the server-generated 64-hex-char token embedded in the `CallBackURL` path segment during `InitiateSTKPush`. The backend hashes the token (SHA-256), validates it in constant time against `mpesa_stk_requests.callback_token_hash`, and verifies `CheckoutRequestID` binding.
+    - Static route (`/api/v1/billing/mpesa/callback`): Requires a configured `VerifyCallback` hook OR a trusted reverse proxy / API gateway whose `RemoteAddr` is in `TrustedCallbackProxies`, strips client auth headers, and injects `X-Callback-Token` (or `Authorization: Bearer`) matching `MPESA_CALLBACK_TOKEN`. Query-string tokens are always rejected (`401`).
+  - **Tenant resolution:** Resolved strictly from trusted database state (`mpesa_stk_requests` via `callback_token_hash` or globally unique `CheckoutRequestID`), never from caller-supplied `school_id` query parameters or `BusinessShortCode`. If `BusinessShortCode` is present, it is verified against `school_mpesa_configs.shortcode`; if `MerchantRequestID` is stored and present, it is verified to match.
+  - **Amount & state integrity:** Successful callbacks (`ResultCode == 0`) require both `MpesaReceiptNumber` and a valid positive `Amount` matching the initiated `mpesa_stk_requests.amount` exactly (`422 MPESA_AMOUNT_MISMATCH` otherwise, with zero ledger mutation and a rejection audit entry). Provider-confirmed success may settle `initiating`, `pending`, `timeout`, `uncertain`, or earlier `failed` attempts; duplicate successes are idempotent no-ops; late failure callbacks never overwrite `succeeded`.
+  - **Response schema (Daraja format — intentionally distinct from standard app envelope):**
+    - Accepted / duplicate (`200`): `{"ResultCode":0,"ResultDesc":"Accepted"}`
+    - Rejected / unauthenticated / invalid (`400`/`401`/`404`/`409`/`422`/`500`): `{"ResultCode":1,"ResultDesc":"<safe error description>"}`
+- `POST /api/v1/billing/mpesa/c2b-confirmation` *(Safaricom Daraja C2B Paybill Webhook — flat Daraja JSON)*
+  - **Authentication:** Same fail-closed trusted reverse proxy (`TrustedCallbackProxies` + `X-Callback-Token` / `Bearer`) or `VerifyCallback` hook as the static STK callback route. Query-string tokens are rejected (`401`).
+  - **Scope & tenant resolution:** Release 1 supports **Paybill** (`Pay Bill` / `CustomerPayBillOnline`) only; Till (`Buy Goods` / `CustomerBuyGoodsOnline`) is rejected (`422 UNSUPPORTED_MPESA_SHORTCODE_TYPE`). Resolves `school_id` strictly from `BusinessShortCode` via `ResolveShortcode` and verifies against `school_mpesa_configs`.
+  - **Matching & idempotency:** Matches `UPPER(TRIM(students.admission_number)) = UPPER(TRIM(BillRefNumber))` strictly within the resolved `school_id`. Matched payments credit the ledger and notify `is_fee_payer = TRUE` guardians; unknown admission numbers persist into `payments` (`unmatched`) + `unmatched_payments` without discarding money. Duplicate `TransID` receipts are idempotent no-ops.
+  - **Response schema (Daraja format):** `{"ResultCode":0,"ResultDesc":"Accepted"}` on `200`, or `{"ResultCode":1,"ResultDesc":"<safe error description>"}` on rejection.
+- `GET /api/v1/payments/unmatched`
+  - **Auth & permissions:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`) and an active non-parent school membership holding an active school-wide badge granting `billing.unmatched_payments.manage`, `billing.ledgers.view`, or `billing.fee_structures.manage` (`403 FORBIDDEN` otherwise). Strictly tenant-scoped to `Principal.SchoolID`.
+  - **Pagination:** Standard `page` / `per_page` (`contracts.Pagination`).
+  - **Success (`200`):** Standard paginated envelope with `data: [{id, payment_id, transaction_ref, amount, payer_phone, payer_name, raw_account_ref, status, created_at}]`.
+- `POST /api/v1/payments/{id}/match`
+  - **Auth & permissions:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`), valid UUID `{id}` (`400 INVALID_PAYMENT_ID`), and an active non-parent school membership holding an active school-wide badge granting `billing.unmatched_payments.manage` or `billing.fee_structures.manage` (`403 FORBIDDEN` for teachers and read-only `billing.ledgers.view` staff).
+  - **Request schema:** `{"student_id":"<uuid>","resolution_note":"<optional string>"}`.
+  - **Behavior:** Locks the `unmatched_payments` row `FOR UPDATE` in `Principal.SchoolID` (`404 UNMATCHED_PAYMENT_NOT_FOUND` across schools; `409 PAYMENT_ALREADY_RESOLVED` if already resolved), validates target student belongs to `Principal.SchoolID` (`422 STUDENT_NOT_FOUND` otherwise), atomically updates `unmatched_payments` + `payments`, credits the student ledger, notifies `is_fee_payer = TRUE` guardians, and writes a `billing.payment.manual_match` audit event.
+  - **Success (`200`):** `{"status":"success","data":{payment_id, unmatched_id, student_id, transaction_ref, amount, status:"resolved", resolved_at}}`.
 - `POST /payment-plans/{id}/reminder-check` *(planned/unimplemented on this branch)* — AI service reads pledge vs. actual payments and arrears, triggers a reminder job (does not send directly — enqueues via the notification system)
 
 ### Notifications

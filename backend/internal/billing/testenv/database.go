@@ -69,9 +69,11 @@ func New(t *testing.T, applyOwned bool) *DB {
 	t.Cleanup(pool.Close)
 	db := &DB{Admin: pool, role: ident}
 	db.Apply(t, "000001_init_schema.up.sql")
+	db.Apply(t, "000002_r1_core_onboarding.up.sql")
 	db.Apply(t, "000003_r1_academics.up.sql")
 	if applyOwned {
 		db.Apply(t, "000004_r1_billing_whatsapp_notifications.up.sql")
+		db.Apply(t, "000005_r1_mpesa_hardening.up.sql")
 	}
 	db.Grant(t)
 	return db
