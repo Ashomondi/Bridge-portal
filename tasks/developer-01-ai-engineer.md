@@ -67,7 +67,7 @@ The following files exist as placeholders in `ai_service/app/api/` for **Release
     ```
   - If the token is missing, invalid, or `exp < current_unix_timestamp`, immediately return `401 Unauthorized` without calling the LLM or Go backend.
   - **Session Lookup Rate Limiting (`Docs/Ikonex.md` C66):**
-    - Track backend lookups per `session_id` in memory (with TTL matching the 6-hour session window):
+    - Track backend lookups per `session_id` in shared, atomic session state with a TTL matching the 6-hour session window, so the caps survive restarts and are consistent across workers/replicas:
       - Maximum **15 read lookups** (fee balance, attendance, school contact profile) per `session_id`.
       - Maximum **3 STK push payment initiations** per `session_id`.
     - When a session exceeds its lookup cap, do not call the Go backend; return a polite message instructing the parent to wait or contact the school office using cached/provided school contact details.
@@ -266,7 +266,7 @@ When you declare your assignment complete, the following exact functionality mus
 - [ ] **AC-AI-02 (aligns with AC-13):** Any query with `channel == "whatsapp"` asking for results, grades, CBC levels, or teacher comments returns zero academic data and includes the app link.
 - [ ] **AC-AI-03 (aligns with AC-23):** `POST /api/v1/internal/payments/stk-push` is never called unless the session state is `AWAITING_CONFIRMATION` for the exact `(student_id, amount, mpesa_phone)` tuple and the user's current message matches the affirmative confirmation pattern.
 - [ ] **AC-AI-04 (aligns with AC-26):** When the Go backend indicates a 24-hour chat payment pause due to a phone number change, `chat_payment.py` blocks the STK push and informs the parent with the school's contact details.
-- [ ] **AC-AI-05 (Fact Validation):** Post-generation regex/number verification ensures that if the LLM output contains any currency amount that does not appear in the Go `fee-balance` JSON response, the service discards the LLM text and uses the deterministic template.
+- [ ] **AC-AI-05 (Fact Validation):** Post-generation validation checks each generated figure against its corresponding semantic source field in the Go `fee-balance` JSON (e.g. a balance must match `current_balance`, a paid amount must match `paid_amount`), not merely "any amount that appears anywhere in the payload". If a figure is missing or mismatched — including when `current_balance` and `paid_amount` are swapped — the service discards the LLM text and uses the deterministic template.
 - [ ] **AC-AI-06 (No Ranking / No Diagnosis Guardrail):** `report_drafter.py` rejects/sanitizes any draft containing forbidden terms (`rank`, `position`, `1st`, `last`, `top`, `bottom`, clinical diagnoses) and guarantees `requires_teacher_approval: true`.
 - [ ] **AC-AI-07 (Session Lookup Cap - C66):** Exceeding 15 read lookups or 3 payment starts in a single `session_id` returns a rate-limit response with school contact details without calling the Go backend.
 

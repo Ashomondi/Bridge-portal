@@ -119,7 +119,7 @@ You own **3 cohesive, end-to-end backend features**:
      - `onboarding:purge_unverified`: Periodic task calling Evans's cleanup logic to delete rejected/unverified `registration_submissions` after the configured retention days (`AC-07`).
 4. **Internal AI API (`internal/internalapi` — `C21, AC-28`):**
    - Validates `X-Internal-Service-Token` and verifies the HMAC-SHA256 signature and `exp` of `X-User-Context`.
-   - Sets tenant RLS (`WithTenantTx`) from `X-User-Context.school_id` and enforces guardian-child ownership (`student_guardians`) on every student lookup (`Docs/API_CONTRACTS.md`: *"Parent-facing endpoints additionally scope to children this parent is a guardian of"*).
+   - Sets tenant RLS (`WithTenantTx`) from `X-User-Context.school_id` and authorizes every student lookup to the specific requested student: parent requests require a current guardian-child link (`student_guardians`), while teacher requests require the caller's role-scoped assignment to that student (e.g. an active subject/class assignment). Never bypass tenant scoping or broaden access beyond the authorized student (`Docs/API_CONTRACTS.md`: *"Parent-facing endpoints additionally scope to children this parent is a guardian of"*).
    - Implements all 7 internal endpoints called by Sos (`GET /api/v1/internal/school-profile`, `GET /api/v1/internal/parents/{user_id}/children`, `GET /api/v1/internal/students/{id}/fee-balance`, `GET /api/v1/internal/students/{id}/attendance-summary`, `GET /api/v1/internal/students/{id}/marks-summary`, `POST /api/v1/internal/payments/stk-push`, `POST /api/v1/internal/ai/audit-log`) and the frontend chat proxy `POST /api/v1/chat/message`.
 
 ---

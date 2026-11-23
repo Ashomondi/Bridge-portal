@@ -84,7 +84,6 @@ region**
 
 ---
 
-<<<<<<< HEAD
 **2026-10-29 — WhatsApp moves into Release 1; one WhatsApp bot per school**
 The parent assistant and chat payment ship on WhatsApp and in-app in Release
 1. SMS and USSD come later. Each school has its own bot so admission numbers
@@ -180,7 +179,6 @@ unaffected (synthetic data).
 **2026-10-29 — Retention at student exit is set per record type**
 Periods to be set with a data protection lawyer. Biometric templates are
 deleted on exit (unchanged).
-=======
 **2026-11-13 — ADR: Tenant Binding (transactions derive the school from the principal)**
 
 - **Context:** Every tenant-owned table enforces PostgreSQL RLS using `school_id = current_school_id()` via transaction-local `app.school_id`. Accepting a separate school UUID parameter alongside an authenticated caller creates a risk of handlers passing an unchecked URL, query, header, or body school ID into a transaction.
@@ -236,9 +234,6 @@ deleted on exit (unchanged).
 - **Rationale:** Placing the contract in `contracts` avoids circular dependencies between `academics` and `notifications`, `contracts.SQLTx` bridges `pgx.Tx` (billing) and `*sql.Tx` (academics) within the caller's real database transaction without forcing a driver rewrite, and executing inside `Store.WithTx` prevents silent partial commits where a domain change succeeds without its required parent/teacher notice.
 - **Consequences:** All Release 1 `academics` notification calls (attendance absence, results release/re-release, timetable updates, calendar event updates) are mandatory within their business transaction: if recipient membership validation or notification persistence fails, the entire transaction rolls back and returns an error. Best-effort post-commit fan-out is not used for these paths.
 - **Alternatives considered:** Leaving notifications post-commit with best-effort error logging (rejected because it violates atomic business/notice guarantees and silently drops required notices on failure) or rewriting `academics.SQLStore` from `database/sql` to `pgx` (rejected to preserve `academics`'s driver-neutral store boundary).
-<<<<<<< HEAD
->>>>>>> 7e300ec074132fac5cb72ca2428a933bfcbc5172
-=======
 
 **2026-11-18 — ADR: Integer Minor-Unit Money (`billing.Money`)**
 
@@ -287,4 +282,3 @@ deleted on exit (unchanged).
 - **Rationale:** Aligns with `API_CONTRACTS.md` and `000001_init_schema.up.sql`, enforces least privilege (bursar read access does not grant structure loading or payment mutation), and protects financial privacy between co-guardians using the existing `is_fee_payer` column.
 - **Consequences:** Staff without explicit badge grants, inactive memberships, expired badges, and guardians with `is_fee_payer = FALSE` receive `403 FORBIDDEN` (`404` across schools).
 - **Alternatives considered:** Hardcoding role name strings (rejected as schema-inconsistent and bypassing badges) or allowing all guardians regardless of `is_fee_payer` (rejected as ignoring the schema's explicit fee-payer flag).
->>>>>>> fef894bb73d2e07250091ef2c4bfc2e3802e68a1

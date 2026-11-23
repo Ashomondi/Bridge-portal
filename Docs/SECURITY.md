@@ -163,6 +163,7 @@ protection lawyer; the rules below are the starting point.
 | Financial ledger | Kept as the law requires | Proposed; period open |
 
 What happens to a leftover ledger credit when a student leaves is undecided.
+
 Under Kenya's Data Protection Act, 2019, personal data must not be kept longer
 than necessary for its lawful purpose. **Formal retention schedules have not yet
 been established** for this platform: every post-session, post-reconciliation,
@@ -245,14 +246,16 @@ WhatsApp; the chat sends a link to the app instead.
   received the message; the OTP goes only to a number registered for that
   student, chosen by the sender from masked numbers.
 - OTPs: one request per minute; more than five in thirty minutes blocks the
-  requesting number for 24 hours (not the guardian's account). How this applies
-  to app login is undecided.
+  requesting number for 24 hours (not the guardian's account). App login also
+  applies a separate per-IP limit (50 requests in thirty minutes, 15-minute
+  block) so a shared school network is not locked out for a day.
 - A verified WhatsApp session lasts 6 hours.
 - Changing a registered number needs 2FA (an OTP to the new number), notifies
   the old number by SMS, and pauses chat payments for 24 hours.
 - Pending registrations are not active records and grant no access until a
   staff verifier confirms them in person. Verification can be delegated only
   to staff, only while the QR is active (12 hours).
+
 ## Billing access control and financial auditability
 
 - **Authorization & least privilege:** Billing endpoints never rely on
