@@ -15,6 +15,7 @@ import (
 	"github.com/Ashomondi/ikonex-academy/backend/internal/billing/testenv"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/notifications"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -53,6 +54,12 @@ func (d *stubDaraja) QuerySTKStatus(_ context.Context, req billing.DarajaSTKQuer
 		ResultCode:        0,
 		ResultDesc:        "Processed",
 	}, nil
+}
+
+type stubPollQueue struct{}
+
+func (stubPollQueue) EnqueueSTKPoll(context.Context, billing.STKPollTask, time.Duration) error {
+	return nil
 }
 
 func TestUserContextSignerAndVerifier(t *testing.T) {
@@ -216,11 +223,13 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 
 	tenantDB := contracts.TenantTxFunc(db.WithTenantTx)
 	billingSvc := &billing.Service{
-		DB:       tenantDB,
-		SystemDB: db.WithTenantTx,
-		Audit:    billing.NewPostgresAuditLogger(),
-		Daraja:   &stubDaraja{},
-		Now:      func() time.Time { return now },
+		DB:        tenantDB,
+		SystemDB:  db.WithTenantTx,
+		Audit:     billing.NewPostgresAuditLogger(),
+		Notifier:  &notifications.Service{DB: tenantDB},
+		Daraja:    &stubDaraja{},
+		PollQueue: stubPollQueue{},
+		Now:       func() time.Time { return now },
 	}
 	adminPrincipal := contracts.Principal{
 		UserID:       bursarUserID,

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -202,7 +203,7 @@ func (s *Service) AuthenticateInternalRequest(r *http.Request) (UserContext, con
 		Role:         uctx.Role,
 	}
 	delegatedRaw := strings.TrimSpace(r.Header.Get(HeaderDelegatedSession))
-	if uctx.Channel == "whatsapp" && delegatedRaw == "" {
+	if (uctx.Channel == "whatsapp" || uctx.Channel == "in_app") && delegatedRaw == "" {
 		return UserContext{}, contracts.Principal{}, contracts.Fail(http.StatusUnauthorized, "MISSING_DELEGATED_SESSION", "X-Delegated-Session header is required for chat sessions.")
 	}
 
@@ -260,7 +261,7 @@ func (s *Service) requireGuardianOwnsStudentTx(ctx context.Context, tx pgx.Tx, s
 		return contracts.Fail(http.StatusBadRequest, "INVALID_STUDENT_ID", "A valid student ID is required.")
 	}
 	var studentExists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM students WHERE school_id = $1 AND id = $2)`, schoolID, studentID).Scan(&studentExists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM students WHERE school_id = $1 AND id = $2 AND status = 'active')`, schoolID, studentID).Scan(&studentExists); err != nil {
 		return err
 	}
 	if !studentExists {
@@ -387,19 +388,21 @@ func (s *Service) GetInternalMarksSummary(ctx context.Context, uctx UserContext,
 	if err != nil {
 		return MarksSummary{}, err
 	}
-	// Non-negotiable Rule 9: WhatsApp carries minimal facts only (never results/report cards).
-	if uctx.Channel == "whatsapp" {
-		return MarksSummary{
-			StudentID: studentID,
-			Released:  false,
-			PortalURL: s.portalBaseURL() + "/parent/results",
-			Subjects:  []SubjectMarkSummary{},
-		}, nil
-	}
 	if s.Academics == nil {
 		return MarksSummary{}, contracts.Fail(http.StatusServiceUnavailable, "ACADEMICS_UNAVAILABLE", "Academics service is not configured.")
 	}
-	return s.Academics.GetStudentMarksSummary(ctx, uctx.SchoolID, studentID)
+	summary, err := s.Academics.GetStudentMarksSummary(ctx, uctx.SchoolID, studentID)
+	if err != nil {
+		return MarksSummary{}, err
+	}
+	// Non-negotiable Rule 9: WhatsApp carries minimal facts only. Keep the
+	// accurate release state so the assistant never states a false fact, but
+	// suppress every subject mark and direct the parent to the app.
+	if uctx.Channel == "whatsapp" {
+		summary.Subjects = []SubjectMarkSummary{}
+		summary.PortalURL = s.portalBaseURL() + "/parent/results"
+	}
+	return summary, nil
 }
 
 func (s *Service) InitiateInternalSTKPush(ctx context.Context, uctx UserContext, p contracts.Principal, in billing.InitiateSTKPushInput) (billing.STKPushInitiated, error) {
@@ -477,15 +480,71 @@ func generateDelegatedSessionToken() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
+const (
+	maxAIAuditLabelLen    = 100
+	maxAIAuditEndpointLen = 300
+	maxAIAuditEndpoints   = 50
+)
+
+// sanitizeAuditLabel trims and bounds a short descriptive audit field and
+// removes anything that looks like a query string or fragment, which is where
+// credentials and tokens are commonly leaked.
+func sanitizeAuditLabel(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if idx := strings.IndexAny(trimmed, "?#"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	trimmed = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, trimmed)
+	if len(trimmed) > maxAIAuditLabelLen {
+		trimmed = trimmed[:maxAIAuditLabelLen]
+	}
+	return strings.TrimSpace(trimmed)
+}
+
+// sanitizeAuditEndpoints keeps only bounded path/URL entries without query
+// strings or fragments, deduplicating them and dropping malformed values.
+func sanitizeAuditEndpoints(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		cleaned := strings.TrimSpace(raw)
+		if idx := strings.IndexAny(cleaned, "?#"); idx >= 0 {
+			cleaned = cleaned[:idx]
+		}
+		cleaned = strings.Map(func(r rune) rune {
+			if r < 32 || r == 127 {
+				return -1
+			}
+			return r
+		}, cleaned)
+		lower := strings.ToLower(cleaned)
+		if cleaned == "" || len(cleaned) > maxAIAuditEndpointLen ||
+			!(strings.HasPrefix(cleaned, "/") || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")) {
+			continue
+		}
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		out = append(out, cleaned)
+		if len(out) >= maxAIAuditEndpoints {
+			break
+		}
+	}
+	return out
+}
+
 func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, p contracts.Principal, in AIAuditLogInput) (string, error) {
-	feature := strings.TrimSpace(in.Feature)
+	feature := sanitizeAuditLabel(in.Feature)
 	if feature == "" {
 		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_AI_AUDIT_LOG", "feature is required.")
 	}
-	endpoints := in.EndpointsRead
-	if endpoints == nil {
-		endpoints = []string{}
-	}
+	endpoints := sanitizeAuditEndpoints(in.EndpointsRead)
 	endpointsJSON, err := json.Marshal(endpoints)
 	if err != nil {
 		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_AI_AUDIT_LOG", "endpoints_read must be valid JSON.")
@@ -495,6 +554,8 @@ func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, p cont
 	if err != nil {
 		return "", contracts.Fail(http.StatusUnprocessableEntity, "INVALID_AI_AUDIT_LOG", "metadata must be valid JSON.")
 	}
+	intent := sanitizeAuditLabel(in.Intent)
+	actionTaken := sanitizeAuditLabel(in.ActionTaken)
 
 	sessionID := strings.TrimSpace(in.SessionID)
 	if sessionID == "" {
@@ -530,7 +591,7 @@ func (s *Service) RecordAIAuditLog(ctx context.Context, uctx UserContext, p cont
 			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9)
 			RETURNING id`,
 			p.SchoolID, p.UserID, validSessionID, uctx.Channel,
-			feature, strings.TrimSpace(in.Intent), endpointsJSON, strings.TrimSpace(in.ActionTaken), metaJSON,
+			feature, intent, endpointsJSON, actionTaken, metaJSON,
 		).Scan(&logID)
 	})
 	return logID, err
@@ -621,14 +682,22 @@ func (s *Service) ForwardParentQuery(ctx context.Context, input AIParentQueryInp
 	return reply, nil
 }
 
+const maxChatMessageLen = 4000
+
 // HandleChatProxy serves POST /api/v1/chat/message for authenticated in-app parents.
 func (s *Service) HandleChatProxy(ctx context.Context, p contracts.Principal, in ChatMessageInput) (ChatMessageResponse, error) {
 	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return ChatMessageResponse{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
 	}
+	if !strings.EqualFold(strings.TrimSpace(p.Role), "parent") {
+		return ChatMessageResponse{}, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "The parent assistant is only available to parent memberships.")
+	}
 	msg := strings.TrimSpace(in.Message)
 	if msg == "" {
 		return ChatMessageResponse{}, contracts.Fail(http.StatusUnprocessableEntity, "EMPTY_CHAT_MESSAGE", "A non-empty message is required.")
+	}
+	if len(msg) > maxChatMessageLen {
+		return ChatMessageResponse{}, contracts.Fail(http.StatusUnprocessableEntity, "CHAT_MESSAGE_TOO_LONG", fmt.Sprintf("Messages must be at most %d characters.", maxChatMessageLen))
 	}
 	if in.SessionID != "" && !contracts.ValidID(in.SessionID) {
 		return ChatMessageResponse{}, contracts.Fail(http.StatusUnprocessableEntity, "INVALID_SESSION_ID", "session_id must be a valid UUID.")
@@ -645,6 +714,20 @@ func (s *Service) HandleChatProxy(ctx context.Context, p contracts.Principal, in
 
 	if s.DB != nil {
 		if err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+			var activeParent bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM memberships
+					WHERE school_id = $1 AND id = $2 AND user_id = $3
+					  AND status = 'active' AND role = 'parent'
+				)`,
+				p.SchoolID, p.MembershipID, p.UserID,
+			).Scan(&activeParent); err != nil {
+				return err
+			}
+			if !activeParent {
+				return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "An active parent membership is required for the parent assistant.")
+			}
 			if in.StudentID != "" {
 				if err := s.requireGuardianOwnsStudentTx(ctx, tx, p.SchoolID, p.UserID, in.StudentID); err != nil {
 					return err
@@ -659,6 +742,7 @@ func (s *Service) HandleChatProxy(ctx context.Context, p contracts.Principal, in
 				res, err := tx.Exec(ctx, `
 					UPDATE chat_sessions
 					SET access_token_hash = $1,
+					    state = 'VERIFIED',
 					    verified_at = $2,
 					    expires_at = $3,
 					    student_id = COALESCE($4, student_id),
@@ -702,6 +786,24 @@ func (s *Service) HandleChatProxy(ctx context.Context, p contracts.Principal, in
 	})
 	if err != nil {
 		return ChatMessageResponse{}, err
+	}
+	if s.DB != nil {
+		metaJSON, err := json.Marshal(map[string]any{"message_chars": len(msg)})
+		if err != nil {
+			return ChatMessageResponse{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to record the AI action.")
+		}
+		if err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO ai_action_logs (
+					school_id, user_id, session_id, channel, feature, intent, endpoints_read, action_taken, metadata
+				)
+				VALUES ($1, $2, $3, 'in_app', 'parent_chat', 'chat_message', '[]'::jsonb, 'replied', $4)`,
+				p.SchoolID, p.UserID, sessionID, metaJSON,
+			)
+			return err
+		}); err != nil {
+			return ChatMessageResponse{}, err
+		}
 	}
 	return ChatMessageResponse{
 		Reply:     reply,
