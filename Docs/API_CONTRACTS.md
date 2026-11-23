@@ -9,6 +9,9 @@ generating this from an OpenAPI spec instead of maintaining it by hand.
 
 - Every authenticated request carries the caller's identity (user + active
   membership) and resolves to a `school_id`.
+- When the caller belongs to more than one school, the request selects one with
+  `X-School-ID`. When the caller holds more than one role in the selected
+  school, it selects one with `X-Membership-ID`.
 - The Go backend sets `app.school_id` for the request's database transaction
   so RLS does the enforcement — see `ARCHITECTURE.md`.
 - Every endpoint declares which permission(s) it requires. A request without
@@ -46,30 +49,33 @@ is only an interface: AC-29 is **not addressed** by this foundation. Production
 handlers must wire durable, redacted audit events into the same transaction as
 the protected change and propagate logging failure before claiming AC-29.
 
-### AI-service authentication decision
+### Internal service authentication
 
-Internal calls require both a service credential and a delegated user session.
-Use `Authorization: Bearer <service-token>` for the shared secret configured as
-`INTERNAL_SERVICE_TOKEN` in Go and `AI_SERVICE_SECRET_TOKEN` in Python. Use
-`X-Delegated-Session: <opaque-session-token>` for a Go-issued, short-lived session
-bound to the user and active membership. For verified chat, migration `000004`
-enforces that `chat_sessions` rows in `VERIFIED` state carry a non-null,
-non-blank `access_token_hash` alongside `guardian_user_id`, `verified_at`, and
-`expires_at > verified_at`; Go resolves the hash of `X-Delegated-Session` to an
-unexpired (`expires_at > now()`) `chat_sessions` row and rechecks guardian
-access. For in-app requests, Go validates the user's existing session and
-membership. Unsigned user/school headers are never delegation credentials.
+Internal calls require both a service credential and a delegated user context.
+
+- `X-Internal-Service-Token: <INTERNAL_SERVICE_TOKEN>` is the shared service
+  secret (configured as `AI_SERVICE_SECRET_TOKEN` in Python). Go's
+  `RequireInternalService` middleware enforces it with a constant-time
+  comparison. It authenticates **only the calling service**; it does not
+  resolve a user, school, membership, or permission.
+- `X-User-Context: <base64url(json_payload)>.<hex(hmac_sha256(base64url_payload, INTERNAL_SERVICE_TOKEN))>`
+  is the short-lived delegated context (user, school, membership, channel,
+  session, `exp`). It is verified by the internal API route that consumes it,
+  which must also apply the same tenant, badge-permission, and
+  guardian-relationship checks as a frontend request. Unsigned user/school
+  headers are never delegation credentials.
 
 Both credentials are required; the service token alone grants no student or
-school access. Go verifies each request, derives its principal, and applies the
-same tenant, badge-permission, and guardian-relationship checks as a frontend
+school access. For verified chat, migration `000004` enforces that
+`chat_sessions` rows in `VERIFIED` state carry a non-null, non-blank
+`access_token_hash` alongside `guardian_user_id`, `verified_at`, and
+`expires_at > verified_at`, and Go enforces `expires_at > now()` on every
 request. The AI service is restricted to permission-checked Go endpoints and
 never accesses PostgreSQL, raw biometric templates, or nurse clinical records.
 Restrict internal routes to the private service network, use TLS, rotate
 service tokens, and redact both headers from logs. Production must reject the
-example development secrets. This decision defines the required protocol;
-credential validation and delegation middleware are not implemented in the
-current scaffolding.
+example development secrets. `X-User-Context` verification and delegated
+session issuance are not mounted in the current scaffolding.
 
 ## Rule: the AI service never touches the database directly
 
@@ -87,26 +93,95 @@ The AI service (Python/FastAPI) has no direct database credentials. It:
 
 This is the enforcement point for "AI never invents a fee balance" and "AI
 never handles money directly" from `AGENTS.md` and `SECURITY.md`.
+## AI service authentication (decided 2026-10-29)
 
-## Endpoint groups (fill in as built)
+The AI service authenticates to the Go backend with a **service token plus a
+short-lived signed user context** (user, school, membership, and, for
+WhatsApp, the verified session). Every call carries both; a valid token
+without a valid, unexpired context is rejected. A hybrid with mutual TLS may
+be added later.
+
+## Rate limits
+
+- **OTP (phone):** one request per minute; more than five requests in thirty
+  minutes blocks the requesting phone for 24 hours (not the guardian's
+  account).
+- **OTP (IP):** app login also limits each requesting IP address, but with a
+  much higher threshold (50 requests in thirty minutes) and a short 15-minute
+  block, because a school network or mobile carrier NAT serves many users.
+  Blocking the shared IP must never lock out a whole school for a day.
+- **AI-facing endpoints:** limits are on backend lookups per verified
+  session (fee-balance, attendance, payment lookups), with a tighter limit on
+  payment starts. Numbers are set by the team and QA. Assistant messages
+  themselves are not capped.
+
+## Endpoint groups
 
 > Each group below should end up as a real section with method, path,
-> request/response shape, and required permission. Skeleton only for now.
+> request/response shape, and required permission. Unless a handler status note
+> says otherwise, the entries are agreed contracts rather than mounted routes.
 
 ### Auth & onboarding
-- `POST /auth/otp/request`, `POST /auth/otp/verify`
+
+Handler implementation status: `auth.RegisterRoutes` mounts the two public OTP
+endpoints. All other onboarding endpoints below are still contracts.
+
+- `POST /api/v1/auth/otp/request` (public):
+  `{ "phone_number": "+254712345678" }` →
+  `{ "status": "success", "data": { "message": "OTP sent", "cooldown_seconds": 60 } }`.
+  An SMS is dispatched only when an active account uses the phone number, but
+  the response is identical for unknown numbers so callers cannot enumerate
+  accounts. Limits: one request per minute per phone; more than five requests
+  in thirty minutes blocks the phone for 24 hours. The requesting IP has a
+  separate, higher limit (50 requests in thirty minutes) with a 15-minute
+  block so a shared school network is not locked out for a day.
+- `POST /api/v1/auth/otp/verify` (public):
+  `{ "phone_number": "+254712345678", "otp": "123456" }` →
+  `{ "status": "success", "data": { "token": "<jwt>", "expires_at": "<rfc3339>", "user": {...}, "memberships": [...] } }`.
+  Five wrong attempts consume the OTP.
 - `POST /staff-invites` (permission: `staff.invites.create`)
 - `POST /staff-applications/{id}/review` (permission:
-  `staff.applications.review`)
+  `staff.applications.review`; verifier checks documents in person)
+- `POST /parent-qr` (generate, valid 12 hours) and
+  `POST /parent-qr/{id}/revoke` (permission: `parents.qr.manage`; dean,
+  principal, deputy)
+- `POST /registrations` (parent or staff submission via QR; creates a
+  *pending* record with no data access)
+- `POST /registrations/{id}/verify` (permission: `registrations.verify`;
+  held by staff verifiers, delegable for the QR's active window)
+- `POST /verifier-grants` (permission: `verifier.grant`; staff only,
+  expires with the QR)
 - `POST /students/admit` (permission: `students.admit`)
+- `POST /guardians/me/phone-change` (2FA; notifies the old number; pauses
+  chat payments for 24 hours)
+
+### WhatsApp & parent sessions
+- `POST /whatsapp/webhook` (receiving number resolves the school)
+- `POST /chat/sessions` (admission number → masked guardian numbers)
+- `POST /chat/sessions/{id}/otp` (OTP sent only to the chosen registered
+  number); sessions last 6 hours
 
 ### Academics
 - `GET /classes/{id}/roster` (permission: `class.students.view`)
 - `GET /classes/{id}/stats` (permission: `class.stats.view` — means only, no
   names)
+- `POST /classes/{id}/attendance` (class teacher; one daily roll-call)
+- `PUT /classes/{id}/subjects/{sid}/marks` (assigned subject teacher only)
+- `POST /classes/{id}/marks-assignments` (permission:
+  `marks.reassign`; dean, principal, deputy)
+- `POST /classes/{id}/results/release` (class teacher; rejected unless every
+  subject has marks for every student)
+- `POST /classes/{id}/results/reopen` and `.../re-release` (class teacher;
+  re-release requires a teacher's note per corrected mark; notifies only
+  affected parents)
+- `POST /report-comments/draft` (AI service drafts; teacher edits and
+  publishes)
+- `GET/PUT /timetables`, `GET/PUT /calendar` (dean; term-date changes also
+  trigger the fee-change notice)
 - `POST /syllabus/coverage` — called by AI service after mapping a teacher's
-  natural-language input to CBC strands/sub-strands
-- `GET /students/{id}/performance-history` (parent/teacher, scoped)
+  natural-language input to CBC strands/sub-strands (Release 2)
+- `GET /students/{id}/performance-history` (parent/teacher, scoped; returns
+  CBC levels per subject per term, never rank)
 
 ### Fees & payments
 
@@ -217,9 +292,10 @@ pending auth/session middleware and server composition).
 
 ### AI-service-facing (internal only — never exposed to frontend directly)
 - `POST /internal/ai/parent-query` — resolves a parent's natural-language
-  question by calling the appropriate read endpoints above
+  question by calling the appropriate read endpoints above. On WhatsApp it
+  returns only minimal facts and a link for anything else.
 - `POST /internal/ai/blog-safety-check` — checks a draft post for children's
-  personal details before a patron publishes
+  personal details before a patron publishes (Release 2)
 
 ## Response conventions
 
@@ -287,5 +363,7 @@ with two fractional digits in KES to avoid floating-point loss.
 
 ## What's not yet decided
 
-- Rate limiting for AI-facing endpoints (a parent-assistant loop must not be
-  able to hammer fee-balance lookups).
+- How OTP limits and blocks apply to app login.
+- Response conventions above.
+- Exact lookup-limit numbers for AI-facing endpoints (a parent-assistant loop
+  must not be able to hammer fee-balance lookups).

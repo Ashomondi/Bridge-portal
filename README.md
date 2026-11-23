@@ -2,6 +2,8 @@
 
 A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) portal for Kenyan secondary schools.
 
+**Start with `ikonex.md`.** It is the central project reference: scope, roles, feature behaviour, decisions, open questions, and status. The other documents in `Docs/` hold detail on architecture, API contracts, security, and the decision log.
+
 ---
 
 ## Architecture Overview
@@ -124,6 +126,11 @@ A multi-school management and CBC (Competency-Based Curriculum, Grade 7–12) po
 4. **Nurse Record Isolation**: Clinical notes remain restricted to the nurse role. Class teachers receive only a notification flag that a visit occurred.
 5. **Human Confirmation on Financial Actions**: System records and approves payments. Bursar payments follow a signatory workflow. AI can initiate STK push only after explicit parent confirmation.
 
+6. **WhatsApp is minimal.** Each school has its own WhatsApp bot. It carries only minimal facts (fee balances, attendance status, payment prompts). Results and report content stay in the app. WhatsApp is a documented exception to the Kenya-hosting rule; see `SECURITY.md`.
+7. **Human approval before parents see results.** Marks are entered by subject teachers; the class teacher releases results only when every subject has marks for every student.
+
+---
+
 ## Backend build and tests
 
 Requires **Go 1.22.2+** (`backend/go.mod`) and **PostgreSQL 16**
@@ -176,10 +183,10 @@ tenant isolation, and schema up/down/up restoration.
 
 ## Migration and implementation status
 
-Apply migrations in exact numeric sequence: **`000001` → `000003` → `000004`**
-(`000001_init_schema` → `000003_r1_academics` →
-`000004_r1_billing_whatsapp_notifications`). **Migration `000002` is absent
-from this branch.** Migration `000004` adds **12 tables**; their
+Apply migrations in exact numeric sequence: **`000001` → `000002` → `000003` → `000004`**
+(`000001_init_schema` → `000002_r1_core_onboarding` →
+`000003_r1_academics` → `000004_r1_billing_whatsapp_notifications`).
+Migration `000004` adds **12 tables**; their
 responsibilities, constraints, and state machines are documented in
 [ARCHITECTURE.md](Docs/ARCHITECTURE.md). Use a PostgreSQL migration runner; the
 Makefile's advertised `migrate-up` target does not yet implement one.
@@ -197,3 +204,4 @@ auth middleware, permission enforcement, billing handlers and durable audit
 logging still require application integration. `AuditLogger` alone does not
 address AC-29. In-app chat is Release 1 scope; WhatsApp routing schema prepares
 for Release 3 delivery, as specified in the release ADR.
+>>>>>>> origin/dev
