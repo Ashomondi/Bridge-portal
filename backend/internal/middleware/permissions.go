@@ -18,6 +18,7 @@ const (
 	PermResultsRelease      = "results.release"
 	PermConsentsManage      = "consents.manage"
 	PermPhoneChange         = "phone.change"
+	PermSchoolSetup         = "school.setup"
 )
 
 // rolePermissions are the permissions a role holds without a badge. Badges add
@@ -26,12 +27,14 @@ var rolePermissions = map[string][]string{
 	"principal": {
 		PermStaffInvitesCreate, PermParentsQRManage, PermVerifierGrant,
 		PermRegistrationsVerify, PermStudentsAdmit, PermMarksReassign,
-		PermClassStatsView, PermResultsRelease, PermConsentsManage, PermPhoneChange,
+		PermClassStatsView, PermResultsRelease, PermConsentsManage,
+		PermPhoneChange, PermSchoolSetup,
 	},
 	"deputy": {
 		PermStaffInvitesCreate, PermParentsQRManage, PermVerifierGrant,
 		PermRegistrationsVerify, PermStudentsAdmit, PermMarksReassign,
-		PermClassStatsView, PermResultsRelease, PermConsentsManage, PermPhoneChange,
+		PermClassStatsView, PermResultsRelease, PermConsentsManage,
+		PermPhoneChange, PermSchoolSetup,
 	},
 	"dean_of_studies": {
 		PermParentsQRManage, PermVerifierGrant, PermRegistrationsVerify,
