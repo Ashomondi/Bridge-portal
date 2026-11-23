@@ -106,11 +106,11 @@ to `fee_ledgers`. Schema availability does not mean the related handlers,
 workers, permission checks or audit sinks are implemented.
 
 1. **`school_mpesa_configs`**
-   - **Purpose:** Stores per-school Safaricom Daraja Paybill/Till shortcode, environment (`sandbox` / `production`), encrypted passkey, and test-payment verification state.
+   - **Purpose:** Stores per-school Safaricom Daraja **Paybill** shortcode, environment (`sandbox` / `production`), encrypted passkey, and test-payment verification state. *(Release 1 supports Paybill / `CustomerPayBillOnline` only; Till / `CustomerBuyGoodsOnline` is deferred because Till payments do not carry `BillRefNumber` admission-number references.)*
    - **Ownership & tenant relationship:** Owned by `schools` (`school_id` is both `PRIMARY KEY` and `FOREIGN KEY REFERENCES schools(id) ON DELETE CASCADE`); isolated via forced RLS.
    - **Important constraints:** `shortcode` is `UNIQUE NOT NULL`; `environment IN ('sandbox', 'production')` (default `'sandbox'`); `test_payment_verified BOOLEAN NOT NULL DEFAULT FALSE`.
    - **Relationships:** 1:1 with `schools`.
-   - **Domain workflow role:** Supplies tenant payment shortcode/credentials for STK push initiation and Daraja callback resolution.
+   - **Domain workflow role:** Supplies tenant Paybill shortcode/credentials for STK push initiation, STK callback verification, and C2B Paybill school resolution.
 
 2. **`fee_periods`**
    - **Purpose:** Defines named billing periods and due dates per school, academic year, and optional term.
@@ -222,38 +222,38 @@ commit. The database enforces nonnegativity, not the accounting workflow.
 Up migration converts negative legacy debt to credit. Down migration restores
 `current_balance - credit_balance` and removes the added credit counters.
 
-### STK requests
+### STK requests, Daraja callbacks, and C2B matching
 
-`mpesa_stk_requests` is authoritative for attempt state:
-`initiating` → `pending` when Daraja accepts; `initiating` → `failed` for an
-explicit rejection, or `uncertain` if acceptance cannot be determined.
-`pending` → `succeeded` / `failed` on an authenticated provider result, or
-`timeout` after the polling deadline. `uncertain` / `timeout` may resolve to
-`pending`, `succeeded` or `failed` after provider reconciliation. A timeout is
-not proof that no money moved. `succeeded` and provider-confirmed `failed` are
-terminal; duplicate callbacks are no-ops. Contradictory evidence requires
-operator reconciliation, never blind replay.
+`mpesa_stk_requests` (extended by migration `000005_r1_mpesa_hardening` with `idempotency_key`, `request_hash`, `callback_token_hash`, and `poll_scheduled`; `users.chat_payment_paused_until` is owned by `000002_r1_core_onboarding`) is authoritative for attempt state:
+
+- **Initiation & idempotency:** Requires an active `is_fee_payer = TRUE` guardian, whole-KES amounts (`>= 1.00 KES`, `amount % 100 == 0` in minor units), and mandatory `AuditLogger`, `InAppNotifier`, `DarajaProvider`, and `STKPollQueue`. Daraja timestamps are always formatted in `Africa/Nairobi` (EAT, UTC+3). Optional `Idempotency-Key` values are scoped per `(school_id, guardian_user_id, idempotency_key)` with a SHA-256 `request_hash`; identical retries return the existing attempt without re-invoking Daraja, while mismatched payloads return `409 IDEMPOTENCY_KEY_CONFLICT`.
+- **Chat-initiated safeguards:** All chat-sourced payments (`chat`, `whatsapp`, `in_app`) unconditionally require `"parent_confirmed": true`, verify `users.chat_payment_paused_until` (failing closed with `503 CHAT_PAYMENT_FREEZE_UNAVAILABLE` if unreadable), and strictly enforce the guardian's verified registered phone (`CHAT_PHONE_OVERRIDE_FORBIDDEN` on override).
+- **Callback authentication & school resolution:**
+  - *STK callbacks:* Each STK push embeds a server-generated 64-hex-char per-request token in `CallBackURL` (`/api/v1/billing/mpesa/callback/{callback_token}`) whose SHA-256 digest is stored in `mpesa_stk_requests.callback_token_hash`. Alternatively, the static route `/api/v1/billing/mpesa/callback` accepts requests only from a `VerifyCallback` hook or a trusted reverse proxy in `TrustedCallbackProxies` that strips client headers and injects `X-Callback-Token` / `Bearer`. Query-string tokens are never accepted. School identity is resolved strictly from `mpesa_stk_requests` (via `callback_token_hash` or `CheckoutRequestID`), never from caller-supplied `school_id` query parameters or `BusinessShortCode`.
+  - *C2B Paybill confirmations:* Authenticated via `VerifyCallback` or trusted reverse proxy (`TrustedCallbackProxies` + `X-Callback-Token` / `Bearer`). School identity is resolved from `BusinessShortCode` and verified against `school_mpesa_configs`. Matching uses `UPPER(TRIM(students.admission_number)) = UPPER(TRIM(BillRefNumber))` strictly within the resolved `school_id`; unknown admission numbers create an `unmatched_payments` queue entry without discarding funds.
+  - *Response format:* All Daraja webhook endpoints return flat JSON (`{"ResultCode":0,"ResultDesc":"Accepted"}` or `{"ResultCode":1,"ResultDesc":"..."}`), never the application's standard API envelope.
+- **State transitions & amount verification:** `initiating` → `pending` when Daraja accepts (`initiating` → `failed` on explicit rejection). Successful callbacks (`ResultCode == 0`) require `MpesaReceiptNumber` and an exact `Amount` match against `mpesa_stk_requests.amount` (`422 MPESA_AMOUNT_MISMATCH` otherwise, with zero state/ledger mutation and a rejection audit entry). A valid provider-confirmed success may settle `initiating`, `pending`, `timeout`, `uncertain`, or earlier `failed` attempts. `succeeded` is terminal: duplicate successes are idempotent no-ops and late failure callbacks or polls never overwrite `succeeded`.
+- **Polling & stranded recovery:** `InitiateSTKPush` enqueues a 45-second `STKPollTask` and marks `poll_scheduled = TRUE`. If queue publication fails after Daraja accepts, `poll_scheduled` remains `FALSE`, a `billing.mpesa.stk_poll_enqueue_failed` audit event is written, and `RetryUnscheduledSTKPolls` recovers stranded attempts. `PollSTKRequest` reconciles `pending`/`timeout`/`uncertain` rows under `FOR UPDATE` without fabricating receipts (marking `uncertain` if `ResultCode == 0` omits a receipt).
 
 Only verified settlement creates a `payments` receipt and applies the ledger
 posting in the same idempotent transaction. Checkout identifiers are globally
 unique (`checkout_request_id UNIQUE`), and M-Pesa receipt references are unique
 per school (`UNIQUE (school_id, transaction_ref)` on `mpesa_stk_requests` while
-allowing multiple `NULL` attempts prior to settlement); retries create a new
-attempt only after checking the earlier one. The schema checks state names and
-identifier uniqueness; transition and callback authentication rules must be
-implemented in the billing service.
+allowing multiple `NULL` attempts prior to settlement).
 
 ### Unmatched payments
 
 `payments` owns receipt amount, reference, provider and settlement time.
 `unmatched_payments` stores a queue snapshot plus resolution state; it is not a
 second receipt and must never independently credit a ledger. State is
-`unmatched` → `resolved` only when a permitted bursar confirms the student.
+`unmatched` → `resolved` only when a permitted bursar or finance administrator
+holding `billing.unmatched_payments.manage` (or `billing.fee_structures.manage`)
+confirms a student belonging to the same school.
 An AI suggestion leaves the queue unmatched (`payments.matched_status` may be
-`ai_suggested`). Resolution sets student, actor and timestamp, updates the
-payment to `matched`, and posts exactly once in the same locked transaction.
-`resolved` is terminal; corrections require an audited compensating operation.
-The database checks resolution fields but does not implement this workflow.
+`ai_suggested`). Resolution locks the row `FOR UPDATE`, sets student, actor and
+timestamp, updates the payment to `matched`, posts exactly once, notifies
+`is_fee_payer = TRUE` guardians, and writes a `billing.payment.manual_match`
+audit event in the same transaction. `resolved` is terminal (`409` on replay).
 
 ### Chat sessions
 
@@ -295,14 +295,57 @@ CBC only (Grade 7–12), not 8-4-4. `grade_levels.number` is constrained to
 ever needed, that's a schema change, not a workaround — raise it as a new
 decision rather than bolting it on.
 
+## Channels and sessions (added 2026-10-29)
+
+- **WhatsApp Business Cloud API, one bot per school.** The receiving number
+  maps to `school_id`, so an admission number is only ever looked up inside
+  that school. The Go backend owns the webhook; the AI service is reached only
+  through the backend.
+- **Parent identity in chat:** sender enters the admission number → masked
+  guardian numbers → OTP by SMS to the chosen registered number → a 6-hour
+  verified session. Any WhatsApp number may start a chat; the OTP goes only
+  to the registered number.
+- **Release 1 event notifications are in-app only.** SMS is used for OTP and
+  security messages.
+
+## Additional entities (planned)
+
+`school_whatsapp_bots`, `chat_sessions`, `otp_requests`, `parent_qr_codes`,
+`staff_qr_codes`, `registration_submissions`, `verification_records`, badge
+delegations, `attendance_daily`, `assessments` and `marks`, `report_comments`,
+`result_releases`, `grading_scale_versions` (per term), `fee_periods`,
+`fee_charges`, `fee_change_notes`, `ledger_entries` (including credit),
+`unmatched_payments`, `school_profile` (contact details required), and a
+`whatsapp` value for `consents.purpose`. See `ikonex.md` section 9.
+
+Build `fee_periods` on generic billing periods even though Release 1 is terms
+only, so custom structures later need no migration (a recommendation).
+
+## Behaviour that shapes the model
+
+- **Results release is a state machine** per class per term: draft → released
+  → reopened → re-released. Parents keep seeing the last released version
+  while a class is reopened.
+- **Grading scale is versioned per term.** A term's levels are computed from
+  the scale in force when it was released.
+- **Fee due dates follow term start dates.** A term-date change moves due
+  dates and creates a fee-change event with a note.
+- **Pending registrations are not active records** and grant no access until
+  a staff verifier confirms them; uploaded documents are deleted after
+  approval.
+
 ## Settled vs. open decisions
 
 Settled decisions and their reasoning live in `DECISIONS.md` — don't
 re-litigate them here. Open questions that affect this document:
 
+- Hosting location (Kenya only vs regional Africa, and where the AI model
+  runs) — to be discussed with the project group.
 - Sports/activities performance model (how it's scored, who enters it) — not
   yet designed.
 - Store and caterer module data model — not yet designed.
+- Fee structure variants (boarder/day, optional items).
+- How a shared parent QR links each parent to the right child.
 - Payment execution: the system records approved payments; whether it will
   ever initiate transfers itself (beyond the parent-initiated M-Pesa STK push)
   is undecided.

@@ -1,4 +1,144 @@
 package main
 
-// Server entry point placeholder
-func main() {}
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/auth"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/config"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/consent"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/database"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/middleware"
+)
+
+func main() {
+	logger := log.New(os.Stdout, "backend ", log.LstdFlags|log.LUTC)
+	if err := run(logger); err != nil {
+		logger.Fatalf("startup failed: %v", err)
+	}
+}
+
+func run(logger *log.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	db, err := database.Open(cfg.DB.DSN(), cfg.DB.MaxOpenConns, cfg.DB.MaxIdleConns)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	tokens := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.Expiry)
+	audit := database.NewAuditLogger(db.DB)
+	allowDevelopmentSMS := cfg.Environment == "development" || cfg.Environment == "test"
+
+	trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return fmt.Errorf("main: trusted proxy CIDRs: %w", err)
+	}
+
+	authService := auth.NewService(db.DB, tokens, devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}, audit, cfg.TrustProxyHeaders, trustedProxies, []byte(cfg.OTPHMACSecret))
+	consentService := consent.NewService(db.DB, audit)
+	authMiddleware := middleware.NewAuthMiddleware(db.DB, tokens)
+
+	mux := http.NewServeMux()
+	authService.RegisterRoutes(mux)
+
+	consentWrap := func(next http.Handler) http.Handler {
+		handler := authMiddleware.RequirePermission(middleware.PermConsentsManage)(next)
+		handler = authMiddleware.RequireTenant(handler)
+		return authMiddleware.RequireAuth(handler)
+	}
+	consentService.RegisterRoutes(mux, consentWrap)
+
+	server := &http.Server{
+		Addr:              net.JoinHostPort(cfg.Server.Host, cfg.Server.Port),
+		Handler:           middleware.CORS(cfg.CORS.AllowedOrigins)(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Printf("listening on %s (env=%s)", server.Addr, cfg.Environment)
+		if serveErr := server.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			errCh <- serveErr
+		}
+	}()
+
+	select {
+	case serveErr := <-errCh:
+		return serveErr
+	case <-shutdownCtx.Done():
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("server shutdown: %w", err)
+	}
+	return nil
+}
+
+// devSMSDispatcher logs transactional SMS in development so OTP login can be
+// exercised before the notifications provider is wired. It stays disabled in
+// production to avoid leaking one-time codes.
+type devSMSDispatcher struct {
+	logger  *log.Logger
+	enabled bool
+}
+
+func (d devSMSDispatcher) SendTransactionalSMS(_ context.Context, toPhoneNumber, message string) error {
+	if !d.enabled {
+		return errors.New("sms: no dispatcher configured")
+	}
+	d.logger.Printf("sms to=%s body=%q", maskPhone(toPhoneNumber), redactOTP(message))
+	return nil
+}
+
+// otpDigits matches the six-digit login code embedded in an OTP SMS.
+var otpDigits = regexp.MustCompile(`\b[0-9]{6}\b`)
+
+// redactOTP keeps development logs useful without writing a live login code to
+// the console.
+func redactOTP(message string) string {
+	return otpDigits.ReplaceAllString(message, "******")
+}
+
+func maskPhone(phone string) string {
+	if len(phone) <= 7 {
+		return "***"
+	}
+	return phone[:4] + strings.Repeat("*", len(phone)-7) + phone[len(phone)-3:]
+}
+
+// parseCIDRs parses a comma-separated CIDR list into IPNet slices, skipping
+// empty entries so a trailing comma does not produce a parse error.
+func parseCIDRs(raw []string) ([]*net.IPNet, error) {
+	ips := make([]*net.IPNet, 0, len(raw))
+	for _, entry := range raw {
+		_, cidr, err := net.ParseCIDR(strings.TrimSpace(entry))
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", entry, err)
+		}
+		ips = append(ips, cidr)
+	}
+	return ips, nil
+}

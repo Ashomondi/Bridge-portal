@@ -508,3 +508,31 @@ func TestMigrationVerifiedSessionRequiresExpiry(t *testing.T) {
 		}
 	})
 }
+
+func TestMigration000005UpDownUpPreservesSchema(t *testing.T) {
+	db := testenv.New(t, false)
+	db.Apply(t, "000004_r1_billing_whatsapp_notifications.up.sql")
+	school := db.SeedSchool(t, "05")
+	before05 := schemaSnapshot(t, db)
+
+	db.Apply(t, "000005_r1_mpesa_hardening.up.sql")
+	db.Apply(t, "000005_r1_mpesa_hardening.down.sql")
+	if got := schemaSnapshot(t, db); !reflect.DeepEqual(got, before05) {
+		t.Fatal("000005 rollback did not restore exact 000004 schema, constraints, or indexes")
+	}
+
+	db.Apply(t, "000005_r1_mpesa_hardening.up.sql")
+	// The freeze column is owned by 000002; 000005 must leave it in place.
+	var exists bool
+	if err := db.Admin.QueryRow(context.Background(), `
+		SELECT EXISTS(
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'chat_payment_paused_until'
+		)`).Scan(&exists); err != nil || !exists {
+		t.Fatalf("expected users.chat_payment_paused_until after 000005 up, exists=%v err=%v", exists, err)
+	}
+	var userExists bool
+	if err := db.Admin.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, school.UserID).Scan(&userExists); err != nil || !userExists {
+		t.Fatalf("000005 migration lost seeded user data: %v", err)
+	}
+}

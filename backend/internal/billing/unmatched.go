@@ -3,9 +3,12 @@ package billing
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -41,8 +44,57 @@ type MatchedPaymentResult struct {
 	ResolvedAt     time.Time `json:"resolved_at"`
 }
 
+// DarajaCallbackResponse is the flat JSON acknowledgement structure expected by
+// Safaricom Daraja STK and C2B webhooks. It intentionally does not use the
+// application's standard {"status":"success","data":{...}} API envelope.
+type DarajaCallbackResponse struct {
+	ResultCode int    `json:"ResultCode"`
+	ResultDesc string `json:"ResultDesc"`
+}
+
+func writeDarajaCallbackResponse(w http.ResponseWriter, status int, resultCode int, resultDesc string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(DarajaCallbackResponse{
+		ResultCode: resultCode,
+		ResultDesc: resultDesc,
+	})
+}
+
+func writeDarajaCallbackError(w http.ResponseWriter, err error) {
+	var apiErr *contracts.APIError
+	if errors.As(err, &apiErr) && apiErr != nil {
+		status := apiErr.Status
+		if status < 400 || status > 599 {
+			status = http.StatusBadRequest
+		}
+		desc := strings.TrimSpace(apiErr.Message)
+		if desc == "" || status >= http.StatusInternalServerError {
+			desc = "Rejected"
+		}
+		writeDarajaCallbackResponse(w, status, 1, desc)
+		return
+	}
+	writeDarajaCallbackResponse(w, http.StatusInternalServerError, 1, "Rejected")
+}
+
+func hasAnySchoolPermissionTx(ctx context.Context, tx pgx.Tx, p contracts.Principal, codes ...string) (bool, error) {
+	for _, code := range codes {
+		allowed, err := hasActiveSchoolPermissionTx(ctx, tx, p, code)
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ListUnmatchedPayments returns paginated unresolved payments for an authorized
-// school staff member holding billing.ledgers.view or billing.fee_structures.manage.
+// school staff member (e.g., bursar or finance admin) holding
+// billing.unmatched_payments.manage, billing.ledgers.view, or
+// billing.fee_structures.manage.
 func (s *Service) ListUnmatchedPayments(ctx context.Context, p contracts.Principal, page *contracts.Page) ([]UnmatchedPayment, error) {
 	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return nil, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
@@ -56,18 +108,12 @@ func (s *Service) ListUnmatchedPayments(ctx context.Context, p contracts.Princip
 
 	items := []UnmatchedPayment{}
 	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
-		allowedView, err := hasActiveSchoolPermissionTx(ctx, tx, p, PermLedgersView)
+		allowed, err := hasAnySchoolPermissionTx(ctx, tx, p, PermUnmatchedPaymentsManage, PermLedgersView, PermFeeStructuresManage)
 		if err != nil {
 			return err
 		}
-		if !allowedView {
-			allowedManage, err := hasActiveSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage)
-			if err != nil {
-				return err
-			}
-			if !allowedManage {
-				return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only authorized finance staff may view unmatched payments.")
-			}
+		if !allowed {
+			return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only authorized bursar or finance staff may view unmatched payments.")
 		}
 
 		if err := tx.QueryRow(ctx, `
@@ -110,6 +156,8 @@ func (s *Service) ListUnmatchedPayments(ctx context.Context, p contracts.Princip
 // MatchUnmatchedPayment manually assigns an unmatched payment (by payment_id or unmatched_payments.id)
 // to a valid student in the school, credits the student's ledger, marks the unmatched record resolved,
 // notifies linked fee-paying guardians, and writes an audit log entry.
+// Authorized for school-scoped bursars/finance staff holding
+// billing.unmatched_payments.manage or billing.fee_structures.manage.
 func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Principal, id string, in MatchPaymentInput) (MatchedPaymentResult, error) {
 	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || strings.TrimSpace(p.Role) == "" {
 		return MatchedPaymentResult{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
@@ -126,15 +174,22 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 	if err := s.requireAuditLogger(); err != nil {
 		return MatchedPaymentResult{}, err
 	}
+	if err := s.requireNotifier(); err != nil {
+		return MatchedPaymentResult{}, err
+	}
 
 	var out MatchedPaymentResult
 	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
-		if err := requireSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage, "Only authorized finance administrators may resolve unmatched payments."); err != nil {
+		allowed, err := hasAnySchoolPermissionTx(ctx, tx, p, PermUnmatchedPaymentsManage, PermFeeStructuresManage)
+		if err != nil {
 			return err
+		}
+		if !allowed {
+			return contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only authorized bursar or finance administrators may resolve unmatched payments.")
 		}
 		var unmatchedID, paymentID, receipt, status string
 		var amount Money
-		err := tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			SELECT id, payment_id, transaction_ref, amount, status
 			FROM unmatched_payments
 			WHERE school_id = $1 AND (payment_id = $2 OR id = $2)
@@ -239,23 +294,69 @@ func (s *Service) MatchUnmatchedPayment(ctx context.Context, p contracts.Princip
 	return out, err
 }
 
+func (s *Service) isTrustedCallbackProxy(remoteAddr string) bool {
+	if s == nil || len(s.TrustedCallbackProxies) == 0 {
+		return false
+	}
+	host := strings.TrimSpace(remoteAddr)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, entry := range s.TrustedCallbackProxies {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "/") {
+			prefix, err := netip.ParsePrefix(trimmed)
+			if err == nil && prefix.Contains(addr) {
+				return true
+			}
+			continue
+		}
+		ip, err := netip.ParseAddr(trimmed)
+		if err == nil && ip.Unmap() == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// isCallbackAuthorized enforces fail-closed authentication for static callback
+// endpoints (STK static route and C2B confirmation).
+//
+// Because Safaricom Daraja does not send custom authentication headers directly,
+// static callback endpoints must sit behind a trusted reverse proxy / API gateway
+// (verified via TrustedCallbackProxies) that validates Safaricom's source IP / mTLS,
+// strips any caller-supplied auth headers, and injects X-Callback-Token (or
+// Authorization: Bearer). Alternatively, callers may wire an explicit VerifyCallback
+// hook. Query-string tokens are never accepted.
 func (s *Service) isCallbackAuthorized(r *http.Request) bool {
-	if s == nil {
+	if s == nil || r == nil {
 		return false
 	}
 	if s.VerifyCallback != nil {
 		return s.VerifyCallback(r)
 	}
-	if token := strings.TrimSpace(s.CallbackAuthToken); token != "" {
-		headerToken := strings.TrimSpace(r.Header.Get("X-Callback-Token"))
-		if headerToken != "" && subtle.ConstantTimeCompare([]byte(headerToken), []byte(token)) == 1 {
-			return true
-		}
-		if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			bearerToken := strings.TrimSpace(auth[len("Bearer "):])
-			return subtle.ConstantTimeCompare([]byte(bearerToken), []byte(token)) == 1
-		}
+	token := strings.TrimSpace(s.CallbackAuthToken)
+	if token == "" {
 		return false
+	}
+	if !s.isTrustedCallbackProxy(r.RemoteAddr) {
+		return false
+	}
+	headerToken := strings.TrimSpace(r.Header.Get("X-Callback-Token"))
+	if headerToken != "" && subtle.ConstantTimeCompare([]byte(headerToken), []byte(token)) == 1 {
+		return true
+	}
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		bearerToken := strings.TrimSpace(auth[len("Bearer "):])
+		return subtle.ConstantTimeCompare([]byte(bearerToken), []byte(token)) == 1
 	}
 	return false
 }
@@ -272,6 +373,9 @@ func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contract
 			contracts.WriteError(w, err)
 			return
 		}
+		if strings.TrimSpace(input.IdempotencyKey) == "" {
+			input.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		}
 		res, err := service.InitiateSTKPush(r.Context(), p, input, false)
 		if err != nil {
 			contracts.WriteError(w, err)
@@ -281,38 +385,52 @@ func registerMpesaRoutes(mux *http.ServeMux, service *Service, identity contract
 	})
 	mux.HandleFunc("POST /api/v1/billing/mpesa/callback", func(w http.ResponseWriter, r *http.Request) {
 		if !service.isCallbackAuthorized(r) {
-			contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Invalid or missing M-Pesa callback credentials."))
+			writeDarajaCallbackResponse(w, http.StatusUnauthorized, 1, "Unauthorized callback")
 			return
 		}
 		var payload DarajaSTKCallbackEnvelope
 		if err := contracts.Decode(w, r, &payload); err != nil {
-			contracts.WriteError(w, err)
+			writeDarajaCallbackError(w, err)
 			return
 		}
-		schoolHint := r.URL.Query().Get("school_id")
-		if err := service.ProcessSTKCallback(r.Context(), schoolHint, payload); err != nil {
-			contracts.WriteError(w, err)
+		if err := service.ProcessSTKCallback(r.Context(), "", payload); err != nil {
+			writeDarajaCallbackError(w, err)
 			return
 		}
-		contracts.Success(w, http.StatusOK, map[string]any{"ResultCode": 0, "ResultDesc": "Accepted"}, nil)
+		writeDarajaCallbackResponse(w, http.StatusOK, 0, "Accepted")
+	})
+	mux.HandleFunc("POST /api/v1/billing/mpesa/callback/{callback_token}", func(w http.ResponseWriter, r *http.Request) {
+		callbackToken := strings.TrimSpace(r.PathValue("callback_token"))
+		if callbackToken == "" {
+			writeDarajaCallbackResponse(w, http.StatusUnauthorized, 1, "Unauthorized callback")
+			return
+		}
+		var payload DarajaSTKCallbackEnvelope
+		if err := contracts.Decode(w, r, &payload); err != nil {
+			writeDarajaCallbackError(w, err)
+			return
+		}
+		if err := service.ProcessSTKCallback(r.Context(), callbackToken, payload); err != nil {
+			writeDarajaCallbackError(w, err)
+			return
+		}
+		writeDarajaCallbackResponse(w, http.StatusOK, 0, "Accepted")
 	})
 	mux.HandleFunc("POST /api/v1/billing/mpesa/c2b-confirmation", func(w http.ResponseWriter, r *http.Request) {
 		if !service.isCallbackAuthorized(r) {
-			contracts.WriteError(w, contracts.Fail(http.StatusUnauthorized, "UNAUTHORIZED_CALLBACK", "Invalid or missing M-Pesa callback credentials."))
+			writeDarajaCallbackResponse(w, http.StatusUnauthorized, 1, "Unauthorized callback")
 			return
 		}
 		var payload DarajaC2BConfirmation
 		if err := contracts.Decode(w, r, &payload); err != nil {
-			contracts.WriteError(w, err)
+			writeDarajaCallbackError(w, err)
 			return
 		}
-		schoolHint := r.URL.Query().Get("school_id")
-		res, err := service.ProcessC2BConfirmation(r.Context(), schoolHint, payload)
-		if err != nil {
-			contracts.WriteError(w, err)
+		if _, err := service.ProcessC2BConfirmation(r.Context(), payload); err != nil {
+			writeDarajaCallbackError(w, err)
 			return
 		}
-		contracts.Success(w, http.StatusOK, res, nil)
+		writeDarajaCallbackResponse(w, http.StatusOK, 0, "Accepted")
 	})
 	mux.HandleFunc("GET /api/v1/payments/unmatched", func(w http.ResponseWriter, r *http.Request) {
 		p, err := contracts.RequireIdentity(r, identity)

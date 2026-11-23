@@ -16,6 +16,10 @@ const (
 	// PermLedgersView authorizes read-only staff/bursar visibility into student
 	// fee balances and ledger entries within the school.
 	PermLedgersView = "billing.ledgers.view"
+
+	// PermUnmatchedPaymentsManage authorizes bursars and finance staff to view
+	// and manually match unmatched M-Pesa payments within their school.
+	PermUnmatchedPaymentsManage = "billing.unmatched_payments.manage"
 )
 
 func hasActiveSchoolPermissionTx(ctx context.Context, tx pgx.Tx, p contracts.Principal, permissionCode string) (bool, error) {

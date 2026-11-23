@@ -9,6 +9,9 @@ generating this from an OpenAPI spec instead of maintaining it by hand.
 
 - Every authenticated request carries the caller's identity (user + active
   membership) and resolves to a `school_id`.
+- When the caller belongs to more than one school, the request selects one with
+  `X-School-ID`. When the caller holds more than one role in the selected
+  school, it selects one with `X-Membership-ID`.
 - The Go backend sets `app.school_id` for the request's database transaction
   so RLS does the enforcement — see `ARCHITECTURE.md`.
 - Every endpoint declares which permission(s) it requires. A request without
@@ -46,30 +49,33 @@ is only an interface: AC-29 is **not addressed** by this foundation. Production
 handlers must wire durable, redacted audit events into the same transaction as
 the protected change and propagate logging failure before claiming AC-29.
 
-### AI-service authentication decision
+### Internal service authentication
 
-Internal calls require both a service credential and a delegated user session.
-Use `Authorization: Bearer <service-token>` for the shared secret configured as
-`INTERNAL_SERVICE_TOKEN` in Go and `AI_SERVICE_SECRET_TOKEN` in Python. Use
-`X-Delegated-Session: <opaque-session-token>` for a Go-issued, short-lived session
-bound to the user and active membership. For verified chat, migration `000004`
-enforces that `chat_sessions` rows in `VERIFIED` state carry a non-null,
-non-blank `access_token_hash` alongside `guardian_user_id`, `verified_at`, and
-`expires_at > verified_at`; Go resolves the hash of `X-Delegated-Session` to an
-unexpired (`expires_at > now()`) `chat_sessions` row and rechecks guardian
-access. For in-app requests, Go validates the user's existing session and
-membership. Unsigned user/school headers are never delegation credentials.
+Internal calls require both a service credential and a delegated user context.
+
+- `X-Internal-Service-Token: <INTERNAL_SERVICE_TOKEN>` is the shared service
+  secret (configured as `AI_SERVICE_SECRET_TOKEN` in Python). Go's
+  `RequireInternalService` middleware enforces it with a constant-time
+  comparison. It authenticates **only the calling service**; it does not
+  resolve a user, school, membership, or permission.
+- `X-User-Context: <base64url(json_payload)>.<hex(hmac_sha256(base64url_payload, INTERNAL_SERVICE_TOKEN))>`
+  is the short-lived delegated context (user, school, membership, channel,
+  session, `exp`). It is verified by the internal API route that consumes it,
+  which must also apply the same tenant, badge-permission, and
+  guardian-relationship checks as a frontend request. Unsigned user/school
+  headers are never delegation credentials.
 
 Both credentials are required; the service token alone grants no student or
-school access. Go verifies each request, derives its principal, and applies the
-same tenant, badge-permission, and guardian-relationship checks as a frontend
+school access. For verified chat, migration `000004` enforces that
+`chat_sessions` rows in `VERIFIED` state carry a non-null, non-blank
+`access_token_hash` alongside `guardian_user_id`, `verified_at`, and
+`expires_at > verified_at`, and Go enforces `expires_at > now()` on every
 request. The AI service is restricted to permission-checked Go endpoints and
 never accesses PostgreSQL, raw biometric templates, or nurse clinical records.
 Restrict internal routes to the private service network, use TLS, rotate
 service tokens, and redact both headers from logs. Production must reject the
-example development secrets. This decision defines the required protocol;
-credential validation and delegation middleware are not implemented in the
-current scaffolding.
+example development secrets. `X-User-Context` verification and delegated
+session issuance are not mounted in the current scaffolding.
 
 ## Rule: the AI service never touches the database directly
 
@@ -87,26 +93,95 @@ The AI service (Python/FastAPI) has no direct database credentials. It:
 
 This is the enforcement point for "AI never invents a fee balance" and "AI
 never handles money directly" from `AGENTS.md` and `SECURITY.md`.
+## AI service authentication (decided 2026-10-29)
 
-## Endpoint groups (fill in as built)
+The AI service authenticates to the Go backend with a **service token plus a
+short-lived signed user context** (user, school, membership, and, for
+WhatsApp, the verified session). Every call carries both; a valid token
+without a valid, unexpired context is rejected. A hybrid with mutual TLS may
+be added later.
+
+## Rate limits
+
+- **OTP (phone):** one request per minute; more than five requests in thirty
+  minutes blocks the requesting phone for 24 hours (not the guardian's
+  account).
+- **OTP (IP):** app login also limits each requesting IP address, but with a
+  much higher threshold (50 requests in thirty minutes) and a short 15-minute
+  block, because a school network or mobile carrier NAT serves many users.
+  Blocking the shared IP must never lock out a whole school for a day.
+- **AI-facing endpoints:** limits are on backend lookups per verified
+  session (fee-balance, attendance, payment lookups), with a tighter limit on
+  payment starts. Numbers are set by the team and QA. Assistant messages
+  themselves are not capped.
+
+## Endpoint groups
 
 > Each group below should end up as a real section with method, path,
-> request/response shape, and required permission. Skeleton only for now.
+> request/response shape, and required permission. Unless a handler status note
+> says otherwise, the entries are agreed contracts rather than mounted routes.
 
 ### Auth & onboarding
-- `POST /auth/otp/request`, `POST /auth/otp/verify`
+
+Handler implementation status: `auth.RegisterRoutes` mounts the two public OTP
+endpoints. All other onboarding endpoints below are still contracts.
+
+- `POST /api/v1/auth/otp/request` (public):
+  `{ "phone_number": "+254712345678" }` →
+  `{ "status": "success", "data": { "message": "OTP sent", "cooldown_seconds": 60 } }`.
+  An SMS is dispatched only when an active account uses the phone number, but
+  the response is identical for unknown numbers so callers cannot enumerate
+  accounts. Limits: one request per minute per phone; more than five requests
+  in thirty minutes blocks the phone for 24 hours. The requesting IP has a
+  separate, higher limit (50 requests in thirty minutes) with a 15-minute
+  block so a shared school network is not locked out for a day.
+- `POST /api/v1/auth/otp/verify` (public):
+  `{ "phone_number": "+254712345678", "otp": "123456" }` →
+  `{ "status": "success", "data": { "token": "<jwt>", "expires_at": "<rfc3339>", "user": {...}, "memberships": [...] } }`.
+  Five wrong attempts consume the OTP.
 - `POST /staff-invites` (permission: `staff.invites.create`)
 - `POST /staff-applications/{id}/review` (permission:
-  `staff.applications.review`)
+  `staff.applications.review`; verifier checks documents in person)
+- `POST /parent-qr` (generate, valid 12 hours) and
+  `POST /parent-qr/{id}/revoke` (permission: `parents.qr.manage`; dean,
+  principal, deputy)
+- `POST /registrations` (parent or staff submission via QR; creates a
+  *pending* record with no data access)
+- `POST /registrations/{id}/verify` (permission: `registrations.verify`;
+  held by staff verifiers, delegable for the QR's active window)
+- `POST /verifier-grants` (permission: `verifier.grant`; staff only,
+  expires with the QR)
 - `POST /students/admit` (permission: `students.admit`)
+- `POST /guardians/me/phone-change` (2FA; notifies the old number; pauses
+  chat payments for 24 hours)
+
+### WhatsApp & parent sessions
+- `POST /whatsapp/webhook` (receiving number resolves the school)
+- `POST /chat/sessions` (admission number → masked guardian numbers)
+- `POST /chat/sessions/{id}/otp` (OTP sent only to the chosen registered
+  number); sessions last 6 hours
 
 ### Academics
 - `GET /classes/{id}/roster` (permission: `class.students.view`)
 - `GET /classes/{id}/stats` (permission: `class.stats.view` — means only, no
   names)
+- `POST /classes/{id}/attendance` (class teacher; one daily roll-call)
+- `PUT /classes/{id}/subjects/{sid}/marks` (assigned subject teacher only)
+- `POST /classes/{id}/marks-assignments` (permission:
+  `marks.reassign`; dean, principal, deputy)
+- `POST /classes/{id}/results/release` (class teacher; rejected unless every
+  subject has marks for every student)
+- `POST /classes/{id}/results/reopen` and `.../re-release` (class teacher;
+  re-release requires a teacher's note per corrected mark; notifies only
+  affected parents)
+- `POST /report-comments/draft` (AI service drafts; teacher edits and
+  publishes)
+- `GET/PUT /timetables`, `GET/PUT /calendar` (dean; term-date changes also
+  trigger the fee-change notice)
 - `POST /syllabus/coverage` — called by AI service after mapping a teacher's
-  natural-language input to CBC strands/sub-strands
-- `GET /students/{id}/performance-history` (parent/teacher, scoped)
+  natural-language input to CBC strands/sub-strands (Release 2)
+- `GET /students/{id}/performance-history` (parent/teacher, scoped; returns
+  CBC levels per subject per term, never rank)
 
 ### Fees & payments
 
@@ -162,9 +237,41 @@ fixed two-decimal KES strings (e.g. `"10000.00"`).
   - **Success (`200`):** Returns the `StudentFeeBalance` fields plus `entries: [{id, term_id, entry_type, amount, reference, description, created_at}]`
     ordered deterministically by `created_at ASC, id ASC` (`entry_type` in `charge | payment | credit_applied | adjustment`).
   - **Note on pagination:** Currently returns the student's full entry list without query pagination parameters.
-- `POST /payments/stk-push` *(planned/unimplemented on this branch)* — AI service calls this after confirming child + amount with the parent; never initiates without that confirmation step
-- `GET /payments/unmatched` *(planned/unimplemented on this branch)* — feeds the AI reconciliation feature
-- `POST /payments/{id}/match` *(planned/unimplemented on this branch)* — bursar confirms an AI-suggested match
+- `POST /api/v1/payments/stk-push`
+  - **Auth & tenant scope:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`). Student lookup and M-Pesa config resolution are strictly scoped to `Principal.SchoolID` (`404 STUDENT_NOT_FOUND` across schools).
+  - **Guardian eligibility:** Requires an active `student_guardians` link with `is_fee_payer = TRUE`, active `memberships.status = 'active'`, and `users.is_active = TRUE` (`403 FORBIDDEN` otherwise).
+  - **Request schema:** `{"student_id":"<uuid>","amount":"<whole KES string/number >= 1.00>","phone_number":"<optional E.164/KE phone>","source":"web|chat|whatsapp|in_app","parent_confirmed":true|false,"idempotency_key":"<optional <=128 chars>"}` (also accepts `Idempotency-Key` HTTP header).
+  - **Amount precision:** Release 1 STK Push accepts **whole KES shillings >= 1.00 KES** only (`amount >= 100 && amount % 100 == 0` in minor units); fractional KES, zero, or negative values return `422 INVALID_PAYMENT_AMOUNT`. Overpayments above the student's current balance are permitted and carried forward as `credit_balance`.
+  - **Chat-initiated payment controls (`source` in `chat | whatsapp | in_app`):**
+    - Mandatory explicit `"parent_confirmed": true`; omitted or `false` returns `422 PARENT_CONFIRMATION_REQUIRED`.
+    - Enforces the 24-hour phone-change freeze (`users.chat_payment_paused_until > NOW()` → `403 CHAT_PAYMENT_PAUSED_PHONE_CHANGE`). Fails closed (`503 CHAT_PAYMENT_FREEZE_UNAVAILABLE`) if the freeze state cannot be read.
+    - Requires a valid registered phone number (`422 INVALID_REGISTERED_PHONE`) and rejects any destination phone override (`422 CHAT_PHONE_OVERRIDE_FORBIDDEN`).
+  - **Idempotency:** Scoped to `(school_id, guardian_user_id, idempotency_key)`. Identical retries return the existing STK attempt without re-invoking Daraja; reusing a key with different student, amount, phone, or source returns `409 IDEMPOTENCY_KEY_CONFLICT`; concurrent in-flight attempts return `409 STK_REQUEST_IN_PROGRESS`.
+  - **Mandatory dependencies:** Requires non-nil `AuditLogger`, `InAppNotifier`, `DarajaProvider`, and `STKPollQueue` (fails closed if unconfigured). Sets `AccountReference = student.admission_number` and enqueues a 45-second status poll (`poll_scheduled` reflects queue status; queue failures are durably audited and recoverable via `RetryUnscheduledSTKPolls`).
+  - **Success (`202`):** `{"status":"success","data":{stk_request_id, student_id, admission_number, account_reference, amount, phone_number, checkout_request_id, merchant_request_id, status, customer_message, poll_scheduled}}`.
+- `POST /api/v1/billing/mpesa/callback` and `POST /api/v1/billing/mpesa/callback/{callback_token}` *(Safaricom Daraja STK Webhook — flat Daraja JSON, NOT the standard app envelope)*
+  - **Authentication (fail-closed):**
+    - Per-request path route (`/{callback_token}`): Safaricom invokes the server-generated 64-hex-char token embedded in the `CallBackURL` path segment during `InitiateSTKPush`. The backend hashes the token (SHA-256), validates it in constant time against `mpesa_stk_requests.callback_token_hash`, and verifies `CheckoutRequestID` binding.
+    - Static route (`/api/v1/billing/mpesa/callback`): Requires a configured `VerifyCallback` hook OR a trusted reverse proxy / API gateway whose `RemoteAddr` is in `TrustedCallbackProxies`, strips client auth headers, and injects `X-Callback-Token` (or `Authorization: Bearer`) matching `MPESA_CALLBACK_TOKEN`. Query-string tokens are always rejected (`401`).
+  - **Tenant resolution:** Resolved strictly from trusted database state (`mpesa_stk_requests` via `callback_token_hash` or globally unique `CheckoutRequestID`), never from caller-supplied `school_id` query parameters or `BusinessShortCode`. If `BusinessShortCode` is present, it is verified against `school_mpesa_configs.shortcode`; if `MerchantRequestID` is stored and present, it is verified to match.
+  - **Amount & state integrity:** Successful callbacks (`ResultCode == 0`) require both `MpesaReceiptNumber` and a valid positive `Amount` matching the initiated `mpesa_stk_requests.amount` exactly (`422 MPESA_AMOUNT_MISMATCH` otherwise, with zero ledger mutation and a rejection audit entry). Provider-confirmed success may settle `initiating`, `pending`, `timeout`, `uncertain`, or earlier `failed` attempts; duplicate successes are idempotent no-ops; late failure callbacks never overwrite `succeeded`.
+  - **Response schema (Daraja format — intentionally distinct from standard app envelope):**
+    - Accepted / duplicate (`200`): `{"ResultCode":0,"ResultDesc":"Accepted"}`
+    - Rejected / unauthenticated / invalid (`400`/`401`/`404`/`409`/`422`/`500`): `{"ResultCode":1,"ResultDesc":"<safe error description>"}`
+- `POST /api/v1/billing/mpesa/c2b-confirmation` *(Safaricom Daraja C2B Paybill Webhook — flat Daraja JSON)*
+  - **Authentication:** Same fail-closed trusted reverse proxy (`TrustedCallbackProxies` + `X-Callback-Token` / `Bearer`) or `VerifyCallback` hook as the static STK callback route. Query-string tokens are rejected (`401`).
+  - **Scope & tenant resolution:** Release 1 supports **Paybill** (`Pay Bill` / `CustomerPayBillOnline`) only; Till (`Buy Goods` / `CustomerBuyGoodsOnline`) is rejected (`422 UNSUPPORTED_MPESA_SHORTCODE_TYPE`). Resolves `school_id` strictly from `BusinessShortCode` via `ResolveShortcode` and verifies against `school_mpesa_configs`.
+  - **Matching & idempotency:** Matches `UPPER(TRIM(students.admission_number)) = UPPER(TRIM(BillRefNumber))` strictly within the resolved `school_id`. Matched payments credit the ledger and notify `is_fee_payer = TRUE` guardians; unknown admission numbers persist into `payments` (`unmatched`) + `unmatched_payments` without discarding money. Duplicate `TransID` receipts are idempotent no-ops.
+  - **Response schema (Daraja format):** `{"ResultCode":0,"ResultDesc":"Accepted"}` on `200`, or `{"ResultCode":1,"ResultDesc":"<safe error description>"}` on rejection.
+- `GET /api/v1/payments/unmatched`
+  - **Auth & permissions:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`) and an active non-parent school membership holding an active school-wide badge granting `billing.unmatched_payments.manage`, `billing.ledgers.view`, or `billing.fee_structures.manage` (`403 FORBIDDEN` otherwise). Strictly tenant-scoped to `Principal.SchoolID`.
+  - **Pagination:** Standard `page` / `per_page` (`contracts.Pagination`).
+  - **Success (`200`):** Standard paginated envelope with `data: [{id, payment_id, transaction_ref, amount, payer_phone, payer_name, raw_account_ref, status, created_at}]`.
+- `POST /api/v1/payments/{id}/match`
+  - **Auth & permissions:** Requires `contracts.RequireIdentity` (`401 UNAUTHENTICATED`), valid UUID `{id}` (`400 INVALID_PAYMENT_ID`), and an active non-parent school membership holding an active school-wide badge granting `billing.unmatched_payments.manage` or `billing.fee_structures.manage` (`403 FORBIDDEN` for teachers and read-only `billing.ledgers.view` staff).
+  - **Request schema:** `{"student_id":"<uuid>","resolution_note":"<optional string>"}`.
+  - **Behavior:** Locks the `unmatched_payments` row `FOR UPDATE` in `Principal.SchoolID` (`404 UNMATCHED_PAYMENT_NOT_FOUND` across schools; `409 PAYMENT_ALREADY_RESOLVED` if already resolved), validates target student belongs to `Principal.SchoolID` (`422 STUDENT_NOT_FOUND` otherwise), atomically updates `unmatched_payments` + `payments`, credits the student ledger, notifies `is_fee_payer = TRUE` guardians, and writes a `billing.payment.manual_match` audit event.
+  - **Success (`200`):** `{"status":"success","data":{payment_id, unmatched_id, student_id, transaction_ref, amount, status:"resolved", resolved_at}}`.
 - `POST /payment-plans/{id}/reminder-check` *(planned/unimplemented on this branch)* — AI service reads pledge vs. actual payments and arrears, triggers a reminder job (does not send directly — enqueues via the notification system)
 
 ### Notifications
@@ -217,9 +324,10 @@ pending auth/session middleware and server composition).
 
 ### AI-service-facing (internal only — never exposed to frontend directly)
 - `POST /internal/ai/parent-query` — resolves a parent's natural-language
-  question by calling the appropriate read endpoints above
+  question by calling the appropriate read endpoints above. On WhatsApp it
+  returns only minimal facts and a link for anything else.
 - `POST /internal/ai/blog-safety-check` — checks a draft post for children's
-  personal details before a patron publishes
+  personal details before a patron publishes (Release 2)
 
 ## Response conventions
 
@@ -287,5 +395,7 @@ with two fractional digits in KES to avoid floating-point loss.
 
 ## What's not yet decided
 
-- Rate limiting for AI-facing endpoints (a parent-assistant loop must not be
-  able to hammer fee-balance lookups).
+- How OTP limits and blocks apply to app login.
+- Response conventions above.
+- Exact lookup-limit numbers for AI-facing endpoints (a parent-assistant loop
+  must not be able to hammer fee-balance lookups).

@@ -149,6 +149,21 @@ This is the section most specific to this project's AI features — see also
 
 ## Retention
 
+Policy is per record type. Periods are to be set with a Kenyan data
+protection lawyer; the rules below are the starting point.
+
+| Record | Rule | Status |
+|---|---|---|
+| Biometric templates | Deleted when the student leaves | Settled |
+| Uploaded verification documents | Deleted after approval; only a verification record (who, when, document type) stays | Agreed |
+| Rejected or never-verified applications | Deleted automatically after a fixed number of days (number to be agreed) | Agreed |
+| Health (nurse) records | Deleted at exit | Proposed |
+| Consent records | Deleted at exit | Proposed |
+| Results | Archived for a set period | Proposed; period open |
+| Financial ledger | Kept as the law requires | Proposed; period open |
+
+What happens to a leftover ledger credit when a student leaves is undecided.
+
 Under Kenya's Data Protection Act, 2019, personal data must not be kept longer
 than necessary for its lawful purpose. **Formal retention schedules have not yet
 been established** for this platform: every post-session, post-reconciliation,
@@ -198,6 +213,49 @@ Operational cleanup requirements (pending worker implementation):
   processing real student data — this is a business/legal task, not a
   coding task, but it blocks going live.
 
+## Release 1 and launch gates (added 2026-10-29)
+
+- **Release 1 uses synthetic data only.** No real student, parent, or staff
+  data enters any environment. It runs against the Daraja sandbox and a test
+  WhatsApp number.
+- **Gates before the first release with real data:**
+  1. `whatsapp` consent purpose in the consent centre (purposes are now
+     biometrics, photos, SMS, and WhatsApp)
+  2. Data protection impact assessment for the WhatsApp channel
+  3. Processing agreement with Meta
+  4. ODPC notification of the transfer
+  5. Minimal WhatsApp message content (see below)
+  6. Review by a Kenyan data protection lawyer, including whether a child's
+     fee data falls under a sensitive category
+  7. ODPC registration
+  8. The hosting decision (Kenya only vs regional Africa; where the AI model
+     runs) — unresolved
+  9. Retention periods and the breach process
+
+## WhatsApp exception to Kenya-only hosting
+
+WhatsApp messages pass through Meta, which counts as a transfer under the
+rules above. This is a deliberate, documented exception, limited by content:
+WhatsApp carries only fee balances, attendance status, and payment prompts.
+Results, report comments, health, and discipline information are never sent on
+WhatsApp; the chat sends a link to the app instead.
+
+## Parent identity, OTP, and sessions
+
+- Chats identify a student by admission number inside the school whose bot
+  received the message; the OTP goes only to a number registered for that
+  student, chosen by the sender from masked numbers.
+- OTPs: one request per minute; more than five in thirty minutes blocks the
+  requesting number for 24 hours (not the guardian's account). App login also
+  applies a separate per-IP limit (50 requests in thirty minutes, 15-minute
+  block) so a shared school network is not locked out for a day.
+- A verified WhatsApp session lasts 6 hours.
+- Changing a registered number needs 2FA (an OTP to the new number), notifies
+  the old number by SMS, and pauses chat payments for 24 hours.
+- Pending registrations are not active records and grant no access until a
+  staff verifier confirms them in person. Verification can be delegated only
+  to staff, only while the QR is active (12 hours).
+
 ## Billing access control and financial auditability
 
 - **Authorization & least privilege:** Billing endpoints never rely on
@@ -229,3 +287,47 @@ Operational cleanup requirements (pending worker implementation):
   compensating entries/notes rather than mutating historical records. Financial
   retention schedules remain subject to the controller-confirmed policy in the
   Retention table above.
+
+## Safaricom Daraja (M-Pesa) payment security
+
+- **Callback authentication (fail-closed):**
+  - *Per-request STK path token:* `InitiateSTKPush` generates a 32-byte
+    cryptographically random hex token, stores only its SHA-256 hash in
+    `mpesa_stk_requests.callback_token_hash`, and embeds the raw token in the
+    `CallBackURL` path (`/api/v1/billing/mpesa/callback/{callback_token}`). The
+    callback handler validates the hash in constant time and verifies strict
+    binding to `CheckoutRequestID`, `school_id`, and `school_mpesa_configs`.
+  - *Trusted reverse proxy / API gateway (static STK & C2B routes):* Because
+    Safaricom does not send custom auth headers directly, static callback routes
+    require `VerifyCallback` OR both `MPESA_CALLBACK_TOKEN` and
+    `MPESA_TRUSTED_CALLBACK_PROXIES`. The reverse proxy must validate
+    Safaricom's source IP allowlist / mTLS, **strip any caller-supplied
+    `X-Callback-Token` and `Authorization` headers**, and inject
+    `X-Callback-Token`. Requests from untrusted remote IPs or with query-string
+    tokens (`?token=...`) are rejected with `401`. Unconfigured authentication
+    fails closed.
+- **Credential & secret handling:** Daraja OAuth credentials
+  (`DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`), per-school encrypted
+  passkeys (`school_mpesa_configs.passkey_encrypted`), `MPESA_CALLBACK_TOKEN`,
+  and per-request callback tokens are never exposed to frontend clients, never
+  stored in query strings, and never written to application logs or `audit_log`.
+- **Tenant isolation & amount integrity:** STK callback tenant resolution derives
+  `school_id` exclusively from `mpesa_stk_requests`, never from caller-supplied
+  `school_id` query parameters or `BusinessShortCode`. Successful STK callbacks
+  require a valid `MpesaReceiptNumber` and an exact `Amount` match against
+  `mpesa_stk_requests.amount` (`422 MPESA_AMOUNT_MISMATCH` on missing, invalid,
+  zero, negative, or mismatched amounts, with zero ledger mutation and a
+  durable `billing.mpesa.stk_callback_rejected` audit event).
+- **Chat-initiated payment controls:** All chat-sourced STK requests (`chat`,
+  `whatsapp`, `in_app`) unconditionally require `"parent_confirmed": true`,
+  verify `users.chat_payment_paused_until` (24-hour phone-change freeze,
+  failing closed with `503 CHAT_PAYMENT_FREEZE_UNAVAILABLE` if unreadable),
+  require a valid registered phone number (`422 INVALID_REGISTERED_PHONE`), and
+  reject destination phone overrides (`422 CHAT_PHONE_OVERRIDE_FORBIDDEN`).
+- **Mandatory dependencies & audit:** Payment initiation and settlement require
+  non-nil `AuditLogger`, `InAppNotifier`, and `STKPollQueue` (for STK) and fail
+  closed if missing or if transactional audit recording fails.
+- **Safaricom data sharing:** Only the minimum fields required by Daraja
+  (Paybill shortcode, payer phone number, whole-KES amount, and student
+  admission number as `AccountReference`) are transmitted to Safaricom. Student
+  names, academic records, and clinical data are never sent to Daraja.
