@@ -17,6 +17,15 @@ var allowedEnvironments = map[string]bool{
 	"production":  true,
 }
 
+var allowedSSLModes = map[string]bool{
+	"disable":     true,
+	"allow":       true,
+	"prefer":      true,
+	"require":     true,
+	"verify-ca":   true,
+	"verify-full": true,
+}
+
 // Config is the fully resolved runtime configuration for the backend.
 type Config struct {
 	Environment string
@@ -112,13 +121,20 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: ENVIRONMENT must be one of development, test, staging or production")
 	}
 
-	sslMode := env("DB_SSLMODE", "")
+	sslMode := strings.ToLower(strings.TrimSpace(env("DB_SSLMODE", "")))
 	if sslMode == "" {
-		if environment == "production" {
+		if environment == "production" || environment == "staging" {
 			sslMode = "require"
 		} else {
 			sslMode = "disable"
 		}
+	}
+	if !allowedSSLModes[sslMode] {
+		return nil, fmt.Errorf("config: DB_SSLMODE must be one of disable, allow, prefer, require, verify-ca or verify-full")
+	}
+	if (environment == "production" || environment == "staging") &&
+		sslMode != "require" && sslMode != "verify-ca" && sslMode != "verify-full" {
+		return nil, fmt.Errorf("config: DB_SSLMODE must require TLS in %s", environment)
 	}
 
 	trustProxyHeaders, err := envBool("TRUST_PROXY_HEADERS")
@@ -173,6 +189,18 @@ func Load() (*Config, error) {
 	}
 	if cfg.JWT.Expiry <= 0 {
 		return nil, fmt.Errorf("config: JWT_EXPIRY_HOURS must be positive")
+	}
+	if cfg.DB.MaxOpenConns <= 0 {
+		return nil, fmt.Errorf("config: DB_MAX_OPEN_CONNS must be positive")
+	}
+	if cfg.DB.MaxIdleConns <= 0 {
+		return nil, fmt.Errorf("config: DB_MAX_IDLE_CONNS must be positive")
+	}
+	if cfg.DB.MaxIdleConns > cfg.DB.MaxOpenConns {
+		return nil, fmt.Errorf("config: DB_MAX_IDLE_CONNS must not exceed DB_MAX_OPEN_CONNS")
+	}
+	if cfg.RetentionDays <= 0 {
+		return nil, fmt.Errorf("config: UNVERIFIED_SUBMISSION_RETENTION_DAYS must be positive")
 	}
 	if strings.TrimSpace(cfg.OTPHMACSecret) == "" {
 		return nil, fmt.Errorf("config: OTP_HMAC_SECRET is required")

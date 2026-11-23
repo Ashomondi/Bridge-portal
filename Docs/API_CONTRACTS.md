@@ -49,30 +49,33 @@ is only an interface: AC-29 is **not addressed** by this foundation. Production
 handlers must wire durable, redacted audit events into the same transaction as
 the protected change and propagate logging failure before claiming AC-29.
 
-### AI-service authentication decision
+### Internal service authentication
 
-Internal calls require both a service credential and a delegated user session.
-Use `Authorization: Bearer <service-token>` for the shared secret configured as
-`INTERNAL_SERVICE_TOKEN` in Go and `AI_SERVICE_SECRET_TOKEN` in Python. Use
-`X-Delegated-Session: <opaque-session-token>` for a Go-issued, short-lived session
-bound to the user and active membership. For verified chat, migration `000004`
-enforces that `chat_sessions` rows in `VERIFIED` state carry a non-null,
-non-blank `access_token_hash` alongside `guardian_user_id`, `verified_at`, and
-`expires_at > verified_at`; Go resolves the hash of `X-Delegated-Session` to an
-unexpired (`expires_at > now()`) `chat_sessions` row and rechecks guardian
-access. For in-app requests, Go validates the user's existing session and
-membership. Unsigned user/school headers are never delegation credentials.
+Internal calls require both a service credential and a delegated user context.
+
+- `X-Internal-Service-Token: <INTERNAL_SERVICE_TOKEN>` is the shared service
+  secret (configured as `AI_SERVICE_SECRET_TOKEN` in Python). Go's
+  `RequireInternalService` middleware enforces it with a constant-time
+  comparison. It authenticates **only the calling service**; it does not
+  resolve a user, school, membership, or permission.
+- `X-User-Context: <base64url(json_payload)>.<hex(hmac_sha256(base64url_payload, INTERNAL_SERVICE_TOKEN))>`
+  is the short-lived delegated context (user, school, membership, channel,
+  session, `exp`). It is verified by the internal API route that consumes it,
+  which must also apply the same tenant, badge-permission, and
+  guardian-relationship checks as a frontend request. Unsigned user/school
+  headers are never delegation credentials.
 
 Both credentials are required; the service token alone grants no student or
-school access. Go verifies each request, derives its principal, and applies the
-same tenant, badge-permission, and guardian-relationship checks as a frontend
+school access. For verified chat, migration `000004` enforces that
+`chat_sessions` rows in `VERIFIED` state carry a non-null, non-blank
+`access_token_hash` alongside `guardian_user_id`, `verified_at`, and
+`expires_at > verified_at`, and Go enforces `expires_at > now()` on every
 request. The AI service is restricted to permission-checked Go endpoints and
 never accesses PostgreSQL, raw biometric templates, or nurse clinical records.
 Restrict internal routes to the private service network, use TLS, rotate
 service tokens, and redact both headers from logs. Production must reject the
-example development secrets. This decision defines the required protocol;
-credential validation and delegation middleware are not implemented in the
-current scaffolding.
+example development secrets. `X-User-Context` verification and delegated
+session issuance are not mounted in the current scaffolding.
 
 ## Rule: the AI service never touches the database directly
 
@@ -100,55 +103,65 @@ be added later.
 
 ## Rate limits
 
-- **OTP:** one request per minute; more than five requests in thirty minutes
-  blocks the *requesting WhatsApp number* for 24 hours (not the guardian's
-  account). App login applies the same limit to the requesting phone and the
-  requesting IP address.
+- **OTP (phone):** one request per minute; more than five requests in thirty
+  minutes blocks the requesting phone for 24 hours (not the guardian's
+  account).
+- **OTP (IP):** app login also limits each requesting IP address, but with a
+  much higher threshold (50 requests in thirty minutes) and a short 15-minute
+  block, because a school network or mobile carrier NAT serves many users.
+  Blocking the shared IP must never lock out a whole school for a day.
 - **AI-facing endpoints:** limits are on backend lookups per verified
   session (fee-balance, attendance, payment lookups), with a tighter limit on
   payment starts. Numbers are set by the team and QA. Assistant messages
   themselves are not capped.
 
-## Endpoint groups (fill in as built)
+## Endpoint groups
 
 > Each group below should end up as a real section with method, path,
-> request/response shape, and required permission. Skeleton only for now.
-> No endpoint exists yet; this tracks the contracts agreed so far.
+> request/response shape, and required permission. Unless a handler status note
+> says otherwise, the entries are agreed contracts rather than mounted routes.
 
 ### Auth & onboarding
-- `POST /auth/otp/request`, `POST /auth/otp/verify`
-- `POST /admin/schools` (Ikonex team; `X-Internal-Service-Token`). Creates the
-  school, principal user and membership, school contact profile, and the
-  default `class_teacher` / `delegated_verifier` badges; returns `school_id`
-  and `principal_user_id`.
-- `POST /schools/setup-wizard` (permission: `school.setup`; principal, deputy).
-  One transaction creates the academic year, Terms 1–3, Grade 7–12 levels,
-  classes, dormitories and the initial grading scale, then sets
-  `school_profile.wizard_completed = true`.
-- `POST /staff-invites` (permission: `staff.invites.create`; default window
-  08:00–18:00, adjustable) and `POST /staff-invites/{id}/revoke`
-- `POST /staff-applications/{id}/review` (permission:
+
+Handler implementation status: `auth.RegisterRoutes` mounts the two public OTP
+endpoints. All other onboarding endpoints below are still contracts.
+
+- `POST /api/v1/auth/otp/request` (public):
+  `{ "phone_number": "+254712345678" }` →
+  `{ "status": "success", "data": { "message": "OTP sent", "cooldown_seconds": 60 } }`.
+  An SMS is dispatched only when an active account uses the phone number, but
+  the response is identical for unknown numbers so callers cannot enumerate
+  accounts. Limits: one request per minute per phone; more than five requests
+  in thirty minutes blocks the phone for 24 hours. The requesting IP has a
+  separate, higher limit (50 requests in thirty minutes) with a 15-minute
+  block so a shared school network is not locked out for a day.
+- `POST /api/v1/auth/otp/verify` (public):
+  `{ "phone_number": "+254712345678", "otp": "123456" }` →
+  `{ "status": "success", "data": { "token": "<jwt>", "expires_at": "<rfc3339>", "user": {...}, "memberships": [...] } }`.
+  Five wrong attempts consume the OTP.
+- `POST /api/v1/staff-invites` (permission: `staff.invites.create`)
+- `POST /api/v1/staff-applications/{id}/review` (permission:
   `staff.applications.review`; verifier checks documents in person)
-- `POST /parent-qr` (generate, valid 12 hours; token embeds the school id) and
-  `POST /parent-qr/{id}/revoke` (permission: `parents.qr.manage`; dean,
+- `POST /api/v1/parent-qr` (generate, valid 12 hours; token embeds the school id) and
+  `POST /api/v1/parent-qr/{id}/revoke` (permission: `parents.qr.manage`; dean,
   principal, deputy; revoking expires any linked delegated verifier badges)
-- `POST /registrations` (public; parent or staff submission via a QR token;
+- `POST /api/v1/registrations` (public; parent or staff submission via a QR token;
   creates a *pending* record with no data access and no student link). An
   invalid, expired or revoked QR returns `410 Gone`; an existing admission
   number sets `is_duplicate_flag`.
-- `POST /registrations/{id}/verify` (permission: `registrations.verify`;
+- `POST /api/v1/registrations/{id}/verify` (permission: `registrations.verify`;
   held by staff verifiers, delegable for the QR's active window). `approve`
   creates the user/student/enrolment/guardian records, deletes the uploaded
   document bytes, keeps a `verification_records` row and triggers the billing
   hook; `reject` deletes the document and schedules the submission for purge.
-- `POST /verifier-grants` (permission: `verifier.grant`; staff memberships
+- `POST /api/v1/verifier-grants` (permission: `verifier.grant`; staff memberships
   only — a parent target returns `422`; the grant expires with the QR)
-- `POST /students/admit` (permission: `students.admit`; manual first-load
+- `POST /api/v1/students/admit` (permission: `students.admit`; manual first-load
   admission, duplicate admission numbers return `409`)
-- `POST /students/re-enrol` (permission: `students.admit`; carries active
+- `POST /api/v1/students/re-enrol` (permission: `students.admit`; carries active
   students into a target academic year's enrolments)
-- `POST /guardians/me/phone-change/request-otp` and
-  `POST /guardians/me/phone-change/confirm` (2FA to the new number; updates
+- `POST /api/v1/guardians/me/phone-change/request-otp` and
+  `POST /api/v1/guardians/me/phone-change/confirm` (2FA to the new number; updates
   the phone, sends an alert to the old number, pauses chat payments for 24
   hours and invalidates active chat sessions)
 - Unverified/rejected submissions are purged after

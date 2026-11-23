@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -107,16 +109,35 @@ func (m *AuthMiddleware) RequireTenant(next http.Handler) http.Handler {
 }
 
 // RequireInternalService gates endpoints that only the AI service may call.
+//
+// It authenticates the service itself: the X-Internal-Service-Token header must
+// match the configured secret in constant time. It does not grant access to
+// student or school data. The delegated user context (X-User-Context, an
+// HMAC-signed and expiring payload) is verified by the internal API routes that
+// consume it, which must also apply the same tenant, badge and guardian checks
+// as any other request. Unsigned user/school headers are never credentials.
 func RequireInternalService(expectedToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if expectedToken == "" || r.Header.Get("X-Internal-Service-Token") != expectedToken {
+			provided := r.Header.Get("X-Internal-Service-Token")
+			if expectedToken == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) != 1 {
 				RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "A valid internal service token is required.")
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// ClientIP returns the direct TCP peer address without its port. It never
+// trusts forwarding headers; callers that sit behind a configured proxy must
+// resolve X-Forwarded-For against a trusted-proxy list before using it.
+func ClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 var (
@@ -273,6 +294,8 @@ func (m *AuthMiddleware) badgesForMembership(ctx context.Context, schoolID, memb
 			   LEFT JOIN badge_permissions bp ON bp.badge_id = b.id
 			   LEFT JOIN permissions p ON p.id = bp.permission_id
 			  WHERE mb.membership_id = $1
+			    AND (mb.valid_from IS NULL OR mb.valid_from <= NOW())
+			    AND (mb.valid_until IS NULL OR mb.valid_until > NOW())
 			  ORDER BY mb.created_at`, membershipID, schoolID)
 		if err != nil {
 			return err

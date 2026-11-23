@@ -246,8 +246,9 @@ WhatsApp; the chat sends a link to the app instead.
   received the message; the OTP goes only to a number registered for that
   student, chosen by the sender from masked numbers.
 - OTPs: one request per minute; more than five in thirty minutes blocks the
-  requesting number for 24 hours (not the guardian's account). How this applies
-  to app login is undecided.
+  requesting number for 24 hours (not the guardian's account). App login also
+  applies a separate per-IP limit (50 requests in thirty minutes, 15-minute
+  block) so a shared school network is not locked out for a day.
 - A verified WhatsApp session lasts 6 hours.
 - Changing a registered number needs 2FA (an OTP to the new number), notifies
   the old number by SMS, and pauses chat payments for 24 hours.

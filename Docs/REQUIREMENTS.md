@@ -72,12 +72,13 @@ well and stress free. See `ikonex.md` section 3.
 - [M] Student blogs and newsletters (placeholder in Release 1; Release 2)
 - [M] Pay fees by M-Pesa STK push
 - [AI] Parent assistant (R1): answers fee and attendance questions in
-  English via WhatsApp and the app, reading only from the database (never
-  invents figures), scoped to the requesting parent's own children. On
-  WhatsApp it carries only minimal facts (fee balances, attendance status,
-  payment prompts); results and report content stay in the app, with a link.
-  When it cannot or should not answer, it refuses politely and gives the
-  school's contact details.
+  English via WhatsApp and the app, reading facts only through
+  permission-checked Go endpoints (the AI service never touches the database
+  directly), never inventing figures, and scoped to the requesting parent's
+  own children. On WhatsApp it carries only minimal facts (fee balances,
+  attendance status, payment prompts); results and report content stay in the
+  app, with a link. When it cannot or should not answer, it refuses politely
+  and gives the school's contact details.
 - [AI] Chat-initiated fee payment (R1): parent states an amount and child and
   types the M-Pesa number to charge; the AI repeats child, amount, and number
   and starts an STK push only after an explicit yes; parent authorises with

@@ -91,7 +91,7 @@ func TestIntegrationConsentUpsertAndList(t *testing.T) {
 		t.Fatalf("seed student and guardian: %v", err)
 	}
 
-	service := NewService(db.DB, nil)
+	service := NewService(db.DB, database.NewAuditLogger(db.DB))
 	identity := middleware.Identity{UserID: userID, SchoolID: schoolID}
 
 	if rec := postConsent(t, service, identity, studentID, true); rec.Code != http.StatusOK {

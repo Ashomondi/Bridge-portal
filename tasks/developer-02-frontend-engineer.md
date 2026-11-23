@@ -235,7 +235,7 @@ And on error (`4xx` / `5xx`):
   }
 }
 ```
-Your `src/lib/api-client.ts` must automatically attach `Authorization: Bearer <jwt>` and `X-School-ID: <active_school_id>` to all authenticated requests and parse `error.code` and `error.message` into user-friendly toast/inline alerts.
+Your `src/lib/api-client.ts` must automatically attach `Authorization: Bearer <jwt>` and `X-School-ID: <active_school_id>` to all authenticated requests. When an active membership is selected, it must also attach `X-Membership-ID: <active_membership_id>` so users with multiple roles in one school use the chosen role. Parse `error.code` and `error.message` into user-friendly toast/inline alerts.
 
 ---
 
