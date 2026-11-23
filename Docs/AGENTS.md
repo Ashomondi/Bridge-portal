@@ -102,6 +102,16 @@ These override convenience or "helpfulness" in any single task. See
    Protection Act. Don't add a dependency that routes personal data through a
    foreign service without checking `SECURITY.md` first.
 
+8. **Release 1 uses synthetic data only.** Never load real student, parent,
+   or staff data into any environment until the launch gates in `SECURITY.md`
+   are cleared.
+9. **WhatsApp carries minimal facts only** (fee balances, attendance status,
+   payment prompts). Never put results, report comments, health, or
+   discipline information in a WhatsApp message; send a link to the app.
+10. **Don't guess open decisions.** `ikonex.md` Appendix B lists them
+    (hosting, who pays for messages, fee variants, and others). If a task
+    depends on one, stop and ask.
+
 ## Conventions
 
 > Expand this section as real conventions are established in the codebase —
@@ -176,6 +186,7 @@ These override convenience or "helpfulness" in any single task. See
 
 ## Where to look before asking the user
 
+- Product behaviour, agreed decisions, open questions, status → `ikonex.md`
 - Data model and service boundaries → `ARCHITECTURE.md`
 - What's in scope, by release phase → `REQUIREMENTS.md`
 - Endpoint shapes and what the AI service may call → `API_CONTRACTS.md`

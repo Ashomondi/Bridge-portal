@@ -178,11 +178,11 @@ func TestMpesaDarajaSTKCallbackC2BAndUnmatchedResolution(t *testing.T) {
 	notifSvc := &notifications.Service{DB: tenantDB}
 
 	svc := &billing.Service{
-		DB:       tenantDB,
-		SystemDB: db.WithTenantTx,
-		Audit:    auditLog,
-		Notifier: notifSvc,
-		Daraja:   darajaClient,
+		DB:        tenantDB,
+		SystemDB:  db.WithTenantTx,
+		Audit:     auditLog,
+		Notifier:  notifSvc,
+		Daraja:    darajaClient,
 		PollQueue: pollQueue,
 		ResolveShortcode: func(ctx context.Context, shortcode string) (string, error) {
 			var sid string

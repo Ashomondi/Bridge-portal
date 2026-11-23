@@ -522,6 +522,7 @@ func TestMigration000005UpDownUpPreservesSchema(t *testing.T) {
 	}
 
 	db.Apply(t, "000005_r1_mpesa_hardening.up.sql")
+	// The freeze column is owned by 000002; 000005 must leave it in place.
 	var exists bool
 	if err := db.Admin.QueryRow(context.Background(), `
 		SELECT EXISTS(

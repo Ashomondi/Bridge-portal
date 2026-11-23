@@ -1,14 +1,12 @@
 BEGIN;
 
--- 24-hour chat-initiated payment freeze after a user changes their registered phone number.
--- Queried strictly by primary key (users.id), so no additional index is required.
-ALTER TABLE users
-    ADD COLUMN chat_payment_paused_until TIMESTAMPTZ;
-
 -- Hardening for Safaricom Daraja STK Push:
 -- 1. Scoped idempotency key + request payload hash to prevent duplicate STK prompts on retry.
 -- 2. Per-request SHA-256 callback token hash for authenticated, server-bound STK callbacks.
 -- 3. Durable poll_scheduled flag so failed poll-queue publications can be safely recovered.
+--
+-- users.chat_payment_paused_until is owned by 000002_r1_core_onboarding, which
+-- always runs earlier, so this migration must not add or drop it.
 ALTER TABLE mpesa_stk_requests
     ADD COLUMN idempotency_key VARCHAR(128),
     ADD COLUMN request_hash VARCHAR(64),

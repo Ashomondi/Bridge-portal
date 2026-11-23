@@ -11,7 +11,4 @@ ALTER TABLE mpesa_stk_requests
     DROP COLUMN IF EXISTS request_hash,
     DROP COLUMN IF EXISTS idempotency_key;
 
-ALTER TABLE users
-    DROP COLUMN IF EXISTS chat_payment_paused_until;
-
 COMMIT;
