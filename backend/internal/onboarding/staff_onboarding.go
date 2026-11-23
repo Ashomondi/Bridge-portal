@@ -29,9 +29,11 @@ var (
 // validStaffRole reports whether the role is one of the allowed staff roles.
 // This guards against arbitrary strings (and values longer than the schema's
 // VARCHAR(50)) being persisted in staff_invites.
+// Principal and deputy are excluded — they are provisioned via the school
+// setup wizard, not through staff QR invites.
 func validStaffRole(role string) bool {
 	switch role {
-	case "principal", "deputy", "dean_of_studies", "teacher", "bursar", "nurse", "librarian":
+	case "dean_of_studies", "teacher", "bursar", "nurse", "librarian":
 		return true
 	default:
 		return false
@@ -87,7 +89,7 @@ func (s *Service) handleCreateStaffInvite(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !validStaffRole(req.Role) {
-		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_ROLE", "role must be one of principal, deputy, dean_of_studies, teacher, bursar, nurse or librarian.")
+		middleware.RespondError(w, http.StatusUnprocessableEntity, "INVALID_ROLE", "role must be one of dean_of_studies, teacher, bursar, nurse or librarian.")
 		return
 	}
 
@@ -163,7 +165,7 @@ func (s *Service) handleRevokeStaffInvite(w http.ResponseWriter, r *http.Request
 		err := tx.QueryRowContext(ctx,
 			`UPDATE staff_invites
 			    SET status = 'revoked'
-			  WHERE id = $1 AND school_id = $2
+			  WHERE id = $1 AND school_id = $2 AND status = 'pending'
 			  RETURNING id::text`,
 			inviteID, identity.SchoolID).Scan(&revokedID)
 		if err != nil {

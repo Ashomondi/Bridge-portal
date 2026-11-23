@@ -46,7 +46,7 @@ func run(logger *log.Logger) error {
 	allowDevelopmentSMS := cfg.Environment == "development" || cfg.Environment == "test"
 	smsDispatcher := devSMSDispatcher{logger: logger, enabled: allowDevelopmentSMS}
 
-trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
+	trustedProxies, err := parseCIDRs(cfg.TrustedProxyCIDRs)
 	if err != nil {
 		return fmt.Errorf("main: trusted proxy CIDRs: %w", err)
 	}

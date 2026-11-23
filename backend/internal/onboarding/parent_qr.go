@@ -60,7 +60,7 @@ func (s *Service) handleCreateParentQR(w http.ResponseWriter, r *http.Request) {
 				Action:       "parent.qr.created",
 				ResourceType: "parent_qr",
 				ResourceID:   qrID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"valid_until": validUntil.UTC().Format(time.RFC3339)},
 			})
@@ -135,7 +135,7 @@ func (s *Service) handleRevokeParentQR(w http.ResponseWriter, r *http.Request) {
 				Action:       "parent.qr.revoked",
 				ResourceType: "parent_qr",
 				ResourceID:   qrID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 			})
 		}

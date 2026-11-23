@@ -146,7 +146,7 @@ func (s *Service) handleAdmitStudent(w http.ResponseWriter, r *http.Request) {
 				Action:       "student.admitted",
 				ResourceType: "student",
 				ResourceID:   studentID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"admission_number": req.AdmissionNumber, "class_id": req.ClassID},
 			})
@@ -234,7 +234,7 @@ func (s *Service) handleReEnrolStudents(w http.ResponseWriter, r *http.Request) 
 				Action:       "students.re_enrolled",
 				ResourceType: "academic_year",
 				ResourceID:   academicYearID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"academic_year": req.AcademicYear, "enrolled": enrolled},
 			})

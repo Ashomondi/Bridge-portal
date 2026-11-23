@@ -53,7 +53,7 @@ func (s *Service) handlePhoneChangeRequestOTP(w http.ResponseWriter, r *http.Req
 		middleware.RespondError(w, http.StatusUnprocessableEntity, "SAME_PHONE_NUMBER", "The new phone number must differ from the current one.")
 		return
 	}
-	if s.sms == nil {
+	if s.sms == nil || s.auth == nil {
 		middleware.RespondError(w, http.StatusServiceUnavailable, "SMS_UNAVAILABLE", "SMS delivery is not configured.")
 		return
 	}
@@ -197,7 +197,7 @@ func (s *Service) handlePhoneChangeConfirm(w http.ResponseWriter, r *http.Reques
 				Action:       "guardian.phone_changed",
 				ResourceType: "user",
 				ResourceID:   identity.UserID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"payment_paused_until": pausedUntil.UTC().Format(time.RFC3339)},
 			})

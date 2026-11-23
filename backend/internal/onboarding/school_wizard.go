@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -341,7 +342,12 @@ func (s *Service) handleSetupWizard(w http.ResponseWriter, r *http.Request) {
 
 		var academicYearID string
 		if err := tx.QueryRowContext(ctx,
-			`INSERT INTO academic_years (school_id, year, is_current)
+			`WITH updated AS (
+			 UPDATE academic_years SET is_current = FALSE
+			 WHERE school_id = $1 AND year <> $2
+			 RETURNING 1
+			)
+		 INSERT INTO academic_years (school_id, year, is_current)
 			 VALUES ($1, $2, TRUE)
 			 ON CONFLICT (school_id, year) DO UPDATE SET is_current = TRUE
 			 RETURNING id::text`,
@@ -454,9 +460,22 @@ func validateSetupWizard(req setupWizardRequest) (parsedSetup, error) {
 		return parsedSetup{}, validationErrorf("exactly three terms are required")
 	}
 
+	// Sort terms by term_number to validate in correct order regardless of
+	// JSON array order.
+	termInput := make([]termRequest, len(req.Terms))
+	copy(termInput, req.Terms)
+	sort.Slice(termInput, func(i, j int) bool {
+		return termInput[i].TermNumber < termInput[j].TermNumber
+	})
+
 	seenTerms := make(map[int]bool, 3)
 	terms := make([]parsedTerm, 0, 3)
-	for _, term := range req.Terms {
+
+	// Academic year boundaries: assume Jan 1 to Dec 31 of the given year.
+	yearStart := time.Date(req.AcademicYear, 1, 1, 0, 0, 0, 0, time.UTC)
+	yearEnd := time.Date(req.AcademicYear+1, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	for _, term := range termInput {
 		if term.TermNumber < 1 || term.TermNumber > 3 || seenTerms[term.TermNumber] {
 			return parsedSetup{}, validationErrorf("term_number values must be 1, 2 and 3")
 		}
@@ -471,16 +490,21 @@ func validateSetupWizard(req setupWizardRequest) (parsedSetup, error) {
 		if !end.After(start) {
 			return parsedSetup{}, validationErrorf("term %d end_date must be after start_date", term.TermNumber)
 		}
+		// Term must fall within the academic year.
+		if start.Before(yearStart) || !end.Before(yearEnd) {
+			return parsedSetup{}, validationErrorf("term %d dates must fall within academic year %d", term.TermNumber, req.AcademicYear)
+		}
 		seenTerms[term.TermNumber] = true
 		terms = append(terms, parsedTerm{number: term.TermNumber, start: start, end: end})
 	}
 
 	// Terms must not overlap chronologically: term 1 ends before term 2 starts,
-	// and term 2 ends before term 3 starts.
-	if terms[0].end.After(terms[1].start) {
+	// and term 2 ends before term 3 starts. Strict inequality — same-day
+	// boundaries are not allowed.
+	if !terms[0].end.Before(terms[1].start) {
 		return parsedSetup{}, validationErrorf("term 1 end_date must be before term 2 start_date")
 	}
-	if terms[1].end.After(terms[2].start) {
+	if !terms[1].end.Before(terms[2].start) {
 		return parsedSetup{}, validationErrorf("term 2 end_date must be before term 3 start_date")
 	}
 
@@ -498,27 +522,45 @@ func validateSetupWizard(req setupWizardRequest) (parsedSetup, error) {
 		gradeSet[grade] = true
 	}
 
-	for _, class := range req.Classes {
-		class.StreamName = strings.TrimSpace(class.StreamName)
-		if class.StreamName == "" {
+	for i := range req.Classes {
+		req.Classes[i].StreamName = strings.TrimSpace(req.Classes[i].StreamName)
+		if req.Classes[i].StreamName == "" {
 			return parsedSetup{}, validationErrorf("every class needs a stream_name")
 		}
-		if !gradeSet[class.GradeLevel] {
-			return parsedSetup{}, validationErrorf("class grade level %d is not in grade_levels", class.GradeLevel)
+		if !gradeSet[req.Classes[i].GradeLevel] {
+			return parsedSetup{}, validationErrorf("class grade level %d is not in grade_levels", req.Classes[i].GradeLevel)
 		}
 	}
+	// Reject duplicate stream names within the same grade level in the request.
+	classSeen := make(map[string]bool)
+	for _, class := range req.Classes {
+		key := fmt.Sprintf("%d:%s", class.GradeLevel, strings.ToLower(class.StreamName))
+		if classSeen[key] {
+			return parsedSetup{}, validationErrorf("duplicate stream_name %q for grade level %d", class.StreamName, class.GradeLevel)
+		}
+		classSeen[key] = true
+	}
 
-	for _, dormitory := range req.Dormitories {
-		dormitory.Name = strings.TrimSpace(dormitory.Name)
-		if dormitory.Name == "" {
+	for i := range req.Dormitories {
+		req.Dormitories[i].Name = strings.TrimSpace(req.Dormitories[i].Name)
+		if req.Dormitories[i].Name == "" {
 			return parsedSetup{}, validationErrorf("every dormitory needs a name")
 		}
-		if dormitory.Gender != "male" && dormitory.Gender != "female" {
+		if req.Dormitories[i].Gender != "male" && req.Dormitories[i].Gender != "female" {
 			return parsedSetup{}, validationErrorf("dormitory gender must be male or female")
 		}
-		if dormitory.Capacity < 0 {
+		if req.Dormitories[i].Capacity < 0 {
 			return parsedSetup{}, validationErrorf("dormitory capacity cannot be negative")
 		}
+	}
+	// Reject duplicate dormitory names (case-insensitive) within the request.
+	dormSeen := make(map[string]bool)
+	for _, dorm := range req.Dormitories {
+		key := strings.ToLower(dorm.Name)
+		if dormSeen[key] {
+			return parsedSetup{}, validationErrorf("duplicate dormitory name %q", dorm.Name)
+		}
+		dormSeen[key] = true
 	}
 
 	scale := req.GradingScale

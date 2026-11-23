@@ -129,7 +129,7 @@ func (s *Service) handleRegistrationSubmission(w http.ResponseWriter, r *http.Re
 				Action:       "registration.submitted",
 				ResourceType: "registration_submission",
 				ResourceID:   submissionID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"submission_type": submissionType, "is_duplicate_flag": duplicate},
 			})
@@ -242,7 +242,7 @@ func (s *Service) handleVerifierGrant(w http.ResponseWriter, r *http.Request) {
 				Action:       "verifier.badge.granted",
 				ResourceType: "membership_badge",
 				ResourceID:   grantID,
-				IPAddress:    r.RemoteAddr,
+				IPAddress:    peerHost(r),
 				UserAgent:    r.UserAgent(),
 				Details:      map[string]any{"staff_membership_id": req.StaffMembershipID, "parent_qr_id": req.ParentQRID},
 			})
@@ -335,7 +335,7 @@ func (s *Service) handleVerifyRegistration(w http.ResponseWriter, r *http.Reques
 					Action:       "registration.rejected",
 					ResourceType: "registration_submission",
 					ResourceID:   submissionID,
-					IPAddress:    r.RemoteAddr,
+					IPAddress:    peerHost(r),
 					UserAgent:    r.UserAgent(),
 				})
 			}
@@ -464,13 +464,21 @@ func approveSubmission(ctx context.Context, tx *sql.Tx, service *Service, identi
 
 	var guardianUserID string
 	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO users (phone_number, full_name, is_active)
-		 VALUES ($1, $2, TRUE)
-		 ON CONFLICT (phone_number) DO UPDATE
-		   SET full_name = EXCLUDED.full_name, is_active = TRUE, updated_at = NOW()
-		 RETURNING id::text`,
-		submission.ApplicantPhone, submission.ApplicantName).Scan(&guardianUserID); err != nil {
-		return "", err
+		`SELECT id::text FROM users WHERE phone_number = $1`,
+		submission.ApplicantPhone).Scan(&guardianUserID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		// Non-destructive insert: only create a user if one does not already
+		// exist. This preserves the original user's identity (full_name,
+		// is_active) instead of overwriting it.
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO users (phone_number, full_name, is_active)
+			 VALUES ($1, $2, TRUE)
+			 RETURNING id::text`,
+			submission.ApplicantPhone, submission.ApplicantName).Scan(&guardianUserID); err != nil {
+			return "", err
+		}
 	}
 
 	classID := strings.TrimSpace(payload.Student.ClassID)
@@ -502,24 +510,29 @@ func approveSubmission(ctx context.Context, tx *sql.Tx, service *Service, identi
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memberships (school_id, user_id, role, status)
-		 VALUES ($1, $2, 'parent', 'active')
-		 ON CONFLICT (school_id, user_id, role) DO NOTHING`,
-		identity.SchoolID, guardianUserID); err != nil {
-		return "", err
-	}
+	// Staff submissions are made by an existing staff member who already has a
+	// user account and membership. They are not a guardian — skip creating a
+	// parent membership and student_guardians link for them.
+	if submission.SubmissionType != "staff" {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO memberships (school_id, user_id, role, status)
+			 VALUES ($1, $2, 'parent', 'active')
+			 ON CONFLICT (school_id, user_id, role) DO NOTHING`,
+			identity.SchoolID, guardianUserID); err != nil {
+			return "", err
+		}
 
-	relationship := strings.TrimSpace(payload.Relationship)
-	if relationship == "" {
-		relationship = "guardian"
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO student_guardians (school_id, student_id, user_id, relationship, is_primary)
-		 VALUES ($1, $2, $3, $4, TRUE)
-		 ON CONFLICT (school_id, student_id, user_id) DO NOTHING`,
-		identity.SchoolID, studentID, guardianUserID, relationship); err != nil {
-		return "", err
+		relationship := strings.TrimSpace(payload.Relationship)
+		if relationship == "" {
+			relationship = "guardian"
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO student_guardians (school_id, student_id, user_id, relationship, is_primary)
+			 VALUES ($1, $2, $3, $4, TRUE)
+			 ON CONFLICT (school_id, student_id, user_id) DO NOTHING`,
+			identity.SchoolID, studentID, guardianUserID, relationship); err != nil {
+			return "", err
+		}
 	}
 
 	var gradeLevelID string
