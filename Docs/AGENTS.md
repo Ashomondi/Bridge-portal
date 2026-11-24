@@ -32,21 +32,28 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
 
 ## Commands
 
-- **Prerequisites:** Go **1.22.2+** (`backend/go.mod`) and **PostgreSQL 16**
-  (`postgres:16-alpine`).
+- **Prerequisites:** Go **1.22.2+** (`backend/go.mod`), **PostgreSQL 16**
+  (`postgres:16-alpine`), and **Redis 7** (`redis:7-alpine`).
 - Backend build & static check:
-  `cd backend && go mod verify && go build ./... && go vet ./...`
+  `cd backend && go mod verify && go build ./... && go build ./cmd/... && go vet ./...`
 - Backend unit tests (no database required):
   `cd backend && go test -count=1 -v ./internal/internalapi/contracts ./internal/academics`
   and SMS transport unit tests:
   `cd backend && go test -count=1 -v ./internal/notifications -run 'Test(AfricaTalking|SMS|Normalize|Sandbox|Transactional)'`
-- PostgreSQL 16 integration tests: start an isolated PostgreSQL 16 test server
-  (e.g., `docker compose up -d --wait postgres` from the repo root), configure
-  `DEV05_TEST_DATABASE_URL`, and run all tests with `CI=true` so database tests
-  cannot skip silently:
+- PostgreSQL 16 + Redis 7 integration tests: start isolated PostgreSQL 16 and
+  Redis 7 test servers (e.g., `docker compose up -d --wait postgres redis` from
+  the repo root), configure `DEV05_TEST_DATABASE_URL` and `DEV05_TEST_REDIS_ADDR`,
+  and run all tests with `CI=true` so database/Redis tests cannot skip silently:
   ```sh
   export DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable'
+  export DEV05_TEST_REDIS_ADDR='localhost:6379'
   cd backend && CI=true go test -count=1 -v ./...
+  ```
+  Run background worker & Asynq integration tests specifically with:
+  ```sh
+  make worker-test
+  # or:
+  cd backend && CI=true DEV05_TEST_DATABASE_URL="$DEV05_TEST_DATABASE_URL" DEV05_TEST_REDIS_ADDR="$DEV05_TEST_REDIS_ADDR" go test -count=1 -v ./internal/jobs/... ./cmd/worker/...
   ```
   Run notification integration tests specifically with:
   ```sh
@@ -56,18 +63,19 @@ See `ARCHITECTURE.md`, `REQUIREMENTS.md`, `API_CONTRACTS.md`, `SECURITY.md`, and
   ```sh
   cd backend && CI=true DEV05_TEST_DATABASE_URL="$DEV05_TEST_DATABASE_URL" go test -count=1 -v ./internal/billing
   ```
-  Adjust the URL for your local credentials/port. Use a dedicated local test
+  Adjust the URLs for your local credentials/ports. Use a dedicated local test
   server with a superuser capable of creating/dropping disposable `dev05_*`
   databases and non-superuser, non-`BYPASSRLS` roles; never run against a
-  production or shared database. Missing `DEV05_TEST_DATABASE_URL` skips DB
-  tests locally without `CI`, but fails when `CI` is nonempty.
-  `.github/workflows/backend.yml` provisions PostgreSQL 16 and runs the full
-  validation suite.
+  production or shared database. Missing `DEV05_TEST_DATABASE_URL` or
+  `DEV05_TEST_REDIS_ADDR` skips integration tests locally without `CI`, but fails
+  when `CI` is nonempty. `.github/workflows/backend.yml` provisions PostgreSQL 16
+  and Redis 7 and runs the full validation suite.
 - Complete validation suite:
   ```sh
-  cd backend && go mod verify && go build ./... && go vet ./... && CI=true DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable' go test -count=1 -v ./...
+  cd backend && go mod verify && go build ./... && go build ./cmd/... && go vet ./... && CI=true DEV05_TEST_DATABASE_URL='postgres://ikonex_admin:ikonex_secure_pass@localhost:5432/postgres?sslmode=disable' DEV05_TEST_REDIS_ADDR='localhost:6379' go test -count=1 -v ./...
   ```
 - Backend run (dev): `make backend-run` (entry point is still a placeholder)
+- Background worker run/build (dev): `make worker-run` / `make worker-build` / `docker compose up -d worker`
 - Frontend run (dev): `make frontend-run`
 - Migrations: apply paired SQL files using a PostgreSQL migration runner in
   exact sequence **`000001` → `000003` → `000004` → `000005`**

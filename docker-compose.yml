@@ -35,6 +35,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: server
     container_name: ikonex_backend
     restart: unless-stopped
     depends_on:
@@ -56,6 +57,42 @@ services:
       - BACKEND_PORT=8080
     ports:
       - "8080:8080"
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: worker
+    container_name: ikonex_worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=development
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-ikonex_admin}
+      - DB_PASSWORD=${DB_PASSWORD:-ikonex_secure_pass}
+      - DB_NAME=${DB_NAME:-ikonex_academy}
+      - DB_SSLMODE=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - AFRICASTALKING_USERNAME=${AFRICASTALKING_USERNAME:-sandbox}
+      - AFRICASTALKING_API_KEY=${AFRICASTALKING_API_KEY:-}
+      - AFRICASTALKING_SENDER_ID=${AFRICASTALKING_SENDER_ID:-IKONEX}
+      - DARAJA_BASE_URL=${DARAJA_BASE_URL:-}
+      - DARAJA_CONSUMER_KEY=${DARAJA_CONSUMER_KEY:-}
+      - DARAJA_CONSUMER_SECRET=${DARAJA_CONSUMER_SECRET:-}
+      - DARAJA_CALLBACK_URL=${DARAJA_CALLBACK_URL:-}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-10}
+      - WORKER_SHUTDOWN_TIMEOUT=${WORKER_SHUTDOWN_TIMEOUT:-15s}
+      - PURGE_RETENTION_DAYS=${PURGE_RETENTION_DAYS:-7}
+      - PURGE_CRON=${PURGE_CRON:-0 2 * * *}
+      - ENABLE_PURGE_SCHEDULER=${ENABLE_PURGE_SCHEDULER:-false}
 
   ai_service:
     build:

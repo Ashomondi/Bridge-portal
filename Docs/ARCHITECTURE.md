@@ -530,3 +530,69 @@ scheduled `internal/jobs` triggers remain pending application composition.
 - **Mandatory audit:** Financial mutations require a non-nil `AuditLogger`
   (`PostgresAuditLogger` writes `audit_log` inside the active transaction) and
   fail closed with `500 AUDIT_LOGGER_REQUIRED` if missing.
+
+## Background worker and Asynq job processing (`backend/internal/jobs`, `backend/cmd/worker`)
+
+The background worker runs as a separate Go binary (`cmd/worker`, Docker target
+`worker`) alongside the HTTP API server (`cmd/server`) so outbound provider calls
+(Africa's Talking SMS, Safaricom Daraja STK status queries) and scheduled cleanup
+jobs do not block HTTP request latency.
+
+### Queue topology and weights
+
+Asynq consumes three priority-weighted queues from Redis (`REDIS_URL`):
+
+| Queue | Weight | Tasks |
+|---|---|---|
+| `critical` | `6` | `sms:transactional` (transactional OTPs & security alerts) |
+| `default` | `3` | `mpesa:stk_poll` (M-Pesa STK fallback reconciliation) |
+| `low` | `1` | `onboarding:purge_unverified` (scheduled expired-submission cleanup) |
+
+### Task lifecycles and idempotency
+
+- **Transactional SMS (`sms:transactional`):** Enqueued via
+  `jobs.NewTransactionalSMSTask` / `NewTransactionalSMSTaskWithOptions`. OTP
+  purposes (`app_login`, `whatsapp_session`, `phone_change`) carry a 5-minute
+  `ExpiresAt` and `asynq.Deadline` so stale OTPs are never delivered late.
+  Callers may supply an `IdempotencyKey` (mapped to `asynq.TaskID` +
+  `asynq.Unique(10m)`) for deduplication. Completed tasks use `asynq.Retention(0)`
+  so plaintext OTP payloads are purged from Redis immediately upon completion.
+  `HandleTransactionalSMS` skips retry (`asynq.SkipRetry`) on invalid payloads,
+  expired OTPs, or non-retryable `*notifications.SMSDeliveryError` (`Retryable: false`),
+  and retries transient failures (`Retryable: true`) or missing-dependency
+  configuration errors (`ErrMissingDependency`).
+- **M-Pesa STK status polling (`mpesa:stk_poll`):** Enqueued 45 seconds
+  after STK initiation via `jobs.Client` (`billing.Service.PollQueue`).
+  `HandleSTKPoll` invokes `billing.Service.PollSTKRequest` (wired in `cmd/worker`
+  with `TenantDBAdapter`, `billing.NewPostgresAuditLogger()`, and
+  `&notifications.Service{DB: tenantDB}`). When an attempt remains non-terminal
+  (`pending` or `uncertain`) and `attempt < DefaultSTKPollMaxAttempts` (6), the
+  handler reschedules the next attempt with backoff (`30s, 60s, 90s, 120s, 120s`,
+  capped at `2m`) using a deterministic `asynq.TaskID` (`stk_poll:<stkRequestID>:<attempt>`).
+  Terminal states (`succeeded`, `failed`, `timeout`) stop polling immediately.
+  `PollSTKRequest` locks the row `FOR UPDATE` and uses `ON CONFLICT (transaction_ref) DO NOTHING`
+  so concurrent Daraja callbacks and pollers settle idempotently.
+- **Unverified submission purge (`onboarding:purge_unverified`):**
+  Scheduled via Asynq `Scheduler` pinned to `time.UTC` (`PURGE_CRON`, default
+  `0 2 * * *`, `PURGE_RETENTION_DAYS` default `7`). Because the onboarding purger
+  implementation (`onboarding` module) is not yet merged on this branch,
+  `ENABLE_PURGE_SCHEDULER` defaults to `false` and `HandlePurgeUnverified` fails
+  explicitly with `ErrMissingDependency` when no purger is configured (and worker
+  startup fails fast if `ENABLE_PURGE_SCHEDULER=true` without a purger).
+
+### Tenant isolation and lifecycle
+
+- **`TenantDBAdapter`:** Opens a PostgreSQL transaction per job and executes
+  `SELECT set_config('app.school_id', $1, true)` after validating `school_id` as
+  a canonical UUID. Works with non-superuser `NOBYPASSRLS` application roles so
+  concurrent worker goroutines remain strictly isolated across pooled connections.
+- **Startup & graceful shutdown:** `cmd/worker` validates `DATABASE_URL` and
+  `REDIS_URL`, pings both PostgreSQL and Redis at startup (exiting non-zero on
+  failure), wires `billing.Service` and `notifications.SMSDispatcher` (sandbox
+  by default when `AFRICASTALKING_USERNAME` is empty or `sandbox`), and handles
+  `SIGINT`/`SIGTERM` by shutting down the Asynq server/scheduler within
+  `WORKER_SHUTDOWN_TIMEOUT` (default `15s`) before closing DB and Redis clients.
+- **Producer integration status:** `billing.Service.PollQueue` is wired to
+  `jobs.NewClient` in `cmd/worker`. API-server SMS producer call
+  sites (`auth`, `onboarding`, `whatsapp`, `cmd/server`) remain follow-up work
+  as those HTTP modules are composed into `cmd/server`.

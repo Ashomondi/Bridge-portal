@@ -1,4 +1,4 @@
-.PHONY: help dev up down test backend-run frontend-run ai-run migrate-up migrate-down clean
+.PHONY: help dev up down test backend-run worker worker-run worker-build worker-test frontend-run ai-run migrate-up migrate-down clean
 
 help:
 	@echo "Bridge Portal - Development Commands:"
@@ -6,6 +6,9 @@ help:
 	@echo "  make up           - Start Postgres and Redis containers in the background"
 	@echo "  make down         - Stop all Docker containers"
 	@echo "  make backend-run  - Run Go backend locally"
+	@echo "  make worker-run   - Run Go Asynq background worker locally (alias: make worker)"
+	@echo "  make worker-build - Build Go Asynq background worker binary"
+	@echo "  make worker-test  - Run worker and jobs package tests"
 	@echo "  make frontend-run - Run Next.js frontend locally"
 	@echo "  make ai-run       - Run Python AI service locally"
 	@echo "  make test         - Run tests across backend and AI service"
@@ -23,6 +26,17 @@ dev:
 
 backend-run:
 	cd backend && go run cmd/server/main.go
+
+worker: worker-run
+
+worker-run:
+	cd backend && go run ./cmd/worker
+
+worker-build:
+	cd backend && go build -o bin/worker ./cmd/worker
+
+worker-test:
+	cd backend && go test -count=1 -v ./internal/jobs/... ./cmd/worker/...
 
 frontend-run:
 	cd frontend && npm run dev

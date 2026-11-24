@@ -204,4 +204,21 @@ auth middleware, permission enforcement, billing handlers and durable audit
 logging still require application integration. `AuditLogger` alone does not
 address AC-29. In-app chat is Release 1 scope; WhatsApp routing schema prepares
 for Release 3 delivery, as specified in the release ADR.
->>>>>>> origin/dev
+
+## Background Worker (`backend/cmd/worker`)
+
+The Go background worker runs as a separate process from the HTTP API server so
+outbound Africa's Talking SMS delivery, Safaricom Daraja M-Pesa STK fallback
+polling, and scheduled cleanup jobs execute asynchronously via Redis + Asynq
+without blocking user requests.
+
+- **Local startup:** `make worker-run` (or `cd backend && go run ./cmd/worker`)
+- **Docker Compose:** `docker compose up -d worker` (uses `backend/Dockerfile`
+  `worker` stage; starts after `postgres` and `redis` are healthy)
+- **Required environment variables:** `DATABASE_URL`, `REDIS_URL`
+- **Optional environment variables:** `WORKER_CONCURRENCY` (default `10`),
+  `WORKER_SHUTDOWN_TIMEOUT` (default `15s`), `PURGE_RETENTION_DAYS` (default `7`),
+  `PURGE_CRON` (default `0 2 * * *` UTC), `ENABLE_PURGE_SCHEDULER` (default
+  `false` until the onboarding purger is wired), `AFRICASTALKING_*`, `DARAJA_*`.
+  See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) and
+  [Docs/SECURITY.md](Docs/SECURITY.md) for queue topology and security rules.
