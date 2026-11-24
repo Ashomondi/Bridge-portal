@@ -59,7 +59,9 @@ This is the section most specific to this project's AI features — see also
 `API_CONTRACTS.md` for how it's enforced technically.
 
 1. **The AI service is self-hosted, in Kenya**, and has no direct database
-   access (enforced at the API layer, not just by convention).
+   access (enforced at the API layer, not just by convention). It may use a
+   Redis database scoped to ephemeral per-session rate limits and payment
+   confirmation state, never tenant facts or permanent records.
 2. **It receives only what a specific, permission-checked endpoint returns**
    — e.g. a parent-assistant query about a fee balance gets the balance, not
    the student's full record.
