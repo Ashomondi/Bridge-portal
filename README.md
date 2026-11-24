@@ -204,4 +204,3 @@ auth middleware, permission enforcement, billing handlers and durable audit
 logging still require application integration. `AuditLogger` alone does not
 address AC-29. In-app chat is Release 1 scope; WhatsApp routing schema prepares
 for Release 3 delivery, as specified in the release ADR.
->>>>>>> origin/dev

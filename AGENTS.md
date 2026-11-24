@@ -27,13 +27,15 @@ teachers. Tenant isolation is enforced with PostgreSQL Row-Level Security
 Prerequisites: Go 1.22+, Node 20+, Python 3.11+, Docker, PostgreSQL 16, Redis 7.
 
 1. `cp .env.example .env` and fill in values.
-2. `make up` (starts Postgres + Redis).
-3. Apply migrations in order:
-   `for f in migrations/*_init_schema.up.sql migrations/*_r1_*.up.sql; do psql -U "$DB_USER" -d "$DB_NAME" -f "$f"; done`
+2. Load it into the shell for the commands below:
+   `set -a; . ./.env; set +a`
+3. `make up` (starts Postgres + Redis).
+4. Apply migrations in order:
+   `for f in migrations/*_init_schema.up.sql migrations/*_r1_*.up.sql; do psql --set ON_ERROR_STOP=on -U "$DB_USER" -d "$DB_NAME" -f "$f" || exit 1; done`
    (or `make migrate-up` once wired).
-4. Backend: `cd backend && go mod download && go run cmd/server/main.go`
-5. Frontend: `cd frontend && npm install && npm run dev`
-6. AI service: `cd ai_service && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`
+5. Backend: `cd backend && go mod download && go run cmd/server/main.go`
+6. Frontend: `cd frontend && npm install && npm run dev`
+7. AI service: `cd ai_service && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`
 
 Or run everything with `make dev` (Docker Compose).
 
@@ -151,4 +153,3 @@ notifications, nurse, onboarding, whatsapp).
 - Why a past decision was made → `Docs/DECISIONS.md`
 - Coding conventions → `Docs/AGENTS.md`
 - Task breakdown and ownership → `tasks/MASTER-INTEGRATION-PLAN.md`
-filePath: /home/banker/code/open/Ikonex-Academy/AGENTS.md
