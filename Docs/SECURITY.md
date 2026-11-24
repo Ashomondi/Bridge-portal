@@ -331,3 +331,29 @@ WhatsApp; the chat sends a link to the app instead.
   (Paybill shortcode, payer phone number, whole-KES amount, and student
   admission number as `AccountReference`) are transmitted to Safaricom. Student
   names, academic records, and clinical data are never sent to Daraja.
+
+## Background worker and Redis queue security
+
+- **Redis access control & network isolation:** Redis (`REDIS_URL`) stores
+  in-flight Asynq job payloads, including transient transactional SMS bodies
+  (OTPs and recipient phone numbers). In production, Redis must run on a private
+  internal network (never publicly exposed), require authentication (`redis://:...`
+  or `rediss://:...` TLS), and use a dedicated Redis instance/DB isolated from
+  untrusted caches.
+- **Minimizing sensitive OTP retention in Redis:** Transactional OTP tasks
+  (`app_login`, `whatsapp_session`, `phone_change`) enforce a 5-minute
+  `ExpiresAt` and `asynq.Deadline` (preventing late delivery) and set
+  `asynq.Retention(0)` so completed SMS tasks are deleted from Redis immediately
+  rather than retained in completed-task queues. Failed/archived SMS tasks
+  remain in Redis only until archived-queue expiry or operator cleanup; do not
+  expose Asynq inspection UIs (e.g., `asynqmon`) without strict admin auth and
+  payload redaction.
+- **Strict log redaction:** `internal/jobs` and `cmd/worker` never log SMS
+  message bodies, OTP codes, full recipient phone numbers, `DATABASE_URL`
+  credentials, `REDIS_URL` passwords, or Africa's Talking / Daraja secrets.
+  Worker startup logs only sanitized connection status and operational flags.
+- **Tenant RLS & least privilege:** `cmd/worker` runs as a non-root container
+  user (`appuser`), exposes no HTTP ports, and executes every database query
+  through `TenantDBAdapter.WithSchoolTx` (`SET LOCAL app.school_id`) using a
+  non-superuser, non-`BYPASSRLS` PostgreSQL role. Missing or invalid `school_id`
+  values fail closed before querying PostgreSQL.
