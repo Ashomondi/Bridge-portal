@@ -49,11 +49,6 @@ func (s *Service) RecordAttendance(ctx context.Context, classID string, req Atte
 
 	var result AttendanceResult
 	var absentStudentIDs []string
-	type absenceNotice struct {
-		StudentID string
-		Guardians []string
-	}
-	var absenceNotices []absenceNotice
 	err = s.tx(ctx, actor.SchoolID, func(tx Store) error {
 		allowed, err := tx.HasClassTeacherBadge(ctx, actor.SchoolID, actor.MembershipID, classID)
 		if err != nil {
@@ -122,29 +117,35 @@ func (s *Service) RecordAttendance(ctx context.Context, classID string, req Atte
 			Date:          date.Format("2006-01-02"),
 			RecordedCount: count,
 		}
-		for _, studentID := range absentStudentIDs {
-			guardians, _ := tx.GuardianIDsForStudent(ctx, actor.SchoolID, studentID)
-			absenceNotices = append(absenceNotices, absenceNotice{StudentID: studentID, Guardians: guardians})
-		}
-		return s.audit(ctx, tx, actor, "daily_attendance_recorded", "class", classID, map[string]any{
+		if err := s.audit(ctx, tx, actor, "daily_attendance_recorded", "class", classID, map[string]any{
 			"term_id":         term.ID,
 			"attendance_date": result.Date,
 			"recorded_count":  count,
 			"absent_count":    len(absentStudentIDs),
 			"source":          "manual_roll_call",
-		})
+		}); err != nil {
+			return err
+		}
+		// In-app absence notifications are Release 1 only and participate in
+		// the roll-call transaction; SMS alerts are Release 2 (C58).
+		for _, studentID := range absentStudentIDs {
+			guardians, err := tx.GuardianIDsForStudent(ctx, actor.SchoolID, studentID)
+			if err != nil {
+				return err
+			}
+			queued, err := s.notifyMany(ctx, tx, actor.SchoolID, guardians, "academics.attendance",
+				"Absence recorded",
+				"Your child was marked absent in today's class roll-call.",
+				map[string]any{"student_id": studentID, "class_id": classID, "date": result.Date})
+			if err != nil {
+				return err
+			}
+			result.AbsentNotificationsQueued += queued
+		}
+		return nil
 	})
 	if err != nil {
 		return AttendanceResult{}, err
-	}
-
-	// In-app absence notifications are Release 1 only; SMS is Release 2 (C58).
-	for _, notice := range absenceNotices {
-		queued, _ := s.notifyMany(ctx, actor.SchoolID, notice.Guardians, "academics.attendance",
-			"Absence recorded",
-			"Your child was marked absent in today's class roll-call.",
-			map[string]any{"student_id": notice.StudentID, "class_id": classID, "date": result.Date})
-		result.AbsentNotificationsQueued += queued
 	}
 	return result, nil
 }

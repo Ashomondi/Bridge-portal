@@ -15,7 +15,7 @@ import (
 	"github.com/Ashomondi/ikonex-academy/backend/internal/billing/testenv"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
-	"github.com/Ashomondi/ikonex-academy/backend/internal/whatsapp"
+	"github.com/Ashomondi/ikonex-academy/backend/internal/notifications"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -54,6 +54,12 @@ func (d *stubDaraja) QuerySTKStatus(_ context.Context, req billing.DarajaSTKQuer
 		ResultCode:        0,
 		ResultDesc:        "Processed",
 	}, nil
+}
+
+type stubPollQueue struct{}
+
+func (stubPollQueue) EnqueueSTKPoll(context.Context, billing.STKPollTask, time.Duration) error {
+	return nil
 }
 
 func TestUserContextSignerAndVerifier(t *testing.T) {
@@ -106,15 +112,11 @@ func TestUserContextSignerAndVerifier(t *testing.T) {
 		t.Fatal("expected expired user context to fail verification")
 	}
 
-	// Missing session_id on whatsapp channel must fail
+	// Missing session_id on whatsapp channel must fail during signing
 	invalidWA := validCtx
 	invalidWA.SessionID = ""
-	signedInvalidWA, err := internalapi.SignUserContext(invalidWA, token)
-	if err != nil {
-		t.Fatalf("SignUserContext failed: %v", err)
-	}
-	if _, err := internalapi.VerifyUserContext(signedInvalidWA, token, now); err == nil {
-		t.Fatal("expected whatsapp context without session_id to fail verification")
+	if _, err := internalapi.SignUserContext(invalidWA, token); err == nil {
+		t.Fatal("expected whatsapp context without session_id to fail signing")
 	}
 }
 
@@ -153,6 +155,8 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 		t.Fatalf("insert users: %v", err)
 	}
 
+	const delegatedTokenA = "delegated-wa-session-token-a"
+	const delegatedTokenB = "delegated-wa-session-token-b"
 	err := db.WithTenantTx(ctx, schoolA.ID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO memberships (id, school_id, user_id, role, status)
@@ -160,6 +164,29 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 			       ($4, $2, $5, 'parent', 'active')`,
 			bursarMembID, schoolA.ID, bursarUserID,
 			parentBMembID, parentBUserID,
+		); err != nil {
+			return err
+		}
+		// Grant billing.fee_structures.manage badge permission to Bursar A
+		if _, err := tx.Exec(ctx, `
+			WITH perm AS (
+				INSERT INTO permissions (code, name, category)
+				VALUES ('billing.fee_structures.manage', 'Manage fee structures', 'billing')
+				ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+				RETURNING id
+			), b AS (
+				INSERT INTO badges (school_id, name, slug, scope_type)
+				VALUES ($1, 'Bursar Fee Manager', 'bursar_fee_mgr', 'none')
+				ON CONFLICT (school_id, slug) DO UPDATE SET name = EXCLUDED.name
+				RETURNING id
+			), bp AS (
+				INSERT INTO badge_permissions (badge_id, permission_id)
+				SELECT b.id, perm.id FROM b, perm
+				ON CONFLICT DO NOTHING
+			)
+			INSERT INTO membership_badges (membership_id, badge_id)
+			SELECT $2, b.id FROM b`,
+			schoolA.ID, bursarMembID,
 		); err != nil {
 			return err
 		}
@@ -179,12 +206,12 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO chat_sessions (
-				id, school_id, channel, sender_wa_number, state, student_id, guardian_user_id, verified_at, expires_at
+				id, school_id, channel, sender_wa_number, state, student_id, guardian_user_id, access_token_hash, verified_at, expires_at
 			) VALUES
-				($1, $2, 'whatsapp', '+254711000111', 'VERIFIED', $3, $4, $5, $6),
-				($7, $2, 'whatsapp', '+254799111222', 'VERIFIED', $8, $9, $5, $6)`,
-			sessionAID, schoolA.ID, schoolA.StudentID, schoolA.UserID, now, now.Add(6*time.Hour),
-			sessionBID, student2ID, parentBUserID,
+				($1, $2, 'whatsapp', '+254711000111', 'VERIFIED', $3, $4, $5, $6, $7),
+				($8, $2, 'whatsapp', '+254799111222', 'VERIFIED', $9, $10, $11, $6, $7)`,
+			sessionAID, schoolA.ID, schoolA.StudentID, schoolA.UserID, internalapi.HashDelegatedToken(delegatedTokenA), now, now.Add(6*time.Hour),
+			sessionBID, student2ID, parentBUserID, internalapi.HashDelegatedToken(delegatedTokenB),
 		); err != nil {
 			return err
 		}
@@ -194,16 +221,21 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 		t.Fatalf("seed internalapi fixtures: %v", err)
 	}
 
+	tenantDB := contracts.TenantTxFunc(db.WithTenantTx)
 	billingSvc := &billing.Service{
-		DB:     db,
-		Daraja: &stubDaraja{},
-		Now:    func() time.Time { return now },
+		DB:        tenantDB,
+		SystemDB:  db.WithTenantTx,
+		Audit:     billing.NewPostgresAuditLogger(),
+		Notifier:  &notifications.Service{DB: tenantDB},
+		Daraja:    &stubDaraja{},
+		PollQueue: stubPollQueue{},
+		Now:       func() time.Time { return now },
 	}
 	adminPrincipal := contracts.Principal{
-		UserID:       schoolA.UserID,
+		UserID:       bursarUserID,
 		SchoolID:     schoolA.ID,
-		MembershipID: schoolA.MembershipID,
-		Role:         "ikonex_admin",
+		MembershipID: bursarMembID,
+		Role:         "bursar",
 	}
 	structure, err := billingSvc.LoadFeeStructure(ctx, adminPrincipal, billing.LoadFeeStructureInput{
 		AcademicYearID: schoolA.YearID,
@@ -241,15 +273,16 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 		},
 	}
 
-	var capturedAIToken, capturedAICtxHeader string
+	var capturedAIToken, capturedAICtxHeader, capturedDelegatedHeader string
 	var capturedAIBody map[string]any
 	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/ai/parent-query" {
 			http.NotFound(w, r)
 			return
 		}
-		capturedAIToken = r.Header.Get(internalapi.HeaderInternalServiceToken)
+		capturedAIToken = internalapi.ExtractServiceToken(r)
 		capturedAICtxHeader = r.Header.Get(internalapi.HeaderUserContext)
+		capturedDelegatedHeader = r.Header.Get(internalapi.HeaderDelegatedSession)
 		_ = json.NewDecoder(r.Body).Decode(&capturedAIBody)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"reply":"Jambo! Your fee balance is KES 12,000.00."}`))
@@ -257,11 +290,15 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 	defer aiServer.Close()
 
 	const serviceToken = "dev05-internal-token-secret"
+	const aiToken = "dev05-outgoing-ai-token-secret"
+	const signingKey = "dev05-hmac-context-signing-key"
 	svc := &internalapi.Service{
-		DB:                   db,
+		DB:                   tenantDB,
 		Billing:              billingSvc,
 		Academics:            academicsStub,
 		InternalServiceToken: serviceToken,
+		AIServiceToken:       aiToken,
+		ContextSigningKey:    signingKey,
 		AIServiceBaseURL:     aiServer.URL + "/api/v1/ai",
 		PortalBaseURL:        "https://portal.ikonex.test",
 		HTTPClient:           aiServer.Client(),
@@ -288,7 +325,7 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 			SessionID:    sessionAID,
 			Exp:          now.Add(5 * time.Minute).Unix(),
 		}
-		signed, err := internalapi.SignUserContext(uctx, serviceToken)
+		signed, err := internalapi.SignUserContext(uctx, signingKey)
 		if err != nil {
 			t.Fatalf("SignUserContext: %v", err)
 		}
@@ -302,17 +339,18 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 		}
 		if token != "" {
-			req.Header.Set(internalapi.HeaderInternalServiceToken, token)
+			req.Header.Set(internalapi.HeaderAuthorization, "Bearer "+token)
 		}
 		if userCtx != "" {
 			req.Header.Set(internalapi.HeaderUserContext, userCtx)
+			req.Header.Set(internalapi.HeaderDelegatedSession, delegatedTokenA)
 		}
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		return rec
 	}
 
-	// 1. Missing or invalid X-Internal-Service-Token -> 401
+	// 1. Missing/invalid service token, bad signature, or missing X-Delegated-Session -> 401
 	recNoToken := doInternal(http.MethodGet, "/api/v1/internal/school-profile", "", makeSignedHeader("whatsapp"), nil)
 	if recNoToken.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d, want 401", recNoToken.Code)
@@ -320,6 +358,14 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 	recBadSig := doInternal(http.MethodGet, "/api/v1/internal/school-profile", serviceToken, makeSignedHeader("whatsapp")+"bad", nil)
 	if recBadSig.Code != http.StatusUnauthorized {
 		t.Fatalf("bad signature status = %d, want 401", recBadSig.Code)
+	}
+	reqNoDelegated := httptest.NewRequest(http.MethodGet, "/api/v1/internal/school-profile", nil)
+	reqNoDelegated.Header.Set(internalapi.HeaderAuthorization, "Bearer "+serviceToken)
+	reqNoDelegated.Header.Set(internalapi.HeaderUserContext, makeSignedHeader("whatsapp"))
+	recNoDelegated := httptest.NewRecorder()
+	mux.ServeHTTP(recNoDelegated, reqNoDelegated)
+	if recNoDelegated.Code != http.StatusUnauthorized {
+		t.Fatalf("missing X-Delegated-Session status = %d, want 401", recNoDelegated.Code)
 	}
 
 	// 2. GET /api/v1/internal/school-profile -> 200
@@ -376,17 +422,35 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 		t.Fatalf("in_app marks-summary status = %d, body = %s", recMarksInApp.Code, recMarksInApp.Body.String())
 	}
 
-	// 7. POST /api/v1/internal/payments/stk-push -> requires parent_confirmed=true & enforces 24h phone-change freeze
-	unconfirmedBody := []byte(`{"student_id":"` + schoolA.StudentID + `","amount":500000,"phone_number":"+254712345678","parent_confirmed":false}`)
+	// 7. POST /api/v1/internal/payments/stk-push -> requires parent_confirmed=true, registered phone, is_fee_payer=TRUE & enforces 24h freeze
+	unconfirmedBody := []byte(`{"student_id":"` + schoolA.StudentID + `","amount":500000,"phone_number":"+254700000001","parent_confirmed":false}`)
 	recUnconfirmed := doInternal(http.MethodPost, "/api/v1/internal/payments/stk-push", serviceToken, makeSignedHeader("whatsapp"), unconfirmedBody)
 	if recUnconfirmed.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("unconfirmed internal stk-push status = %d, want 422", recUnconfirmed.Code)
 	}
 
-	confirmedBody := []byte(`{"student_id":"` + schoolA.StudentID + `","amount":500000,"phone_number":"+254712345678","parent_confirmed":true}`)
+	overridePhoneBody := []byte(`{"student_id":"` + schoolA.StudentID + `","amount":500000,"phone_number":"+254712345678","parent_confirmed":true}`)
+	recOverride := doInternal(http.MethodPost, "/api/v1/internal/payments/stk-push", serviceToken, makeSignedHeader("whatsapp"), overridePhoneBody)
+	if recOverride.Code != http.StatusUnprocessableEntity || !strings.Contains(recOverride.Body.String(), "CHAT_PHONE_OVERRIDE_FORBIDDEN") {
+		t.Fatalf("expected 422 CHAT_PHONE_OVERRIDE_FORBIDDEN, got %d (%s)", recOverride.Code, recOverride.Body.String())
+	}
+
+	confirmedBody := []byte(`{"student_id":"` + schoolA.StudentID + `","amount":500000,"phone_number":"+254700000001","parent_confirmed":true}`)
 	recSTK := doInternal(http.MethodPost, "/api/v1/internal/payments/stk-push", serviceToken, makeSignedHeader("whatsapp"), confirmedBody)
 	if recSTK.Code != http.StatusAccepted || !strings.Contains(recSTK.Body.String(), `"account_reference":"DEMO-001"`) {
 		t.Fatalf("confirmed internal stk-push status = %d, body = %s", recSTK.Code, recSTK.Body.String())
+	}
+
+	// Non-fee-payer guardian cannot initiate STK push through internal AI gateway
+	if _, err := db.Admin.Exec(ctx, `UPDATE student_guardians SET is_fee_payer = FALSE WHERE school_id = $1 AND student_id = $2 AND user_id = $3`, schoolA.ID, schoolA.StudentID, schoolA.UserID); err != nil {
+		t.Fatal(err)
+	}
+	recNonPayerSTK := doInternal(http.MethodPost, "/api/v1/internal/payments/stk-push", serviceToken, makeSignedHeader("whatsapp"), confirmedBody)
+	if recNonPayerSTK.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-fee-paying guardian internal STK push, got %d (%s)", recNonPayerSTK.Code, recNonPayerSTK.Body.String())
+	}
+	if _, err := db.Admin.Exec(ctx, `UPDATE student_guardians SET is_fee_payer = TRUE WHERE school_id = $1 AND student_id = $2 AND user_id = $3`, schoolA.ID, schoolA.StudentID, schoolA.UserID); err != nil {
+		t.Fatal(err)
 	}
 
 	// Set chat_payment_paused_until -> internal stk-push must return 403 CHAT_PAYMENT_PAUSED_PHONE_CHANGE
@@ -444,14 +508,17 @@ func TestInternalAPIEndpointsAuthOwnershipMarksGuardAndChatProxy(t *testing.T) {
 	if chatRec.Code != http.StatusOK || !strings.Contains(chatRec.Body.String(), "KES 12,000.00") {
 		t.Fatalf("chat proxy status = %d, body = %s", chatRec.Code, chatRec.Body.String())
 	}
-	if capturedAIToken != serviceToken {
-		t.Fatalf("captured AI service token = %q, want %q", capturedAIToken, serviceToken)
+	if capturedAIToken != aiToken {
+		t.Fatalf("captured AI service token = %q, want %q", capturedAIToken, aiToken)
 	}
-	verifiedForwardedCtx, err := internalapi.VerifyUserContext(capturedAICtxHeader, serviceToken, now)
+	if capturedDelegatedHeader == "" {
+		t.Fatal("expected non-empty forwarded X-Delegated-Session header")
+	}
+	verifiedForwardedCtx, err := internalapi.VerifyUserContext(capturedAICtxHeader, signingKey, now)
 	if err != nil {
 		t.Fatalf("forwarded X-User-Context failed verification: %v", err)
 	}
-	if verifiedForwardedCtx.Channel != "in_app" || verifiedForwardedCtx.UserID != schoolA.UserID {
+	if verifiedForwardedCtx.Channel != "in_app" || verifiedForwardedCtx.UserID != schoolA.UserID || verifiedForwardedCtx.SessionID == "" {
 		t.Fatalf("unexpected forwarded UserContext: %+v", verifiedForwardedCtx)
 	}
 	if capturedAIBody["message"] != "How much do I owe for Term 1?" {
@@ -464,7 +531,7 @@ func TestCredentialSeparationAndProductionHTTPS(t *testing.T) {
 	var capturedAIToken, capturedAICtxHeader string
 
 	aiServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAIToken = r.Header.Get(internalapi.HeaderInternalServiceToken)
+		capturedAIToken = internalapi.ExtractServiceToken(r)
 		capturedAICtxHeader = r.Header.Get(internalapi.HeaderUserContext)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"reply":"Secure AI response"}`))
@@ -491,7 +558,7 @@ func TestCredentialSeparationAndProductionHTTPS(t *testing.T) {
 	}
 
 	// 1. In production, HTTP scheme must be rejected with INSECURE_AI_TRANSPORT
-	_, err := svc.ForwardParentQuery(ctx, whatsapp.AIParentQueryInput{
+	_, err := svc.ForwardParentQuery(ctx, internalapi.AIParentQueryInput{
 		UserID:       input.UserID,
 		SchoolID:     input.SchoolID,
 		MembershipID: input.MembershipID,
@@ -508,7 +575,7 @@ func TestCredentialSeparationAndProductionHTTPS(t *testing.T) {
 	svc.AIServiceBaseURL = aiServer.URL + "/api/v1/ai"
 	svc.HTTPClient = aiServer.Client()
 
-	reply, err := svc.ForwardParentQuery(ctx, whatsapp.AIParentQueryInput{
+	reply, err := svc.ForwardParentQuery(ctx, internalapi.AIParentQueryInput{
 		UserID:       input.UserID,
 		SchoolID:     input.SchoolID,
 		MembershipID: input.MembershipID,
@@ -542,12 +609,27 @@ func TestCredentialSeparationAndProductionHTTPS(t *testing.T) {
 	if verified.UserID != input.UserID || verified.SchoolID != input.SchoolID {
 		t.Fatalf("verified user context mismatch: %+v", verified)
 	}
+
+	// 5. Missing ContextSigningKey or AIServiceToken must fail closed instead of falling back to InternalServiceToken
+	noSeparateSvc := &internalapi.Service{
+		InternalServiceToken: "incoming-internal-token",
+		AIServiceBaseURL:     aiServer.URL + "/api/v1/ai",
+		HTTPClient:           aiServer.Client(),
+	}
+	if _, err := noSeparateSvc.ForwardParentQuery(ctx, internalapi.AIParentQueryInput{
+		UserID: input.UserID, SchoolID: input.SchoolID, MembershipID: input.MembershipID,
+		Role: input.Role, Channel: input.Channel, Message: "Hi",
+	}); !errors.As(err, &apiErr) || apiErr.Code != "AI_SERVICE_NOT_CONFIGURED" {
+		t.Fatalf("expected AI_SERVICE_NOT_CONFIGURED when AIServiceToken empty, got %v", err)
+	}
 }
 
 func TestDeepRecursiveMetadataSanitization(t *testing.T) {
 	deepMetadata := map[string]any{
 		"request_id": "req-98765",
 		"normal_str": "harmless_value",
+		"author":     "Jane Doe",
+		"pin":        "4321",
 		"top_secret": "drop-me",
 		"nested_obj": map[string]any{
 			"safe_nested":  "visible",
@@ -579,15 +661,16 @@ func TestDeepRecursiveMetadataSanitization(t *testing.T) {
 	}
 	sanitizedStr := string(sanitizedBytes)
 
-	// Must preserve safe fields
-	for _, safeVal := range []string{"req-98765", "harmless_value", "visible", "42", "book", "approved"} {
+	// Must preserve safe fields including "author"
+	for _, safeVal := range []string{"req-98765", "harmless_value", "author", "Jane Doe", "visible", "42", "book", "approved"} {
 		if !strings.Contains(sanitizedStr, safeVal) {
 			t.Errorf("expected sanitized metadata to contain safe field %q, got: %s", safeVal, sanitizedStr)
 		}
 	}
 
-	// Must strip sensitive fields at all depths
+	// Must strip sensitive fields at all depths including "pin"
 	for _, sensitiveVal := range []string{
+		"4321",
 		"drop-me",
 		"drop-nested-bearer",
 		"super-secret-pwd",
@@ -615,7 +698,7 @@ func TestDeepRecursiveMetadataSanitization(t *testing.T) {
 	now := time.Date(2026, 5, 12, 11, 0, 0, 0, time.UTC)
 
 	svc := &internalapi.Service{
-		DB:                   db,
+		DB:                   contracts.TenantTxFunc(db.WithTenantTx),
 		InternalServiceToken: "secret-token",
 		Now:                  func() time.Time { return now },
 	}
@@ -628,8 +711,14 @@ func TestDeepRecursiveMetadataSanitization(t *testing.T) {
 		Channel:      "in_app",
 		Exp:          now.Add(1 * time.Hour).Unix(),
 	}
+	p := contracts.Principal{
+		UserID:       school.UserID,
+		SchoolID:     school.ID,
+		MembershipID: school.MembershipID,
+		Role:         "parent",
+	}
 
-	logID, err := svc.RecordAIAuditLog(ctx, uctx, internalapi.AIAuditLogInput{
+	logID, err := svc.RecordAIAuditLog(ctx, uctx, p, internalapi.AIAuditLogInput{
 		Feature:       "parent_query",
 		Intent:        "check_grades",
 		EndpointsRead: []string{"/api/v1/internal/students/1/marks"},

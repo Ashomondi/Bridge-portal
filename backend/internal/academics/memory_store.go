@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 )
 
 // MemoryStore is a deterministic in-memory Store used by the unit tests and by
@@ -62,11 +64,31 @@ func NewMemoryStore() *MemoryStore {
 
 func key(parts ...string) string { return strings.Join(parts, "|") }
 
+type memoryNotificationTx struct{}
+
+func (memoryNotificationTx) QueryRowExists(context.Context, string, ...any) (bool, error) {
+	return false, nil
+}
+func (memoryNotificationTx) Exec(context.Context, string, ...any) error { return nil }
+
+type memoryTxStore struct {
+	*MemoryStore
+}
+
+func (m *memoryTxStore) NotificationTx() contracts.SQLTx {
+	return memoryNotificationTx{}
+}
+
 // WithTx executes fn. The memory store has no real transaction to commit; the
 // service layer validates before writing, and tests exercise the same service
 // paths as production.
 func (m *MemoryStore) WithTx(_ context.Context, _ string, fn func(tx Store) error) error {
-	return fn(m)
+	return fn(&memoryTxStore{MemoryStore: m})
+}
+
+// NotificationTx returns nil outside WithTx.
+func (m *MemoryStore) NotificationTx() contracts.SQLTx {
+	return nil
 }
 
 // ---- Seeding helpers used by tests, demos and the synthetic-data mandate. ----
@@ -282,6 +304,25 @@ func (m *MemoryStore) MembershipByID(_ context.Context, schoolID, membershipID s
 		return Membership{}, ErrNotFound
 	}
 	return mem, nil
+}
+
+func (m *MemoryStore) ClassesForTeacher(_ context.Context, schoolID, membershipID string) ([]Class, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]Class, 0)
+	for classID, teacherID := range m.classTeacher {
+		if teacherID != membershipID {
+			continue
+		}
+		class, ok := m.classes[classID]
+		if !ok || class.SchoolID != schoolID {
+			continue
+		}
+		out = append(out, class)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StreamName < out[j].StreamName })
+	return out, nil
 }
 
 func (m *MemoryStore) ClassTeacherMembership(_ context.Context, schoolID, classID string) (string, error) {

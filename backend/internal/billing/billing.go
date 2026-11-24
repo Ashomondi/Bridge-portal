@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Ashomondi/ikonex-academy/backend/internal/academics"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/internalapi/contracts"
 	"github.com/Ashomondi/ikonex-academy/backend/internal/notifications"
 	"github.com/jackc/pgx/v5"
@@ -19,36 +20,70 @@ type StudentChargeHook interface {
 // StudentBillingHook is a compatible alias for StudentChargeHook.
 type StudentBillingHook = StudentChargeHook
 
-// TermDateFeeSyncer is injected into academics calendar management so changes
-// to a term's start_date automatically synchronize fee_periods/fee_charges due
-// dates, record a fee_change_notes entry, and notify affected guardians.
-type TermDateFeeSyncer interface {
-	OnTermStartDateChanged(ctx context.Context, tx pgx.Tx, schoolID, termID string, newStartDate time.Time, actorUserID, note string) error
-}
+// TermDateFeeSyncer aliases academics.TermDateFeeSyncer so billing implements
+// the exact academic term-date synchronization contract.
+type TermDateFeeSyncer = academics.TermDateFeeSyncer
 
 // InAppNotifier is the consumer-oriented notification interface used by billing
 // and academics within an open tenant transaction.
-type InAppNotifier = notifications.InAppNotifier
+type InAppNotifier = contracts.InAppNotifier
 
 // CreateNotification is the notification payload alias for InAppNotifier.
-type CreateNotification = notifications.CreateNotification
+type CreateNotification = contracts.InAppNotification
 
 // ShortcodeResolver maps a receiving M-Pesa Paybill/BusinessShortCode to a school_id
-// so incoming Daraja callbacks and C2B webhooks can open a tenant-scoped transaction
-// without bypassing PostgreSQL RLS.
+// so incoming C2B webhooks can open a tenant-scoped transaction without bypassing
+// PostgreSQL RLS or trusting caller-supplied school identifiers.
 type ShortcodeResolver func(ctx context.Context, shortcode string) (string, error)
+
+// CheckoutRequestResolver maps a globally unique Daraja CheckoutRequestID to the
+// trusted school_id stored on mpesa_stk_requests.
+type CheckoutRequestResolver func(ctx context.Context, checkoutRequestID string) (string, error)
+
+// CallbackTokenResolver maps a SHA-256 hash of a server-generated per-request
+// STK callback token to its trusted (school_id, checkout_request_id) binding.
+type CallbackTokenResolver func(ctx context.Context, callbackTokenHash string) (schoolID string, checkoutRequestID string, err error)
 
 // Service handles fee structures, student ledgers, M-Pesa STK push payments, and reconciliation.
 type Service struct {
-	DB                contracts.TenantDB
-	Audit             contracts.AuditLogger
-	Notifier          InAppNotifier
-	Daraja            DarajaProvider
-	PollQueue         STKPollQueue
-	ResolveShortcode  ShortcodeResolver
-	CallbackAuthToken string
-	VerifyCallback    func(r *http.Request) bool
-	Now               func() time.Time
+	DB                     contracts.TenantDB
+	SystemDB               func(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error
+	Audit                  contracts.AuditLogger
+	Notifier               InAppNotifier
+	Daraja                 DarajaProvider
+	PollQueue              STKPollQueue
+	ResolveShortcode       ShortcodeResolver
+	ResolveCheckoutRequest CheckoutRequestResolver
+	ResolveCallbackToken   CallbackTokenResolver
+	CallbackAuthToken      string
+	TrustedCallbackProxies []string
+	VerifyCallback         func(r *http.Request) bool
+	Now                    func() time.Time
+}
+
+func (s *Service) requireNotifier() error {
+	if s == nil || s.Notifier == nil {
+		return contracts.Fail(http.StatusInternalServerError, "NOTIFIER_REQUIRED", "A transactional in-app notifier is required for payment settlement.")
+	}
+	return nil
+}
+
+// withSystemTenantTx executes fn inside a tenant-scoped transaction for authenticated
+// machine-to-machine callbacks or background jobs that lack an end-user Principal.
+func (s *Service) withSystemTenantTx(ctx context.Context, schoolID string, fn func(pgx.Tx) error) error {
+	if !contracts.ValidID(schoolID) {
+		return contracts.Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school_id is required.")
+	}
+	if s == nil {
+		return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if s.SystemDB != nil {
+		return s.SystemDB(ctx, schoolID, fn)
+	}
+	if txFn, ok := s.DB.(contracts.TenantTxFunc); ok && txFn != nil {
+		return txFn(ctx, schoolID, fn)
+	}
+	return contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 }
 
 func (s *Service) now() time.Time {
@@ -61,17 +96,17 @@ func (s *Service) now() time.Time {
 // ChargeGradeForTerm charges all actively enrolled students in the structure's
 // school, grade level, and academic year for the structure's term period.
 func (s *Service) ChargeGradeForTerm(ctx context.Context, tx pgx.Tx, structureID string) error {
-	return chargeGradeForTerm(ctx, tx, structureID)
+	return s.chargeGradeForTerm(ctx, tx, structureID, "")
 }
 
 // ChargeStudent charges a single student for a specific fee period idempotently.
 func (s *Service) ChargeStudent(ctx context.Context, tx pgx.Tx, studentID, feePeriodID string) error {
-	return chargeStudent(ctx, tx, studentID, feePeriodID)
+	return s.chargeStudent(ctx, tx, studentID, feePeriodID, "")
 }
 
 // ChargeAdmittedStudent implements StudentChargeHook / StudentBillingHook.
 func (s *Service) ChargeAdmittedStudent(ctx context.Context, tx pgx.Tx, schoolID, studentID, academicYearID string) error {
-	return chargeAdmittedStudent(ctx, tx, schoolID, studentID, academicYearID)
+	return s.chargeAdmittedStudent(ctx, tx, schoolID, studentID, academicYearID)
 }
 
 func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Identity) {
@@ -96,14 +131,28 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, identity contracts.Ide
 		}
 		contracts.Success(w, http.StatusCreated, structure, nil)
 	})
+	mux.HandleFunc("POST /api/v1/billing/fee-structures/charge-current", func(w http.ResponseWriter, r *http.Request) {
+		p, err := contracts.RequireIdentity(r, identity)
+		if err != nil {
+			contracts.WriteError(w, err)
+			return
+		}
+		res, err := service.ChargeCurrentTermStructures(r.Context(), p)
+		if err != nil {
+			contracts.WriteError(w, err)
+			return
+		}
+		contracts.Success(w, http.StatusOK, res, nil)
+	})
 	registerLedgerRoutes(mux, service, identity)
 	registerFeeChangeRoutes(mux, service, identity)
 	registerMpesaRoutes(mux, service, identity)
 }
 
 var (
-	_ StudentChargeHook  = (*Service)(nil)
-	_ StudentBillingHook = (*Service)(nil)
-	_ TermDateFeeSyncer  = (*Service)(nil)
-	_ InAppNotifier      = (*notifications.Service)(nil)
+	_ StudentChargeHook           = (*Service)(nil)
+	_ StudentBillingHook          = (*Service)(nil)
+	_ academics.TermDateFeeSyncer = (*Service)(nil)
+	_ TermDateFeeSyncer           = (*Service)(nil)
+	_ contracts.InAppNotifier     = (*notifications.Service)(nil)
 )

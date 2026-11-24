@@ -51,6 +51,11 @@ type FeeStructure struct {
 	CreatedAt      time.Time          `json:"created_at"`
 }
 
+type ChargeCurrentResult struct {
+	StructuresProcessed int `json:"structures_processed"`
+	ChargesCreated      int `json:"charges_created"`
+}
+
 type ValidationError struct {
 	Field   string
 	Code    string
@@ -63,15 +68,6 @@ func validationFail(field, code, message string) *contracts.APIError {
 	err := contracts.Fail(http.StatusUnprocessableEntity, code, message)
 	err.Details["field"] = field
 	return err
-}
-
-func isIkonexTeamRole(role string) bool {
-	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "ikonex_admin", "ikonex_team", "platform_admin":
-		return true
-	default:
-		return false
-	}
 }
 
 type validatedItem struct {
@@ -95,9 +91,11 @@ func normalizeAndValidateStructureInput(in LoadFeeStructureInput) (string, []val
 		boarding = "all"
 	}
 	switch boarding {
-	case "all", "boarder", "day":
+	case "all":
+	case "boarder", "day":
+		return "", nil, 0, validationFail("boarding_status", "UNSUPPORTED_BOARDING_VARIANT", "Release 1 supports only the 'all' boarding_status fee structure variant.")
 	default:
-		return "", nil, 0, validationFail("boarding_status", "INVALID_BOARDING_STATUS", "boarding_status must be 'all', 'boarder', or 'day'.")
+		return "", nil, 0, validationFail("boarding_status", "INVALID_BOARDING_STATUS", "boarding_status must be 'all' in Release 1.")
 	}
 	if len(in.Items) == 0 {
 		return "", nil, 0, validationFail("items", "FEE_ITEMS_REQUIRED", "At least one fee item is required.")
@@ -154,22 +152,27 @@ func normalizeAndValidateStructureInput(in LoadFeeStructureInput) (string, []val
 }
 
 // LoadFeeStructure validates and transactionally loads a fee structure, its items,
-// and the corresponding generic term fee_period. If an identical structure already
-// exists for (school, year, grade, term, boarding_status), it returns the existing
-// record idempotently. If a structure exists with different items or amounts, it
-// returns 409 FEE_STRUCTURE_CONFLICT.
+// and the corresponding generic term fee_period. Requires an active school
+// membership holding the billing.fee_structures.manage badge permission and a
+// configured AuditLogger. If an identical structure already exists for
+// (school, year, grade, term, 'all'), it returns the existing record idempotently
+// and still triggers term charging when the academic year or term is current.
+// If a structure exists with different items or amounts, it returns 409 FEE_STRUCTURE_CONFLICT.
 func (s *Service) LoadFeeStructure(ctx context.Context, p contracts.Principal, in LoadFeeStructureInput) (FeeStructure, error) {
-	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || p.Role == "" {
 		return FeeStructure{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
-	}
-	if !isIkonexTeamRole(p.Role) {
-		return FeeStructure{}, contracts.Fail(http.StatusForbidden, "FORBIDDEN", "Only Ikonex administrators may load fee structures.")
 	}
 	if s == nil || s.DB == nil {
 		return FeeStructure{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
 	}
+	if err := s.requireAuditLogger(); err != nil {
+		return FeeStructure{}, err
+	}
 	var out FeeStructure
-	err := s.DB.WithTenantTx(ctx, p.SchoolID, func(tx pgx.Tx) error {
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+		if err := requireSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage, "Only authorized fee-structure administrators may load fee structures."); err != nil {
+			return err
+		}
 		var err error
 		out, err = s.LoadFeeStructureTx(ctx, tx, p.SchoolID, p.UserID, in)
 		return err
@@ -180,6 +183,12 @@ func (s *Service) LoadFeeStructure(ctx context.Context, p contracts.Principal, i
 func (s *Service) LoadFeeStructureTx(ctx context.Context, tx pgx.Tx, schoolID, actorUserID string, in LoadFeeStructureInput) (FeeStructure, error) {
 	if !contracts.ValidID(schoolID) {
 		return FeeStructure{}, contracts.Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school is required.")
+	}
+	if !contracts.ValidID(actorUserID) {
+		return FeeStructure{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "A valid actor user_id is required.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return FeeStructure{}, err
 	}
 	boarding, items, total, err := normalizeAndValidateStructureInput(in)
 	if err != nil {
@@ -243,6 +252,7 @@ func (s *Service) LoadFeeStructureTx(ctx context.Context, tx pgx.Tx, schoolID, a
 
 	var structureID string
 	var createdAt time.Time
+	var loadedItems []FeeStructureItem
 	inserted := true
 	err = tx.QueryRow(ctx, `
 		INSERT INTO fee_structures (school_id, academic_year_id, grade_level_id, term_id, boarding_status, total_amount)
@@ -264,74 +274,61 @@ func (s *Service) LoadFeeStructureTx(ctx context.Context, tx pgx.Tx, schoolID, a
 		if err != nil {
 			return FeeStructure{}, err
 		}
-		existingItems, err := loadStructureItemsDeterministic(ctx, tx, schoolID, structureID)
+		loadedItems, err = loadStructureItemsDeterministic(ctx, tx, schoolID, structureID)
 		if err != nil {
 			return FeeStructure{}, err
 		}
-		if existingTotal != total || !sameStructureItems(existingItems, items) {
+		if existingTotal != total || !sameStructureItems(loadedItems, items) {
 			return FeeStructure{}, contracts.Fail(http.StatusConflict, "FEE_STRUCTURE_CONFLICT", "A fee structure with different items or amounts already exists for this grade and term.")
 		}
-		return FeeStructure{
-			ID:             structureID,
-			SchoolID:       schoolID,
-			AcademicYearID: in.AcademicYearID,
-			TermID:         in.TermID,
-			GradeLevelID:   in.GradeLevelID,
-			FeePeriodID:    feePeriodID,
-			BoardingStatus: boarding,
-			DueDate:        periodDueDate.Format("2006-01-02"),
-			TotalAmount:    existingTotal,
-			Items:          existingItems,
-			CreatedAt:      createdAt.UTC(),
-		}, nil
-	}
-	if err != nil {
+		total = existingTotal
+	} else if err != nil {
 		return FeeStructure{}, err
-	}
-
-	for _, item := range items {
-		itemNum, err := item.Amount.NumericValue()
+	} else {
+		for _, item := range items {
+			itemNum, err := item.Amount.NumericValue()
+			if err != nil {
+				return FeeStructure{}, err
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO fee_structure_items (fee_structure_id, title, amount, is_compulsory)
+				VALUES ($1, $2, $3, $4)`,
+				structureID, item.Title, itemNum, item.IsCompulsory,
+			); err != nil {
+				return FeeStructure{}, err
+			}
+		}
+		loadedItems, err = loadStructureItemsDeterministic(ctx, tx, schoolID, structureID)
 		if err != nil {
 			return FeeStructure{}, err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO fee_structure_items (fee_structure_id, title, amount, is_compulsory)
-			VALUES ($1, $2, $3, $4)`,
-			structureID, item.Title, itemNum, item.IsCompulsory,
-		); err != nil {
+	}
+
+	eligibleToCharge := yearCurrent || termCurrent
+	if eligibleToCharge {
+		if _, err := s.chargeGradeForTermCount(ctx, tx, structureID, actorUserID); err != nil {
 			return FeeStructure{}, err
 		}
 	}
 
-	loadedItems, err := loadStructureItemsDeterministic(ctx, tx, schoolID, structureID)
-	if err != nil {
+	if err := s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+		SchoolID:     schoolID,
+		UserID:       actorUserID,
+		Action:       "billing.fee_structure.load",
+		ResourceType: "fee_structure",
+		ResourceID:   structureID,
+		Details: map[string]any{
+			"academic_year_id": in.AcademicYearID,
+			"term_id":          in.TermID,
+			"grade_level_id":   in.GradeLevelID,
+			"boarding_status":  boarding,
+			"total_amount":     total.String(),
+			"items_count":      len(loadedItems),
+			"replayed":         !inserted,
+			"charged_on_load":  eligibleToCharge,
+		},
+	}); err != nil {
 		return FeeStructure{}, err
-	}
-
-	if inserted && (yearCurrent || termCurrent) {
-		if err := s.ChargeGradeForTerm(ctx, tx, structureID); err != nil {
-			return FeeStructure{}, err
-		}
-	}
-
-	if s != nil && s.Audit != nil && contracts.ValidID(actorUserID) {
-		if err := s.Audit.Log(ctx, tx, contracts.AuditEvent{
-			SchoolID:     schoolID,
-			UserID:       actorUserID,
-			Action:       "billing.fee_structure.load",
-			ResourceType: "fee_structure",
-			ResourceID:   structureID,
-			Details: map[string]any{
-				"academic_year_id": in.AcademicYearID,
-				"term_id":          in.TermID,
-				"grade_level_id":   in.GradeLevelID,
-				"boarding_status":  boarding,
-				"total_amount":     total.String(),
-				"items_count":      len(loadedItems),
-			},
-		}); err != nil {
-			return FeeStructure{}, err
-		}
 	}
 
 	return FeeStructure{
@@ -347,6 +344,100 @@ func (s *Service) LoadFeeStructureTx(ctx context.Context, tx pgx.Tx, schoolID, a
 		Items:          loadedItems,
 		CreatedAt:      createdAt.UTC(),
 	}, nil
+}
+
+// ChargeCurrentTermStructures idempotently charges all preloaded 'all'-variant
+// fee structures in the caller's school whose academic year or term is now
+// current. Designed for both admin activation triggers and retry-safe scheduled
+// background jobs.
+func (s *Service) ChargeCurrentTermStructures(ctx context.Context, p contracts.Principal) (ChargeCurrentResult, error) {
+	if !contracts.ValidID(p.UserID) || !contracts.ValidID(p.SchoolID) || !contracts.ValidID(p.MembershipID) || p.Role == "" {
+		return ChargeCurrentResult{}, contracts.Fail(http.StatusUnauthorized, "UNAUTHENTICATED", "Authentication is required.")
+	}
+	if s == nil || s.DB == nil {
+		return ChargeCurrentResult{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return ChargeCurrentResult{}, err
+	}
+	var out ChargeCurrentResult
+	err := s.DB.WithTenantTx(ctx, p, func(tx pgx.Tx) error {
+		if err := requireSchoolPermissionTx(ctx, tx, p, PermFeeStructuresManage, "Only authorized fee-structure administrators may trigger term charging."); err != nil {
+			return err
+		}
+		var err error
+		out, err = s.ChargeCurrentTermStructuresTx(ctx, tx, p.SchoolID, p.UserID)
+		return err
+	})
+	return out, err
+}
+
+// ChargeCurrentTermStructuresTx idempotently evaluates and charges all current
+// academic-year or current-term fee structures in schoolID within tx.
+func (s *Service) ChargeCurrentTermStructuresTx(ctx context.Context, tx pgx.Tx, schoolID, actorUserID string) (ChargeCurrentResult, error) {
+	if !contracts.ValidID(schoolID) {
+		return ChargeCurrentResult{}, contracts.Fail(http.StatusBadRequest, "INVALID_SCHOOL", "A valid school is required.")
+	}
+	if actorUserID != "" && !contracts.ValidID(actorUserID) {
+		return ChargeCurrentResult{}, contracts.Fail(http.StatusBadRequest, "INVALID_ACTOR", "actorUserID must be empty or a valid UUID.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return ChargeCurrentResult{}, err
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT fs.id
+		FROM fee_structures fs
+		JOIN academic_years ay ON ay.school_id = fs.school_id AND ay.id = fs.academic_year_id
+		JOIN terms t ON t.school_id = fs.school_id AND t.id = fs.term_id
+		JOIN grade_levels gl ON gl.school_id = fs.school_id AND gl.id = fs.grade_level_id
+		WHERE fs.school_id = $1
+		  AND fs.boarding_status = 'all'
+		  AND (ay.is_current = TRUE OR t.is_current = TRUE)
+		ORDER BY ay.year ASC, t.term_number ASC, gl.number ASC, fs.id ASC`,
+		schoolID,
+	)
+	if err != nil {
+		return ChargeCurrentResult{}, err
+	}
+	var structureIDs []string
+	for rows.Next() {
+		var sid string
+		if err := rows.Scan(&sid); err != nil {
+			rows.Close()
+			return ChargeCurrentResult{}, err
+		}
+		structureIDs = append(structureIDs, sid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return ChargeCurrentResult{}, err
+	}
+
+	var res ChargeCurrentResult
+	for _, sid := range structureIDs {
+		charged, err := s.chargeGradeForTermCount(ctx, tx, sid, actorUserID)
+		if err != nil {
+			return ChargeCurrentResult{}, err
+		}
+		res.StructuresProcessed++
+		res.ChargesCreated += charged
+	}
+
+	if err := s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+		SchoolID:     schoolID,
+		UserID:       actorUserID,
+		Action:       "billing.fee_structure.charge_current",
+		ResourceType: "school",
+		ResourceID:   schoolID,
+		Details: map[string]any{
+			"structures_processed": res.StructuresProcessed,
+			"charges_created":      res.ChargesCreated,
+		},
+	}); err != nil {
+		return ChargeCurrentResult{}, err
+	}
+	return res, nil
 }
 
 func loadStructureItemsDeterministic(ctx context.Context, tx pgx.Tx, schoolID, structureID string) ([]FeeStructureItem, error) {

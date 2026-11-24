@@ -13,7 +13,6 @@ import (
 )
 
 type DarajaC2BConfirmation struct {
-	SchoolID          string          `json:"school_id"`
 	TransactionType   string          `json:"TransactionType"`
 	TransID           string          `json:"TransID"`
 	TransTime         string          `json:"TransTime"`
@@ -35,11 +34,30 @@ type C2BProcessingResult struct {
 	StudentID      *string `json:"student_id,omitempty"`
 }
 
-// ProcessC2BConfirmation resolves the receiving school from BusinessShortCode,
+func isUnsupportedTillTransactionType(txType string) bool {
+	norm := strings.ToLower(strings.TrimSpace(txType))
+	if norm == "" {
+		return false
+	}
+	switch norm {
+	case "pay bill", "paybill", "customerpaybillonline":
+		return false
+	case "buy goods", "buygoods", "customerbuygoodsonline", "till":
+		return true
+	default:
+		return false
+	}
+}
+
+// ProcessC2BConfirmation resolves the receiving school strictly from the trusted
+// BusinessShortCode -> school_id mapping, verifies it against school_mpesa_configs,
 // matches UPPER(TRIM(admission_number)) = UPPER(TRIM(BillRefNumber)) strictly
 // within that school, and either credits the matched student's ledger or stores
 // an unmatched payment record without ever discarding incoming money.
-func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint string, in DarajaC2BConfirmation) (C2BProcessingResult, error) {
+func (s *Service) ProcessC2BConfirmation(ctx context.Context, in DarajaC2BConfirmation) (C2BProcessingResult, error) {
+	if isUnsupportedTillTransactionType(in.TransactionType) {
+		return C2BProcessingResult{}, contracts.Fail(http.StatusUnprocessableEntity, "UNSUPPORTED_MPESA_SHORTCODE_TYPE", "Release 1 supports Paybill C2B confirmations only; Till (Buy Goods) is not supported.")
+	}
 	receipt := strings.TrimSpace(in.TransID)
 	shortcode := strings.TrimSpace(in.BusinessShortCode)
 	if receipt == "" || shortcode == "" || len(in.TransAmount) == 0 {
@@ -50,7 +68,17 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 		return C2BProcessingResult{}, contracts.Fail(http.StatusUnprocessableEntity, "INVALID_PAYMENT_AMOUNT", "C2B TransAmount must be a positive decimal within NUMERIC(12,2).")
 	}
 
-	schoolID, err := s.resolveWebhookSchoolID(ctx, schoolIDHint, in.SchoolID, shortcode)
+	if s == nil {
+		return C2BProcessingResult{}, contracts.Fail(http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if err := s.requireAuditLogger(); err != nil {
+		return C2BProcessingResult{}, err
+	}
+	if err := s.requireNotifier(); err != nil {
+		return C2BProcessingResult{}, err
+	}
+
+	schoolID, err := s.resolveSchoolFromShortcode(ctx, shortcode)
 	if err != nil {
 		return C2BProcessingResult{}, err
 	}
@@ -68,7 +96,7 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 	rawBillRef := strings.TrimSpace(in.BillRefNumber)
 
 	var out C2BProcessingResult
-	err = s.DB.WithTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
+	err = s.withSystemTenantTx(ctx, schoolID, func(tx pgx.Tx) error {
 		// Verify shortcode belongs to this school in school_mpesa_configs
 		var configuredShortcode string
 		if err := tx.QueryRow(ctx, `
@@ -80,7 +108,7 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 			return err
 		}
 
-		// Idempotency check if payment receipt already exists
+		// Idempotency check if payment receipt already exists for this school
 		var existingStatus string
 		var existingStudentID *string
 		err := tx.QueryRow(ctx, `
@@ -145,11 +173,7 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 			schoolID, receipt, amtNum, payerPhone, payerName, rawBytes,
 		).Scan(&paymentID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			out = C2BProcessingResult{
-				TransactionRef: receipt,
-				MatchedStatus:  "unmatched",
-			}
-			return nil
+			return contracts.Fail(http.StatusConflict, "DUPLICATE_PAYMENT_REFERENCE", "Transaction reference already exists.")
 		}
 		if err != nil {
 			return err
@@ -166,6 +190,20 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 			return err
 		}
 
+		if err := s.logAuditPgx(ctx, tx, contracts.AuditEvent{
+			SchoolID:     schoolID,
+			Action:       "billing.mpesa.c2b_unmatched",
+			ResourceType: "payment",
+			ResourceID:   paymentID,
+			Details: map[string]any{
+				"transaction_ref": receipt,
+				"amount":          amount.String(),
+				"raw_account_ref": rawBillRef,
+			},
+		}); err != nil {
+			return err
+		}
+
 		out = C2BProcessingResult{
 			TransactionRef: receipt,
 			MatchedStatus:  "unmatched",
@@ -173,4 +211,16 @@ func (s *Service) ProcessC2BConfirmation(ctx context.Context, schoolIDHint strin
 		return nil
 	})
 	return out, err
+}
+
+func (s *Service) resolveSchoolFromShortcode(ctx context.Context, shortcode string) (string, error) {
+	sc := strings.TrimSpace(shortcode)
+	if sc == "" || s == nil || s.ResolveShortcode == nil {
+		return "", contracts.Fail(http.StatusBadRequest, "UNKNOWN_MPESA_SHORTCODE", "Could not resolve school for the M-Pesa shortcode.")
+	}
+	schoolID, err := s.ResolveShortcode(ctx, sc)
+	if err != nil || !contracts.ValidID(schoolID) {
+		return "", contracts.Fail(http.StatusBadRequest, "UNKNOWN_MPESA_SHORTCODE", "Could not resolve school for the M-Pesa shortcode.")
+	}
+	return schoolID, nil
 }
