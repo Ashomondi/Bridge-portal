@@ -9,7 +9,10 @@ export default function BursarPage() {
     <main className="min-h-screen bg-slate-950 p-6 text-slate-100">
       <div className="mx-auto max-w-6xl">
         <header className="mb-8 border-b border-slate-800 pb-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400">Bursar</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400">
+            Bursar
+            <span className="ml-2 rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">Preview</span>
+          </p>
           <h1 className="mt-2 text-3xl font-bold">Fee and reconciliation</h1>
         </header>
 

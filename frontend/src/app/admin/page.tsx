@@ -9,12 +9,14 @@ export default function AdminPage() {
   return (
     <main className="min-h-screen bg-slate-950 p-6 text-slate-100">
       <div className="mx-auto max-w-6xl">
-        <header className="mb-8 flex items-center justify-between border-b border-slate-800 pb-6">
+        <header className="mb-8 border-b border-slate-800 pb-6">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400">Admin</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400">
+              Admin
+              <span className="ml-2 rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">Preview</span>
+            </p>
             <h1 className="mt-2 text-3xl font-bold">School Operations</h1>
           </div>
-          <button className="rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950">Add staff</button>
         </header>
 
         <section className="grid gap-4 md:grid-cols-3">

@@ -21,6 +21,7 @@ describe('Kenyan phone normalization', () => {
 describe('API response helpers', () => {
   it('returns cooldown details as a useful API error', () => {
     expect(getApiError({ error: { message: 'Too many requests', details: { cooldown_seconds: 42 } } }, 'Failed')).toBe('Too many requests Please wait 42 seconds.');
+    expect(getApiError({ error: { message: 'Too many requests', details: { retry_after_seconds: 30 } } }, 'Failed')).toBe('Too many requests Please wait 30 seconds.');
     expect(getApiError(null, 'Fallback')).toBe('Fallback');
   });
 
@@ -66,6 +67,8 @@ describe('API response helpers', () => {
 
   it('extracts a positive backend cooldown', () => {
     expect(getCooldownSeconds({ error: { details: { cooldown_seconds: 42 } } })).toBe(42);
+    expect(getCooldownSeconds({ error: { details: { retry_after_seconds: 30 } } })).toBe(30);
+    expect(getCooldownSeconds({ data: { cooldown_seconds: 60 } })).toBe(60);
     expect(getCooldownSeconds({ error: { details: { cooldown_seconds: 0 } } })).toBeNull();
     expect(getCooldownSeconds(null)).toBeNull();
   });

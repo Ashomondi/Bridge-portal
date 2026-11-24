@@ -2,10 +2,16 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ShieldCheck, ArrowRight, Edit3, AlertCircle, Loader2 } from 'lucide-react';
+import { ShieldCheck, ArrowLeft, ArrowRight, Edit3, AlertCircle, Loader2 } from 'lucide-react';
 import { apiUrl, getApiError, getCooldownSeconds, readApiResponse, roleRoute, Membership } from '@/lib/auth';
 
 type Challenge = { phone: string; resend_at: number };
+
+function formatCountdown(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${remainder.toString().padStart(2, '0')}`;
+}
 
 function clearStoredAuth() {
   sessionStorage.removeItem('auth_token');
@@ -20,6 +26,7 @@ export default function VerifyPage() {
   const [error, setError] = useState('');
   const [phone, setPhone] = useState('');
   const [countdown, setCountdown] = useState(0);
+  const [resendAt, setResendAt] = useState<number | null>(null);
   const [memberships, setMemberships] = useState<Membership[] | null>(null);
   const router = useRouter();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
@@ -34,19 +41,23 @@ export default function VerifyPage() {
     try {
       const challenge = JSON.parse(raw) as Partial<Challenge>;
       if (typeof challenge.phone !== 'string' || typeof challenge.resend_at !== 'number') throw new Error('Invalid challenge');
-      const resendAt = challenge.resend_at;
       setPhone(challenge.phone);
-      setCountdown(Math.max(0, Math.ceil((resendAt - Date.now()) / 1000)));
-
-      const timer = window.setInterval(() => {
-        setCountdown(Math.max(0, Math.ceil((resendAt - Date.now()) / 1000)));
-      }, 1000);
-      return () => window.clearInterval(timer);
+      setResendAt(challenge.resend_at);
     } catch {
       sessionStorage.removeItem('pending_otp_challenge');
       router.replace('/login');
     }
   }, [router]);
+
+  useEffect(() => {
+    if (resendAt === null) return;
+    const updateCountdown = () => {
+      setCountdown(Math.max(0, Math.ceil((resendAt - Date.now()) / 1000)));
+    };
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendAt]);
 
   const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
     const digits = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
@@ -92,15 +103,16 @@ export default function VerifyPage() {
       if (!ok) {
         const cooldown = getCooldownSeconds(data);
         if (cooldown !== null) {
-          const resendAt = Date.now() + cooldown * 1000;
-          sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: resendAt }));
-          setCountdown(cooldown);
+          const nextResendAt = Date.now() + cooldown * 1000;
+          sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: nextResendAt }));
+          setResendAt(nextResendAt);
         }
         throw new Error(getApiError(data, 'Unable to resend the code'));
       }
-      const resendAt = Date.now() + 60_000;
-      sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: resendAt }));
-      setCountdown(60);
+      const cooldown = getCooldownSeconds(data) ?? 60;
+      const nextResendAt = Date.now() + cooldown * 1000;
+      sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: nextResendAt }));
+      setResendAt(nextResendAt);
       setCode(['', '', '', '', '', '']);
       inputRefs.current[0]?.focus();
     } catch (err) {
@@ -112,6 +124,7 @@ export default function VerifyPage() {
 
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!phone) { setError('Your verification session has expired. Request a new code.'); return; }
     const fullCode = code.join('');
     if (fullCode.length !== 6) { setError('Please enter the complete 6-digit verification code.'); return; }
 
@@ -207,8 +220,15 @@ export default function VerifyPage() {
             {memberships ? (
               <div className="bg-white border border-slate-200/80 rounded-[24px] p-6 shadow-sm space-y-4">
                 <h2 className="text-2xl font-bold text-slate-900">Choose a school role</h2>
+                {error && (
+                  <div role="alert" className="bg-rose-50 border border-rose-200 text-rose-700 p-3.5 rounded-xl text-xs flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                    <span>{error}</span>
+                  </div>
+                )}
                 {memberships.map((membership, index) => {
                   const route = roleRoute(membership.role);
+                  const school = membership.school_name || membership.school_id;
                   return (
                     <button
                       key={`${membership.school_id || 'school'}-${membership.role || index}`}
@@ -218,10 +238,20 @@ export default function VerifyPage() {
                       className="w-full rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-[#008272] disabled:opacity-50"
                     >
                       <span className="font-semibold text-slate-900">{membership.role || 'School role'}</span>
-                      {membership.school_id && <span className="block text-xs text-slate-500">School {membership.school_id}</span>}
+                      {school && <span className="block text-xs text-slate-500">{school}</span>}
                     </button>
                   );
                 })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    sessionStorage.removeItem('pending_otp_challenge');
+                    router.replace('/login');
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#008272] hover:underline"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" /> Back to sign in
+                </button>
               </div>
             ) : (
               <div className="bg-white border border-slate-200/80 rounded-[24px] p-5 sm:p-7 shadow-sm space-y-5">
@@ -231,7 +261,8 @@ export default function VerifyPage() {
                   </div>
                   <h3 className="text-2xl font-bold text-slate-900">Enter your code</h3>
                   <p className="text-slate-600 text-sm leading-relaxed">
-                    We sent a 6-digit code to <span className="font-semibold text-slate-800">{phone}</span>
+                    We sent a 6-digit code to{' '}
+                    {phone ? <span className="font-semibold text-slate-800">{phone}</span> : 'your phone'}.
                   </p>
                 </div>
 
@@ -267,7 +298,7 @@ export default function VerifyPage() {
 
                   <div className="text-center text-xs text-slate-500" aria-live="polite">
                     {countdown > 0 ? (
-                      <>Send a new code in <span className="font-semibold font-mono text-slate-700">0:{countdown < 10 ? `0${countdown}` : countdown}</span></>
+                      <>Send a new code in <span className="font-semibold font-mono text-slate-700">{formatCountdown(countdown)}</span></>
                     ) : (
                       <button
                         type="button"
@@ -282,7 +313,7 @@ export default function VerifyPage() {
 
                   <button
                     type="submit"
-                    disabled={loading}
+                    disabled={loading || !phone}
                     className="w-full bg-[#008272] hover:bg-[#006e61] disabled:opacity-50 text-white font-semibold py-3.5 rounded-2xl transition flex items-center justify-center gap-2 shadow-lg shadow-[#008272]/25"
                   >
                     {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Verify <ArrowRight className="w-4 h-4" /></>}

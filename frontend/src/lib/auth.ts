@@ -1,5 +1,6 @@
 export type Membership = {
   school_id?: string | null;
+  school_name?: string | null;
   role?: string | null;
   active?: boolean | null;
   status?: string | null;
@@ -39,12 +40,20 @@ export function apiUrl(path: string): string {
   return `${base}${suffix}`;
 }
 
-/** Extracts a backend cooldown from the standard error envelope. */
+/** Extracts a backend cooldown from error details or a successful response. */
 export function getCooldownSeconds(data: any): number | null {
-  const cooldown = data?.error?.details?.cooldown_seconds;
-  return typeof cooldown === 'number' && Number.isFinite(cooldown) && cooldown > 0
-    ? Math.ceil(cooldown)
-    : null;
+  const candidates = [
+    data?.error?.details?.cooldown_seconds,
+    data?.error?.details?.retry_after_seconds,
+    data?.data?.cooldown_seconds,
+    data?.cooldown_seconds,
+  ];
+  for (const cooldown of candidates) {
+    if (typeof cooldown === 'number' && Number.isFinite(cooldown) && cooldown > 0) {
+      return Math.ceil(cooldown);
+    }
+  }
+  return null;
 }
 
 export async function readApiResponse(res: Response): Promise<{ ok: boolean; data: any }> {
@@ -67,8 +76,8 @@ export async function readApiResponse(res: Response): Promise<{ ok: boolean; dat
 
 export function getApiError(data: any, fallback: string): string {
   const message = data?.error?.message;
-  const cooldown = data?.error?.details?.cooldown_seconds;
-  if (typeof cooldown === 'number') {
+  const cooldown = getCooldownSeconds(data);
+  if (cooldown !== null) {
     return `${message || fallback} Please wait ${cooldown} seconds.`;
   }
   return typeof message === 'string' && message ? message : fallback;
