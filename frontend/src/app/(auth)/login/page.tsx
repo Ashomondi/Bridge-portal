@@ -56,9 +56,10 @@ export default function LoginPage() {
         throw new Error(getApiError(data, 'Failed to dispatch SMS OTP'));
       }
 
-      const resendAt = Date.now() + 60_000;
+      const cooldown = getCooldownSeconds(data) ?? 60;
+      const resendAt = Date.now() + cooldown * 1000;
       sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone: normalizedPhone, resend_at: resendAt }));
-      setCountdown(60);
+      setCountdown(cooldown);
       router.replace('/verify');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred. Please check your connection.');

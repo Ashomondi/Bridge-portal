@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ShieldCheck, ArrowRight, Edit3, AlertCircle, Loader2 } from 'lucide-react';
-import { apiUrl, clearStoredAuth, getApiError, getCooldownSeconds, readApiResponse, roleRoute, Membership } from '@/lib/auth';
+import { apiUrl, clearStoredAuth, getApiError, getCooldownSeconds, isMembership, readApiResponse, roleRoute, Membership } from '@/lib/auth';
 
 type Challenge = { phone: string; resend_at: number };
 
@@ -98,9 +98,10 @@ export default function VerifyPage() {
         }
         throw new Error(getApiError(data, 'Unable to resend the code'));
       }
-      const resendAt = Date.now() + 60_000;
+      const cooldown = getCooldownSeconds(data) ?? 60;
+      const resendAt = Date.now() + cooldown * 1000;
       sessionStorage.setItem('pending_otp_challenge', JSON.stringify({ phone, resend_at: resendAt }));
-      setCountdown(60);
+      setCountdown(cooldown);
       setCode(['', '', '', '', '', '']);
       inputRefs.current[0]?.focus();
     } catch (err) {
@@ -132,8 +133,10 @@ export default function VerifyPage() {
       const expiry = Date.parse(payload.expires_at);
       if (!Number.isFinite(expiry) || expiry <= Date.now()) throw new Error('The login session has expired. Please request a new code.');
 
+      // The backend only returns active memberships; validate the contract
+      // instead of relying on fields the response does not include.
       const activeMemberships: Membership[] = Array.isArray(payload.memberships)
-        ? payload.memberships.filter((item: Membership) => item?.active !== false && item?.status !== 'inactive')
+        ? payload.memberships.filter(isMembership)
         : [];
 
       sessionStorage.removeItem('pending_otp_challenge');
@@ -208,18 +211,18 @@ export default function VerifyPage() {
             {memberships ? (
               <div className="bg-white border border-slate-200/80 rounded-[24px] p-6 shadow-sm space-y-4">
                 <h2 className="text-2xl font-bold text-slate-900">Choose a school role</h2>
-                {memberships.map((membership, index) => {
+                {memberships.map((membership) => {
                   const route = roleRoute(membership.role);
                   return (
                     <button
-                      key={`${membership.school_id || 'school'}-${membership.role || index}`}
+                      key={membership.id}
                       type="button"
                       disabled={!route}
                       onClick={() => selectMembership(membership)}
                       className="w-full rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-[#008272] disabled:opacity-50"
                     >
-                      <span className="font-semibold text-slate-900">{membership.role || 'School role'}</span>
-                      {membership.school_id && <span className="block text-xs text-slate-500">School {membership.school_id}</span>}
+                      <span className="font-semibold text-slate-900">{membership.school_name}</span>
+                      <span className="block text-xs text-slate-500">{membership.role.replace(/_/g, ' ')}</span>
                     </button>
                   );
                 })}

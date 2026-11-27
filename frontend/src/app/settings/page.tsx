@@ -12,10 +12,9 @@ import {
   LogOut, 
   Globe
 } from 'lucide-react';
-import { clearStoredAuth, normalizeKenyanPhone } from '@/lib/auth';
+import { clearStoredAuth, Membership, normalizeKenyanPhone } from '@/lib/auth';
 
 type SessionUser = { full_name?: string; phone_number?: string };
-type SessionMembership = { school_name?: string; schoolName?: string; role?: string };
 
 function maskPhone(phone: string): string {
   const digits = phone.replace(/\D/g, '');
@@ -36,7 +35,7 @@ export default function AccountSettingsPage() {
   const [isChangingPhone, setIsChangingPhone] = useState(false);
   const [phoneMessage, setPhoneMessage] = useState('');
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [membership, setMembership] = useState<SessionMembership | null>(null);
+  const [membership, setMembership] = useState<Membership | null>(null);
 
   useEffect(() => {
     try {
@@ -47,7 +46,7 @@ export default function AccountSettingsPage() {
     }
     try {
       const storedMembership = sessionStorage.getItem('auth_membership');
-      if (storedMembership) setMembership(JSON.parse(storedMembership) as SessionMembership);
+      if (storedMembership) setMembership(JSON.parse(storedMembership) as Membership);
     } catch {
       setMembership(null);
     }
@@ -59,7 +58,7 @@ export default function AccountSettingsPage() {
     .slice(0, 2)
     .map((part) => part.charAt(0).toUpperCase())
     .join('') || 'IA';
-  const schoolName = membership?.school_name ?? membership?.schoolName ?? 'Your school';
+  const schoolName = membership?.school_name ?? 'Your school';
   const displayRole = roleLabel(membership?.role);
   const displayPhone = user?.phone_number ? maskPhone(user.phone_number) : 'Not available';
 
@@ -76,11 +75,6 @@ export default function AccountSettingsPage() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#e0f2f1] via-[#f4f8f7] to-white flex flex-col items-center p-4 md:p-8 text-slate-800">
       
-      {/* Top Demo Banner */}
-      <div className="text-xs font-medium text-slate-600 bg-white/80 backdrop-blur px-4 py-1.5 rounded-full border border-slate-200/60 shadow-sm mb-6">
-        Demo environment • sample data only
-      </div>
-
       {/* Main Container Wrapper */}
       <div className="w-full max-w-4xl bg-white/80 backdrop-blur-md border border-slate-200/90 rounded-[32px] p-6 md:p-10 shadow-2xl space-y-8">
         
@@ -260,13 +254,12 @@ export default function AccountSettingsPage() {
               Currently active as {displayName} at {schoolName}.
             </p>
           </div>
-          <button 
-            type="button"
-            onClick={() => router.push('/select-role')}
+          <Link
+            href="/select-role"
             className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition shadow-sm"
           >
             Choose another role
-          </button>
+          </Link>
         </div>
 
         {/* Privacy & Consent Card */}

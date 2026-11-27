@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { apiUrl, getApiError, getCooldownSeconds, normalizeKenyanPhone, readApiResponse, roleRoute } from './auth';
+import { apiUrl, getApiError, getCooldownSeconds, isMembership, normalizeKenyanPhone, readApiResponse, roleRoute, type Membership } from './auth';
 
 describe('Kenyan phone normalization', () => {
   it('normalizes accepted Kenyan phone formats', () => {
@@ -68,5 +68,36 @@ describe('API response helpers', () => {
     expect(getCooldownSeconds({ error: { details: { cooldown_seconds: 42 } } })).toBe(42);
     expect(getCooldownSeconds({ error: { details: { cooldown_seconds: 0 } } })).toBeNull();
     expect(getCooldownSeconds(null)).toBeNull();
+  });
+
+  it('honours lockout retry_after and successful request cooldowns', () => {
+    expect(getCooldownSeconds({ error: { details: { retry_after_seconds: 86400 } } })).toBe(86400);
+    expect(getCooldownSeconds({ data: { cooldown_seconds: 60 } })).toBe(60);
+    expect(getApiError({ error: { message: 'Too many requests', details: { retry_after_seconds: 120 } } }, 'Failed')).toBe('Too many requests Please wait 120 seconds.');
+  });
+});
+
+describe('membership contract', () => {
+  const membership: Membership = {
+    id: 'membership-teacher',
+    school_id: 'school-1',
+    school_name: 'Lakeview Secondary',
+    role: 'teacher',
+    badges: [],
+  };
+
+  it('requires the backend membership id and school name', () => {
+    expect(isMembership(membership)).toBe(true);
+    expect(isMembership({ ...membership, id: undefined })).toBe(false);
+    expect(isMembership({ ...membership, school_name: undefined })).toBe(false);
+    expect(isMembership({ school_id: 'school-1', role: 'parent' })).toBe(false);
+  });
+
+  it('keeps two roles at the same school distinct by membership id', () => {
+    const parent: Membership = { ...membership, id: 'membership-parent', role: 'parent' };
+    expect([membership, parent].map((item) => item.id)).toEqual([
+      'membership-teacher',
+      'membership-parent',
+    ]);
   });
 });

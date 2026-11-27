@@ -109,32 +109,47 @@ export default function SystemHealthPage() {
           </div>
 
           {/* Frame Switcher Pills */}
-          <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl border border-slate-200 text-xs font-semibold">
-            <button 
+          <div role="tablist" aria-label="System state frames" className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl border border-slate-200 text-xs font-semibold">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeFrame === '404'}
               onClick={() => setActiveFrame('404')}
               className={`px-3 py-1.5 rounded-xl transition ${activeFrame === '404' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
               Frame 1 • 404
             </button>
-            <button 
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeFrame === '403'}
               onClick={() => setActiveFrame('403')}
               className={`px-3 py-1.5 rounded-xl transition ${activeFrame === '403' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
               Frame 2 • 403
             </button>
-            <button 
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeFrame === 'timeout'}
               onClick={() => setActiveFrame('timeout')}
               className={`px-3 py-1.5 rounded-xl transition ${activeFrame === 'timeout' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
               Frame 3 • Session
             </button>
-            <button 
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeFrame === 'offline'}
               onClick={() => setActiveFrame('offline')}
               className={`px-3 py-1.5 rounded-xl transition ${activeFrame === 'offline' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
               Frame 4 • Offline
             </button>
-            <button 
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeFrame === 'qr'}
               onClick={() => setActiveFrame('qr')}
               className={`px-3 py-1.5 rounded-xl transition ${activeFrame === 'qr' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
             >
@@ -158,13 +173,15 @@ export default function SystemHealthPage() {
                 </p>
               </div>
               <div className="space-y-3 pt-2">
-                <button 
+                <button
+                  type="button"
                   onClick={() => router.push('/')}
                   className="w-full bg-[#008272] hover:bg-[#006e61] text-white font-semibold py-3.5 rounded-2xl transition flex items-center justify-center gap-2 shadow-lg shadow-[#008272]/20 text-sm"
                 >
                   Go to home <ArrowRight className="w-4 h-4" />
                 </button>
-                <button 
+                <button
+                  type="button"
                   onClick={() => router.push('/login')}
                   className="text-xs font-semibold text-[#008272] hover:underline"
                 >
@@ -190,7 +207,8 @@ export default function SystemHealthPage() {
                   Requires Guardian / CBC Lead elevated credentials to access this registry zone.
                 </p>
               </div>
-              <button 
+              <button
+                type="button"
                 onClick={() => router.push('/select-role')}
                 className="w-full bg-[#008272] hover:bg-[#006e61] text-white font-semibold py-3.5 rounded-2xl transition text-sm shadow-md"
               >
@@ -213,7 +231,8 @@ export default function SystemHealthPage() {
                   Auto-logout protection triggered for unattended classroom terminals.
                 </p>
               </div>
-              <button 
+              <button
+                type="button"
                 onClick={() => router.push('/login')}
                 className="w-full bg-[#008272] hover:bg-[#006e61] text-white font-semibold py-3.5 rounded-2xl transition text-sm shadow-md"
               >
@@ -236,7 +255,8 @@ export default function SystemHealthPage() {
                   Full offline fallback active with clear degraded capability notice.
                 </p>
               </div>
-              <button 
+              <button
+                type="button"
                 onClick={() => window.location.reload()}
                 className="w-full bg-slate-800 hover:bg-slate-900 text-white font-semibold py-3.5 rounded-2xl transition text-sm shadow-md"
               >
@@ -259,7 +279,8 @@ export default function SystemHealthPage() {
                   School desk context card and direct telephone fallback required.
                 </p>
               </div>
-              <button 
+              <button
+                type="button"
                 onClick={() => router.push('/login')}
                 className="w-full bg-[#008272] hover:bg-[#006e61] text-white font-semibold py-3.5 rounded-2xl transition text-sm shadow-md"
               >
@@ -286,9 +307,10 @@ export default function SystemHealthPage() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div 
+            <button
+              type="button"
               onClick={() => setActiveFrame('403')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
+              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group text-left"
             >
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 2</span>
@@ -304,11 +326,12 @@ export default function SystemHealthPage() {
                 <span>Inspect Frame</span>
                 <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
               </div>
-            </div>
+            </button>
 
-            <div 
+            <button
+              type="button"
               onClick={() => setActiveFrame('timeout')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
+              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group text-left"
             >
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 3</span>
@@ -324,11 +347,12 @@ export default function SystemHealthPage() {
                 <span>Inspect Frame</span>
                 <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
               </div>
-            </div>
+            </button>
 
-            <div 
+            <button
+              type="button"
               onClick={() => setActiveFrame('offline')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
+              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group text-left"
             >
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 4</span>
@@ -344,11 +368,12 @@ export default function SystemHealthPage() {
                 <span>Inspect Frame</span>
                 <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
               </div>
-            </div>
+            </button>
 
-            <div 
+            <button
+              type="button"
               onClick={() => setActiveFrame('qr')}
-              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group"
+              className="bg-white border border-slate-200 hover:border-[#008272] rounded-2xl p-5 shadow-sm space-y-3 cursor-pointer transition group text-left"
             >
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-slate-400 uppercase">Frame 5</span>
@@ -364,7 +389,7 @@ export default function SystemHealthPage() {
                 <span>Inspect Frame</span>
                 <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition" />
               </div>
-            </div>
+            </button>
           </div>
         </div>
 

@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { 
   Bell, 
   User, 
@@ -122,10 +123,15 @@ const SAMPLE_NOTIFICATIONS: NotificationItem[] = [
   },
 ];
 
+function navClass(active: boolean): string {
+  return `flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${
+    active ? 'text-[#008272] font-semibold' : 'hover:text-slate-800'
+  }`;
+}
+
 export default function NotificationsPage() {
-  const router = useRouter();
+  const pathname = usePathname();
   const [activeTab, setActiveTab] = useState<'all' | 'unread'>('all');
-  const [activeNav, setActiveNav] = useState('alerts');
   const [notifications, setNotifications] = useState<NotificationItem[]>(SAMPLE_NOTIFICATIONS);
 
   const unreadCount = notifications.filter((n) => n.unread).length;
@@ -283,39 +289,22 @@ export default function NotificationsPage() {
 
       {/* Bottom Floating Navigation Bar */}
       <nav aria-label="Primary" className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl p-2 shadow-lg flex items-center justify-around text-xs font-medium text-slate-500 mb-2">
-        <button 
-          type="button"
-          onClick={() => { setActiveNav('home'); router.push('/'); }} 
-          className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'home' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
-        >
+        <Link href="/" aria-current={pathname === '/' ? 'page' : undefined} className={navClass(pathname === '/')}>
           <LayoutGrid className="w-5 h-5" />
           <span>Home</span>
-        </button>
-        <button 
-          type="button"
-          onClick={() => { setActiveNav('roles'); router.push('/select-role'); }} 
-          className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'roles' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
-        >
+        </Link>
+        <Link href="/select-role" aria-current={pathname === '/select-role' ? 'page' : undefined} className={navClass(pathname === '/select-role')}>
           <Users className="w-5 h-5" />
           <span>Roles</span>
-        </button>
-        <button 
-          type="button"
-          onClick={() => setActiveNav('alerts')} 
-          aria-current={activeNav === 'alerts' ? 'page' : undefined}
-          className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'alerts' ? 'text-[#008272] font-semibold' : 'hover:text-slate-800'}`}
-        >
+        </Link>
+        <Link href="/notifications" aria-current={pathname === '/notifications' ? 'page' : undefined} className={navClass(pathname === '/notifications')}>
           <Bell className="w-5 h-5" />
           <span>Alerts</span>
-        </button>
-        <button 
-          type="button"
-          onClick={() => { setActiveNav('settings'); router.push('/settings'); }} 
-          className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition ${activeNav === 'settings' ? 'text-[#008272]' : 'hover:text-slate-800'}`}
-        >
+        </Link>
+        <Link href="/settings" aria-current={pathname === '/settings' ? 'page' : undefined} className={navClass(pathname === '/settings')}>
           <SettingsIcon className="w-5 h-5" />
           <span>Settings</span>
-        </button>
+        </Link>
       </nav>
 
     </div>

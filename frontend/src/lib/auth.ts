@@ -1,9 +1,26 @@
+/** Membership shape returned by POST /api/v1/auth/otp/verify. */
 export type Membership = {
-  school_id?: string | null;
-  role?: string | null;
-  active?: boolean | null;
-  status?: string | null;
+  id: string;
+  school_id: string;
+  school_name: string;
+  role: string;
+  badges?: string[];
 };
+
+export function isMembership(value: unknown): value is Membership {
+  const record = asRecord(value);
+  return Boolean(
+    record &&
+      typeof record.id === 'string' &&
+      record.id &&
+      typeof record.school_id === 'string' &&
+      record.school_id &&
+      typeof record.school_name === 'string' &&
+      record.school_name &&
+      typeof record.role === 'string' &&
+      record.role,
+  );
+}
 
 export function normalizeKenyanPhone(value: string): string | null {
   const cleaned = value.trim().replace(/[\s\-().]/g, '');
@@ -44,7 +61,11 @@ export type ApiResponse = {
   memberships?: unknown;
   error?: {
     message?: string;
-    details?: { cooldown_seconds?: number };
+    details?: {
+      cooldown_seconds?: number;
+      retry_after_seconds?: number;
+      max_attempts?: number;
+    };
   };
 };
 
@@ -54,11 +75,23 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** Extracts a backend cooldown from the standard error envelope. */
+/**
+ * Extracts a retry delay from either the OTP cooldown, a sender/IP lockout, or
+ * a successful OTP request (the backend returns all three in different places).
+ */
 export function getCooldownSeconds(data: unknown): number | null {
-  const error = asRecord(asRecord(data)?.error);
+  const record = asRecord(data);
+  if (!record) return null;
+
+  const error = asRecord(record.error);
   const details = asRecord(error?.details);
-  const cooldown = details?.cooldown_seconds;
+  const success = asRecord(record.data);
+  const cooldown =
+    details?.cooldown_seconds ??
+    details?.retry_after_seconds ??
+    success?.cooldown_seconds ??
+    record.cooldown_seconds;
+
   return typeof cooldown === 'number' && Number.isFinite(cooldown) && cooldown > 0
     ? Math.ceil(cooldown)
     : null;
@@ -86,13 +119,11 @@ export async function readApiResponse(
 
 export function getApiError(data: unknown, fallback: string): string {
   const error = asRecord(asRecord(data)?.error);
-  const message = error?.message;
-  const details = asRecord(error?.details);
-  const cooldown = details?.cooldown_seconds;
-  if (typeof cooldown === 'number') {
-    return `${typeof message === 'string' && message ? message : fallback} Please wait ${cooldown} seconds.`;
-  }
-  return typeof message === 'string' && message ? message : fallback;
+  const message = typeof error?.message === 'string' && error.message ? error.message : fallback;
+  const retryAfter = getCooldownSeconds(data);
+  return retryAfter !== null
+    ? `${message} Please wait ${retryAfter} seconds.`
+    : message;
 }
 
 export function clearStoredAuth() {
