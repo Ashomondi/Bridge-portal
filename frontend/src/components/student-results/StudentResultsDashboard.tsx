@@ -19,9 +19,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import {
-  CBC_LEVEL_VALUE,
   type AdjustmentNotice,
-  type CbcLevelCode,
   type CbcTrendPoint,
   type PerformanceLevel,
   type ResultsTerm,

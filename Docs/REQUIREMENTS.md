@@ -234,7 +234,6 @@ details still to be defined
 
 ## Release phases
 
-<<<<<<< HEAD
 1. **Release 1 (a test with synthetic data; passes when onboarding works,
    parents can log in, and badges work well):** foundation, setup wizard,
    onboarding (staff and parent QR, in-person verification), dean's timetable,
@@ -298,8 +297,9 @@ calendar updates, and fee-change notices) are delivered **in-app only**
 - Who pays for WhatsApp and SMS messages
 - Sports/activities scoring: patron-entered scores vs. participation records
   only
-<<<<<<< HEAD
-- Fee structure variants (boarder/day, optional items)
+- Fee structure variants (boarder/day, optional items); boarding-variant
+  structures (`O13` — `boarder` / `day` classification and mid-term dormitory
+  changes) are deferred past Release 1 (`all` only in R1)
 - What happens to a leftover credit when a student leaves
 - How a shared parent QR links each parent to the right child
 - Whether the principal/deputy can override the dean on assignments,
@@ -308,11 +308,6 @@ calendar updates, and fee-change notices) are delivered **in-app only**
 - Store/caterer module: not yet designed
 
 Settled since the last version: guardian fee visibility (all linked guardians
-see fees, may be revisited); legacy 8-4-4 support (out of scope). Both are
-recorded in `DECISIONS.md`.
-=======
-- Legacy 8-4-4 (Form 3/4) support: in or out of scope
-- Store/caterer module: not yet designed
-- Boarding-variant fee structures (`O13` — `boarder` / `day` classification and
-  mid-term dormitory changes): deferred past Release 1 (`all` only in R1)
->>>>>>> origin/dev
+see fees, may be revisited); legacy 8-4-4 support (out of scope); boarding
+variant fee tiers (deferred in Release 1). These are recorded in
+`DECISIONS.md`.

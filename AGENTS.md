@@ -151,4 +151,3 @@ notifications, nurse, onboarding, whatsapp).
 - Why a past decision was made → `Docs/DECISIONS.md`
 - Coding conventions → `Docs/AGENTS.md`
 - Task breakdown and ownership → `tasks/MASTER-INTEGRATION-PLAN.md`
-filePath: /home/banker/code/open/Ikonex-Academy/AGENTS.md
