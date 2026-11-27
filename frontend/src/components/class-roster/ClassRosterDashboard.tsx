@@ -33,6 +33,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import {
   AVATAR_TONE_CLASSES,
   ROSTER_PAGE_SIZE,
@@ -54,11 +55,12 @@ type NavItem = {
   href?: string;
   active?: boolean;
   badge?: string;
-  dot?: boolean;
 };
 
+const DRAWER_ID = "class-roster-navigation-drawer";
+
 const NAV_ITEMS: NavItem[] = [
-  { label: "Home", icon: Home },
+  { label: "Home", icon: Home, href: "/teacher/overview" },
   { label: "My timetable", icon: CalendarDays, href: "/teacher" },
   {
     label: "My class",
@@ -67,13 +69,13 @@ const NAV_ITEMS: NavItem[] = [
     active: true,
     badge: "Class",
   },
-  { label: "Class means", icon: BarChart3 },
-  { label: "Roll-call", icon: ClipboardCheck },
+  { label: "Class means", icon: BarChart3, href: "/teacher/class-means" },
+  { label: "Roll-call", icon: ClipboardCheck, href: "/teacher/roll-call" },
   { label: "Marks", icon: ClipboardList },
   { label: "Results", icon: Award },
   { label: "Comments", icon: MessageSquare },
   { label: "Add students", icon: UserPlus },
-  { label: "Notifications", icon: Bell, dot: true },
+  { label: "Notifications", icon: Bell },
 ];
 
 type BottomNavItem = {
@@ -85,10 +87,10 @@ type BottomNavItem = {
 };
 
 const BOTTOM_NAV: BottomNavItem[] = [
-  { label: "Home", icon: Home },
+  { label: "Home", icon: Home, href: "/teacher/overview" },
   { label: "Timetable", icon: CalendarDays, href: "/teacher" },
   { label: "Class", icon: UsersRound, active: true, href: "/teacher/class" },
-  { label: "Roll-call", icon: ClipboardCheck },
+  { label: "Roll-call", icon: ClipboardCheck, href: "/teacher/roll-call" },
   { label: "More", icon: MoreHorizontal, opensDrawer: true },
 ];
 
@@ -103,7 +105,7 @@ export default function ClassRosterDashboard({
   roster: ClassRosterData | null;
   isPreview?: boolean;
 }) {
-  const students = roster?.students ?? [];
+  const students = useMemo(() => roster?.students ?? [], [roster?.students]);
   const portalName = roster?.portal?.name?.trim() || "Teacher portal";
   const academicTerm =
     roster?.portal?.academicTerm?.trim() || "No active term";
@@ -125,6 +127,38 @@ export default function ClassRosterDashboard({
   const [attendanceFilter, setAttendanceFilter] = useState("all");
   const [menuOpen, setMenuOpen] = useState(false);
   const detailRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const handleBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", handleBreakpointChange);
+
+    return () => {
+      desktopQuery.removeEventListener("change", handleBreakpointChange);
+    };
+  }, []);
 
   const filteredStudents = useMemo(
     () =>
@@ -173,6 +207,7 @@ export default function ClassRosterDashboard({
 
     if (
       typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
       window.matchMedia("(max-width: 1279px)").matches
     ) {
       window.setTimeout(() => {
@@ -226,6 +261,7 @@ export default function ClassRosterDashboard({
       <MobileAppBar
         className={className}
         userInitials={userInitials}
+        menuOpen={menuOpen}
         onOpenMenu={() => setMenuOpen(true)}
       />
 
@@ -291,7 +327,10 @@ export default function ClassRosterDashboard({
         </main>
       </div>
 
-      <MobileBottomNav onOpenMenu={() => setMenuOpen(true)} />
+      <MobileBottomNav
+        menuOpen={menuOpen}
+        onOpenMenu={() => setMenuOpen(true)}
+      />
 
       {menuOpen && (
         <MobileDrawer
@@ -371,12 +410,6 @@ function SidebarContent({
                 <span className="rounded-full bg-white px-1.5 py-0.5 text-[8px] font-bold text-brand-700 ring-1 ring-brand-100">
                   {item.badge}
                 </span>
-              )}
-              {item.dot && (
-                <>
-                  <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
-                  <span className="sr-only">Unread notifications</span>
-                </>
               )}
             </>
           );
@@ -475,8 +508,6 @@ function DesktopHeader({
             aria-label="Notifications unavailable"
           >
             <Bell className="h-[18px] w-[18px]" />
-            <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
-            <span className="sr-only">Unread notifications</span>
           </button>
 
           <button
@@ -507,10 +538,12 @@ function DesktopHeader({
 function MobileAppBar({
   className,
   userInitials,
+  menuOpen,
   onOpenMenu,
 }: {
   className: string;
   userInitials: string;
+  menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
   return (
@@ -519,6 +552,8 @@ function MobileAppBar({
         <button
           type="button"
           onClick={onOpenMenu}
+          aria-expanded={menuOpen}
+          aria-controls={DRAWER_ID}
           className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600"
           aria-label="Open navigation menu"
         >
@@ -545,8 +580,6 @@ function MobileAppBar({
             aria-label="Notifications unavailable"
           >
             <Bell className="h-5 w-5" />
-            <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white" />
-            <span className="sr-only">Unread notifications</span>
           </button>
           <button
             type="button"
@@ -854,6 +887,8 @@ function RosterTable({
                     <td className="px-4 py-3.5 sm:px-5">
                       <button
                         type="button"
+                        aria-pressed={active}
+                        aria-label={`Select ${student.name}`}
                         className="rounded text-xs font-semibold text-brand-600 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600 focus-visible:ring-offset-2"
                         onClick={(event) => {
                           event.stopPropagation();
@@ -919,6 +954,8 @@ function RosterTable({
               <button
                 key={student.id}
                 type="button"
+                aria-pressed={active}
+                aria-label={`Select ${student.name}`}
                 onClick={() => onSelect(student)}
                 className={cn(
                   "w-full px-4 py-3.5 text-left transition",
@@ -1160,10 +1197,6 @@ function StudentDetail({ student }: { student: RosterStudent }) {
         <div className="mt-5 border-t border-slate-100 pt-5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-bold text-slate-800">Guardians</h3>
-            <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-brand-700">
-              <Lock className="h-3 w-3" />
-              Data encrypted
-            </span>
           </div>
 
           <div className="mt-3 space-y-2">
@@ -1305,10 +1338,6 @@ function EmptyStudentDetail() {
         <div className="mt-5 border-t border-slate-100 pt-5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-bold text-slate-800">Guardians</h3>
-            <span className="inline-flex items-center gap-1 text-[9px] font-semibold text-brand-700">
-              <Lock className="h-3 w-3" />
-              Data encrypted
-            </span>
           </div>
           <div className="mt-3 rounded-xl bg-[#F8FAF9] p-3.5 text-center ring-1 ring-slate-100">
             <p className="text-[11px] font-medium text-slate-500">
@@ -1372,6 +1401,7 @@ function ActionAndPolicyCards({ disabled = false }: { disabled?: boolean }) {
       <button
         type="button"
         disabled={disabled}
+        title="Assessment portfolio is not available yet"
         className="flex w-full items-center justify-between gap-3 rounded-2xl border border-brand-100 bg-[#E8F5F3] px-4 py-3.5 text-left text-[11px] font-semibold text-brand-800 shadow-sm transition hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span className="inline-flex items-center gap-2">
@@ -1391,8 +1421,8 @@ function ActionAndPolicyCards({ disabled = false }: { disabled?: boolean }) {
               Data protection
             </p>
             <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-              [Compliance disclaimer] Student and guardian information is
-              accessed under school policy and data-protection rules.
+              Student and guardian information is accessed under school
+              policy and the Data Protection Act, 2019.
             </p>
           </div>
         </div>
@@ -1434,7 +1464,13 @@ function MetricCard({
 }
 
 /** Mobile bottom navigation. Implemented destinations link out; "More" opens the drawer. */
-function MobileBottomNav({ onOpenMenu }: { onOpenMenu: () => void }) {
+function MobileBottomNav({
+  menuOpen,
+  onOpenMenu,
+}: {
+  menuOpen: boolean;
+  onOpenMenu: () => void;
+}) {
   return (
     <nav
       aria-label="Mobile navigation"
@@ -1465,6 +1501,8 @@ function MobileBottomNav({ onOpenMenu }: { onOpenMenu: () => void }) {
                 key={item.label}
                 type="button"
                 onClick={onOpenMenu}
+                aria-expanded={menuOpen}
+                aria-controls={DRAWER_ID}
                 className={itemClassName}
               >
                 {content}
@@ -1519,60 +1557,7 @@ function MobileDrawer({
   userInitials: string;
   onClose: () => void;
 }) {
-  const drawerRef = useRef<HTMLDivElement | null>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const drawer = drawerRef.current;
-
-    const getFocusable = () =>
-      drawer
-        ? Array.from(
-            drawer.querySelectorAll<HTMLElement>(
-              'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])',
-            ),
-          ).filter((element) => element.offsetParent !== null)
-        : [];
-
-    getFocusable()[0]?.focus();
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-
-      if (event.key !== "Tab") {
-        return;
-      }
-
-      const focusable = getFocusable();
-      if (focusable.length === 0) {
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      previouslyFocused?.focus();
-    };
-  }, []);
+  const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   return (
     <div className="fixed inset-0 z-50 lg:hidden print:hidden">
@@ -1585,10 +1570,12 @@ function MobileDrawer({
       />
       <div
         ref={drawerRef}
+        id={DRAWER_ID}
         role="dialog"
         aria-modal="true"
         aria-label="Navigation menu"
-        className="absolute inset-y-0 left-0 flex w-[84%] max-w-[320px] flex-col bg-white shadow-2xl animate-drawer-in"
+        tabIndex={-1}
+        className="absolute inset-y-0 left-0 flex w-[84%] max-w-[320px] flex-col bg-white shadow-2xl outline-none animate-drawer-in"
       >
         <div className="flex items-center justify-between px-5 pt-5">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
@@ -1597,6 +1584,7 @@ function MobileDrawer({
           <button
             type="button"
             onClick={onClose}
+            data-autofocus
             className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100"
             aria-label="Close navigation menu"
           >

@@ -38,6 +38,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import {
   buildDayEntries,
   formatDateLabel,
@@ -67,13 +68,15 @@ type TimetableDashboardProps = {
 
 type SyncState = "idle" | "syncing" | "done";
 
+const DRAWER_ID = "timetable-navigation-drawer";
+
 const SIDEBAR_ITEMS: {
   label: string;
   icon: LucideIcon;
   href?: string;
   active?: boolean;
 }[] = [
-  { label: "Dashboard", icon: LayoutDashboard },
+  { label: "Dashboard", icon: LayoutDashboard, href: "/teacher/overview" },
   { label: "My Timetable", icon: CalendarDays, href: "/teacher", active: true },
   { label: "My Classes", icon: UsersRound, href: "/teacher/class" },
   { label: "Attendance", icon: ClipboardCheck },
@@ -82,7 +85,7 @@ const SIDEBAR_ITEMS: {
 ];
 
 const BOTTOM_NAV = [
-  { label: "Home", icon: DashboardNavIcon },
+  { label: "Home", icon: DashboardNavIcon, href: "/teacher/overview" },
   { label: "Timetable", icon: TimetableNavIcon, href: "/teacher", active: true },
   { label: "Classes", icon: ClassesNavIcon, href: "/teacher/class" },
   { label: "Library", icon: ResourcesNavIcon },
@@ -126,7 +129,7 @@ export default function TimetableDashboard({
   week,
 }: TimetableDashboardProps) {
   const settings = timetable?.settings ?? null;
-  const slots = timetable?.slots ?? [];
+  const slots = useMemo(() => timetable?.slots ?? [], [timetable?.slots]);
   const router = useRouter();
   const todayIndex = week.findIndex((day) => day.isToday);
   const initialIndex = todayIndex >= 0 ? todayIndex : Math.max(week.length - 1, 0);
@@ -195,14 +198,34 @@ export default function TimetableDashboard({
       }
     };
 
+    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", handleKeyDown);
 
     return () => {
-      document.body.style.overflow = "";
+      document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [menuOpen, settingsOpen]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const desktopQuery = window.matchMedia("(min-width: 1024px)");
+    const handleBreakpointChange = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        setMenuOpen(false);
+      }
+    };
+
+    desktopQuery.addEventListener("change", handleBreakpointChange);
+
+    return () => {
+      desktopQuery.removeEventListener("change", handleBreakpointChange);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -232,6 +255,7 @@ export default function TimetableDashboard({
     <div className="min-h-screen bg-[#F6F8F8] text-slate-900">
       <MobileAppBar
         schoolName={schoolName}
+        menuOpen={menuOpen}
         onOpenMenu={() => setMenuOpen(true)}
       />
 
@@ -449,9 +473,11 @@ export default function TimetableDashboard({
 
 function MobileAppBar({
   schoolName,
+  menuOpen,
   onOpenMenu,
 }: {
   schoolName: string;
+  menuOpen: boolean;
   onOpenMenu: () => void;
 }) {
   return (
@@ -460,6 +486,8 @@ function MobileAppBar({
         <button
           type="button"
           onClick={onOpenMenu}
+          aria-expanded={menuOpen}
+          aria-controls={DRAWER_ID}
           className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
           aria-label="Open navigation menu"
         >
@@ -1506,15 +1534,26 @@ function MobileDrawer({
   schoolName: string;
   onClose: () => void;
 }) {
+  const drawerRef = useFocusTrap<HTMLDivElement>(true, onClose);
+
   return (
     <div className="fixed inset-0 z-50 lg:hidden print:hidden">
       <button
         type="button"
         onClick={onClose}
+        tabIndex={-1}
         className="absolute inset-0 cursor-default bg-slate-900/40 backdrop-blur-sm animate-fade-in"
         aria-label="Close navigation menu"
       />
-      <div className="absolute inset-y-0 left-0 flex w-[84%] max-w-[320px] flex-col bg-white p-5 shadow-2xl animate-drawer-in">
+      <div
+        ref={drawerRef}
+        id={DRAWER_ID}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation menu"
+        tabIndex={-1}
+        className="absolute inset-y-0 left-0 flex w-[84%] max-w-[320px] flex-col bg-white p-5 shadow-2xl outline-none animate-drawer-in"
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-brand-500 text-white shadow-lg shadow-brand-500/20">
@@ -1532,6 +1571,7 @@ function MobileDrawer({
           <button
             type="button"
             onClick={onClose}
+            data-autofocus
             className="grid h-9 w-9 place-items-center rounded-xl bg-slate-50 text-slate-500 transition hover:bg-slate-100"
             aria-label="Close navigation menu"
           >
